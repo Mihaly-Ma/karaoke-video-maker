@@ -99,6 +99,43 @@ def burn(
         raise RuntimeError(msg)
 
 
+def _extract_audio(ffmpeg: str, video: Path, out: Path) -> Path:
+    """从视频抽出音轨。
+
+    注意 ffmpeg 默认会**静默吃掉容器起始偏移**：若 start_time 非零，
+    抽出的 wav 的 0 时刻等于容器的 start_time 时刻，整轨会短一截。
+    本项目的素材实测 start_time=0，但换源时必须重新核算。
+    """
+    cmd = [
+        ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+        "-i", str(video), "-vn", "-c:a", "pcm_s16le", str(out),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, timeout=1800)
+    if proc.returncode != 0:
+        msg = f"抽取音轨失败：{proc.stderr.decode(errors='replace')[-600:]}"
+        raise RuntimeError(msg)
+    return out
+
+
+def _mix_audio(ffmpeg: str, base: Path, overlay: Path, out: Path) -> Path:
+    """把引导声叠加到伴奏上。
+
+    `amix` 必须带 `normalize=0`：默认会按输入数量做平均，
+    伴奏音量会被直接砍半，听起来像是引导声"压过"了伴奏。
+    """
+    cmd = [
+        ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+        "-i", str(base), "-i", str(overlay),
+        "-filter_complex", "amix=inputs=2:normalize=0:duration=first",
+        "-c:a", "pcm_s16le", str(out),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, timeout=1800)
+    if proc.returncode != 0:
+        msg = f"混音失败：{proc.stderr.decode(errors='replace')[-600:]}"
+        raise RuntimeError(msg)
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="QRC → ASS → 成品视频")
     ap.add_argument("--video", type=Path, required=True)
@@ -118,6 +155,11 @@ def main() -> int:
         "--drums", type=Path, default=None,
         help="鼓组 stem，用于节拍检测（引导点踩拍）。缺省则用 --audio 或视频音轨",
     )
+    ap.add_argument(
+        "--guide-vocals", type=Path, default=None,
+        help="人声 stem。给出后会合成引导声（ガイドメロディ）并混入 --audio",
+    )
+    ap.add_argument("--guide-gain", type=float, default=0.16, help="引导声音量")
     ap.add_argument("--no-beat", action="store_true", help="跳过节拍检测")
     ap.add_argument("--start", type=float, default=None, help="截取起点秒（用于试渲染）")
     ap.add_argument("--duration", type=float, default=None, help="截取时长秒")
@@ -190,11 +232,28 @@ def main() -> int:
     if args.ass_only:
         return 0
 
+    audio_track = args.audio
+    if args.guide_vocals:
+        from kvm.pipeline.guide_melody import build_guide_track
+
+        guide_path = args.out.with_name("guide_melody.wav")
+        print("合成引导声…（pYIN 提取音高，耗时约为曲长的 1/7）")
+        n_notes = build_guide_track(
+            args.guide_vocals, guide_path, info["duration"], gain=args.guide_gain
+        )
+        print(f"引导声   : {n_notes} 个音符 → {guide_path.name}")
+        if audio_track is None:
+            print("⚠️ 未指定 --audio，引导声将叠加在原始音轨上（通常应配合伴奏使用）")
+            audio_track = _extract_audio(ffmpeg, args.video, args.out.with_name("src_audio.wav"))
+        mixed = args.out.with_name("audio_with_guide.wav")
+        _mix_audio(ffmpeg, audio_track, guide_path, mixed)
+        audio_track = mixed
+
     args.out.parent.mkdir(parents=True, exist_ok=True)
     print("烧录中…")
     burn(
         ffmpeg, args.video, ass_path, args.out,
-        audio=args.audio, start_s=args.start, duration_s=args.duration,
+        audio=audio_track, start_s=args.start, duration_s=args.duration,
     )
     size_mb = args.out.stat().st_size / 1024 / 1024
     print(f"完成     : {args.out}  ({size_mb:.1f} MB)")
