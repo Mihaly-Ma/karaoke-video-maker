@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import pairwise
 
 from kvm.models.karaoke import KaraokeProject, Line, RubySpan
 from kvm.render.text_metrics import FontSpec, LibassMetrics
@@ -347,7 +348,7 @@ class AssBuilder:
         avail = p.video_width - st.margin_h * 2
 
         out: list[_LaidOutLine] = []
-        for ln, adv in zip(lines, all_adv):
+        for ln, adv in zip(lines, all_adv, strict=False):
             raw_w = adv[-1] if adv else 0
 
             # 超宽的行水平压缩而不是任其溢出。压缩后所有 x 同比缩放，
@@ -413,7 +414,6 @@ class AssBuilder:
             f"\\1c{pal.sung_fill}\\3c{pal.sung_outline}",
             f"\\clip({lo.x0},0,{lo.x0},{h})",
         ]
-        line_start = ln.start_ms + off
         for i, tk in enumerate(ln.tokens):
             # dur=0 的块（QRC 实测存在，多为半角空格）会触发 libass #124，
             # 必须跳过而不是输出零时长动画
@@ -583,7 +583,7 @@ def _find_credit_window(
     if head_end >= min_dur_ms + pad_ms:
         return (0, head_end - pad_ms)
 
-    for a, b in zip(singable, singable[1:]):
+    for a, b in pairwise(singable):
         g0 = a.end_ms + offset_ms + style.lead_out_ms
         g1 = b.start_ms + offset_ms - style.max_lead_ms
         if g1 - g0 >= min_dur_ms + pad_ms * 2:
@@ -607,7 +607,7 @@ def _layout_ruby(
     """
     items = []
     n_chars = len(char_x) - 1
-    for r, w in zip(spans, widths):
+    for r, w in zip(spans, widths, strict=False):
         if not (0 <= r.start < r.end <= n_chars) or w <= 0:
             continue
         bx0, bx1 = char_x[r.start], char_x[r.end]
@@ -644,4 +644,4 @@ def _layout_ruby(
         if not changed:
             break
 
-    return [(it["r"], it["w"], int(round(max(0, it["x0"])))) for it in items]
+    return [(it["r"], it["w"], round(max(0, it["x0"]))) for it in items]

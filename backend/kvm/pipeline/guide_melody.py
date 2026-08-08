@@ -62,7 +62,7 @@ def extract_notes(
             GuideNote(start_s=cur_start, end_s=end_t, freq_hz=float(np.median(cur_freqs)))
         )
 
-    for t, f, v in zip(times, f0, voiced):
+    for t, f, v in zip(times, f0, voiced, strict=False):
         ok = bool(v) and f is not None and np.isfinite(f) and f > 0
         if not ok:
             flush(float(t))

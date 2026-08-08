@@ -25,7 +25,7 @@ class BeatGrid:
     """每个拍点的时间（毫秒），升序。"""
 
     def beat_period_ms(self) -> int:
-        return int(round(60000.0 / self.bpm)) if self.bpm > 0 else 0
+        return round(60000.0 / self.bpm) if self.bpm > 0 else 0
 
     def beats_before(self, t_ms: int, n: int) -> list[int]:
         """返回 `t_ms` 之前最近的 n 个拍点，升序。不足 n 个则有多少给多少。"""
@@ -52,7 +52,7 @@ def detect_beats(audio_path: Path, *, drums_path: Path | None = None) -> BeatGri
         if times is None or len(times) < 4:
             return None
         bpm = float(np.atleast_1d(tempo)[0])
-        return BeatGrid(bpm=bpm, beats_ms=[int(round(t * 1000)) for t in times])
+        return BeatGrid(bpm=bpm, beats_ms=[round(t * 1000) for t in times])
     except Exception:
         # 节拍检测是增强项，任何失败都不应阻断出片
         return None

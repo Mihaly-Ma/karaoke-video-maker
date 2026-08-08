@@ -1,0 +1,69 @@
+[project]
+name = "karaoke-video-maker"
+version = "0.1.0"
+description = "一站式日式卡拉OK（ニコカラ）视频制作工具"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+
+# 依赖刻意分组：核心出片链路很轻，重依赖（torch/librosa）只在需要时装。
+# 见 CLAUDE.md §2.6 —— 应用最终要能自动获取这些，而不是要求用户手动安装。
+dependencies = [
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+# 节拍检测与引导声。librosa 会拉入 numba/llvmlite，必须约束版本：
+# 不约束时会解析到不兼容 Python 3.12 的 numba 0.53 并编译失败。
+audio = [
+    "librosa>=0.11",
+    "numba>=0.61",
+    "llvmlite>=0.44",
+    "soundfile>=0.12",
+]
+# 人声分离。audio-separator 不会自动带上 onnxruntime，必须显式声明。
+separate = [
+    "audio-separator>=0.44",
+    "onnxruntime>=1.20",
+]
+download = [
+    "yt-dlp>=2026.7",
+]
+lyrics = [
+    "requests>=2.32",
+    "pycryptodome>=3.20",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E", "W",    # pycodestyle
+    "F",         # pyflakes
+    "I",         # isort
+    "UP",        # pyupgrade
+    "B",         # bugbear
+    "SIM",       # simplify
+    "RUF",       # ruff 专有
+    "PTH",       # 用 pathlib 而非 os.path
+]
+ignore = [
+    # 本项目大量调用 ffmpeg/yt-dlp 等外部工具，命令由代码构造、不含用户输入拼接，
+    # 逐处标注 check=False 与 S603 只会增加噪声而无安全收益
+    "S603", "S607",
+    # 中文注释与文档字符串里的全角标点会被误判为行宽问题，实际可读性没有问题
+    "E501",
+    # 实验脚本以 print 输出结论，这是它们的用途
+    "T201",
+    # 本项目的注释、文档字符串与错误信息一律用中文，全角标点是有意为之。
+    # 这三条把全角冒号、括号等一律判为"可疑 Unicode"，在中文项目里全是误报。
+    "RUF001", "RUF002", "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 实验脚本是一次性验证代码，允许更松的写法
+"experiments/**" = ["B", "SIM", "RUF"]
+
+[tool.ruff.format]
+quote-style = "double"

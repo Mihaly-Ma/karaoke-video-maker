@@ -131,7 +131,7 @@ class LibassMetrics:
             measured.extend(self._render_and_measure(chunk, font))
 
         acc: dict[str, list[int]] = {t: [0] * len(t) for t in texts}
-        for (t, i), x in zip(index, measured):
+        for (t, i), x in zip(index, measured, strict=False):
             acc[t][i] = max(0, x - base)
 
         for t, adv in acc.items():

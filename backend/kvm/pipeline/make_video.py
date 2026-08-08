@@ -13,10 +13,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent))
 
-from kvm.models.karaoke import VoicePalette  # noqa: E402
-from kvm.pipeline.qrc_import import load_project  # noqa: E402
-from kvm.render.ass_builder import AssBuilder  # noqa: E402
-from kvm.render.text_metrics import LibassMetrics  # noqa: E402
+from kvm.models.karaoke import VoicePalette
+from kvm.pipeline.qrc_import import load_project
+from kvm.render.ass_builder import AssBuilder
+from kvm.render.text_metrics import LibassMetrics
 
 _REPO = Path(__file__).resolve().parents[2].parent
 
