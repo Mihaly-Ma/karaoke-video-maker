@@ -29,3 +29,7 @@ experiments/out/
 
 # 系统
 .DS_Store
+
+# 预览字体：从用户系统提取并子集化的产物，运行时按需生成。
+# 卡拉OK 常用的 ヒラギノ/游ゴシック 等是 Apple/微软专有字体，不得随仓库分发。
+frontend/public/fonts/

@@ -1,0 +1,230 @@
+import { create } from 'zustand'
+import * as api from '../api/client'
+import type { Line, LockTarget, Palette, Project, Token, TimingEdit } from '../api/types'
+
+/**
+ * 编辑器状态层。
+ *
+ * 撤销/重做由**后端**持有（见 backend/kvm/api/store.py）：工程文件是唯一真源，
+ * 前端只是它的视图。把历史放前端会在多窗口、崩溃恢复、以及"后端自动重算"
+ * 这三种场景下与真源脱节。
+ *
+ * 前端只维护「选择」与「播放位置」这类纯视图状态。
+ *
+ * ## 播放状态的唯一写入者是 Preview（单一时钟）
+ *
+ * `playheadMs` / `playing` / `playbackRate` 这三个字段构成**唯一的播放时钟**，
+ * 执行者只有 `Preview.tsx` 一个：它按 CLAUDE.md D15 用 Web Audio 当主时钟、
+ * `<video>` 当从动方。别的组件一律**不许自己起播放器**，只能：
+ *
+ * - 写这三个字段 = 发出「跳到这里 / 播 / 停 / 变速」的**意图**；
+ * - 读 `playheadMs` = 显示（画播放头、跟随滚动、打点取时间）。
+ *
+ * Preview 收到意图后执行真正的 seek / play，再把落地后的真实位置写回
+ * `playheadMs`，并用「最后一次自己写入的值」切断回环（见 Preview 的 `lastEmittedRef`）。
+ * 曾经波形层也有一份自己的时钟并把结果写回这里，两个时钟互相追时间，
+ * 表现为播放头抖动 + 多余 seek —— 不要再引入第二个时钟。
+ */
+
+export type Selection =
+  | { kind: 'none' }
+  | { kind: 'line'; lineId: string }
+  | { kind: 'token'; lineId: string; tokenIndex: number }
+
+interface ProjectState {
+  project: Project | null
+  loading: boolean
+  error: string | null
+
+  /**
+   * 播放头位置（毫秒，音频时间基准）。
+   *
+   * 播放中由 Preview 逐帧写入；其它组件写它表示「请求跳到这里」（见文件头）。
+   */
+  playheadMs: number
+  /** 期望的播放状态。写 true/false 即「请播放/请暂停」，由 Preview 执行。 */
+  playing: boolean
+  /**
+   * 播放速率。打轴推荐 0.5~0.75x（CLAUDE.md §5.10）。
+   *
+   * 放在 store 而不是时间轴本地状态：真正变速的是 Preview 的音频引擎与 `<video>`，
+   * 时间轴只是那个下拉框所在的地方。
+   */
+  playbackRate: number
+  selection: Selection
+  /** 试听伴奏还是原声。调轴时切到伴奏更容易听清节拍。 */
+  audioMode: 'original' | 'instrumental'
+
+  canUndo: boolean
+  canRedo: boolean
+
+  load: (id: string) => Promise<void>
+  create: (title?: string, artist?: string) => Promise<string>
+  refresh: () => Promise<void>
+
+  setPlayhead: (ms: number) => void
+  setPlaying: (v: boolean) => void
+  setPlaybackRate: (v: number) => void
+  select: (s: Selection) => void
+  setAudioMode: (m: 'original' | 'instrumental') => void
+
+  undo: () => Promise<void>
+  redo: () => Promise<void>
+
+  /** 三级调轴统一入口。scope=global 时忽略 target。 */
+  shift: (scope: 'global' | 'line' | 'token', deltaMs: number) => Promise<void>
+  setTiming: (lineId: string, tokenIndex: number, startMs?: number, durMs?: number) => Promise<void>
+  /**
+   * 批量改时间，整批作为一个 undo 单元——打完一首歌的打轴结果应走这个，
+   * 而不是循环调用 setTiming（后者会占掉同样多的撤销步数）。
+   */
+  setTimings: (edits: TimingEdit[]) => Promise<void>
+  /** 设置/清除 locked_timing 或 ruby 的 locked */
+  setLock: (target: LockTarget) => Promise<void>
+  setRuby: (lineId: string, start: number, end: number, text: string) => Promise<void>
+  splitLine: (lineId: string, tokenIndex: number) => Promise<void>
+  mergeLine: (lineId: string) => Promise<void>
+  setVoicePart: (lineId: string, voicePart: string, range?: [number, number]) => Promise<void>
+  updateStyle: (patch: Partial<Project['style']>) => Promise<void>
+  updatePalettes: (patch: Record<string, Palette>) => Promise<void>
+  /** 把歌词候选写入当前工程 */
+  applyLyrics: (provider: string, songId: string) => Promise<void>
+  /** 手工导入歌词：纯文本 / LRC / 已解密的 QRC。一站式的手工旁路，随时可用（CLAUDE.md §2.5） */
+  importLyrics: (kind: 'text' | 'lrc' | 'qrc', content: string, replace?: boolean) => Promise<void>
+}
+
+export const useProject = create<ProjectState>((set, get) => {
+  const apply = (p: Project) => set({ project: p, error: null })
+
+  const withProject = async (fn: (id: string) => Promise<Project>) => {
+    const p = get().project
+    if (!p) return
+    try {
+      apply(await fn(p.id))
+      const h = await api.history(p.id)
+      set({ canUndo: h.undo > 0, canRedo: h.redo > 0 })
+    } catch (e) {
+      set({ error: e instanceof Error ? e.message : String(e) })
+    }
+  }
+
+  return {
+    project: null,
+    loading: false,
+    error: null,
+    playheadMs: 0,
+    playing: false,
+    playbackRate: 1,
+    selection: { kind: 'none' },
+    audioMode: 'original',
+    canUndo: false,
+    canRedo: false,
+
+    load: async (id) => {
+      set({ loading: true })
+      try {
+        apply(await api.getProject(id))
+        const h = await api.history(id)
+        set({ canUndo: h.undo > 0, canRedo: h.redo > 0 })
+      } catch (e) {
+        set({ error: e instanceof Error ? e.message : String(e) })
+      } finally {
+        set({ loading: false })
+      }
+    },
+
+    create: async (title, artist) => {
+      const p = await api.createProject(title, artist)
+      apply(p)
+      return p.id
+    },
+
+    refresh: async () => {
+      const p = get().project
+      if (p) apply(await api.getProject(p.id))
+    },
+
+    setPlayhead: (ms) => set({ playheadMs: ms }),
+    setPlaying: (v) => set({ playing: v }),
+    setPlaybackRate: (v) => set({ playbackRate: v }),
+    select: (s) => set({ selection: s }),
+    setAudioMode: (m) => set({ audioMode: m }),
+
+    undo: () => withProject(api.undo),
+    redo: () => withProject(api.redo),
+
+    shift: async (scope, deltaMs) => {
+      const sel = get().selection
+      await withProject((id) =>
+        api.shift({
+          project_id: id,
+          scope,
+          delta_ms: deltaMs,
+          line_id: sel.kind !== 'none' ? sel.lineId : null,
+          token_index: sel.kind === 'token' ? sel.tokenIndex : null,
+        }),
+      )
+    },
+
+    setTiming: async (lineId, tokenIndex, startMs, durMs) =>
+      withProject((id) =>
+        api.setTiming({
+          project_id: id,
+          line_id: lineId,
+          token_index: tokenIndex,
+          start_ms: startMs ?? null,
+          dur_ms: durMs ?? null,
+        }),
+      ),
+
+    setTimings: async (edits) => withProject((id) => api.setTimings(id, edits)),
+
+    setLock: async (target) => withProject((id) => api.setLock(id, target)),
+
+    setRuby: async (lineId, start, end, text) =>
+      withProject((id) => api.setRuby({ project_id: id, line_id: lineId, start, end, text })),
+
+    splitLine: async (lineId, tokenIndex) =>
+      withProject((id) => api.splitLine({ project_id: id, line_id: lineId, token_index: tokenIndex })),
+
+    mergeLine: async (lineId) => withProject((id) => api.mergeLine({ project_id: id, line_id: lineId })),
+
+    setVoicePart: async (lineId, voicePart, range) =>
+      withProject((id) =>
+        api.setVoicePart({
+          project_id: id,
+          line_id: lineId,
+          voice_part: voicePart,
+          token_range: range ?? null,
+        }),
+      ),
+
+    updateStyle: async (patch) => withProject((id) => api.updateStyle(id, patch)),
+
+    updatePalettes: async (patch) => withProject((id) => api.updatePalettes(id, patch)),
+
+    applyLyrics: async (provider, songId) =>
+      withProject((id) => api.applyLyrics(id, provider, songId)),
+
+    importLyrics: async (kind, content, replace) =>
+      withProject((id) => api.importLyrics(id, kind, content, replace)),
+  }
+})
+
+/** 找出播放头当前所在的行与 token，供预览高亮与"跟随播放"使用。 */
+export function locate(project: Project | null, ms: number): { line?: Line; token?: Token; tokenIndex: number } {
+  if (!project) return { tokenIndex: -1 }
+  const t = ms - project.global_offset_ms
+  for (const line of project.lines) {
+    if (!line.tokens.length || line.is_metadata) continue
+    const s = line.tokens[0].start_ms
+    const e = line.tokens[line.tokens.length - 1].start_ms + line.tokens[line.tokens.length - 1].dur_ms
+    if (t < s || t > e) continue
+    for (let i = 0; i < line.tokens.length; i++) {
+      const tk = line.tokens[i]
+      if (t >= tk.start_ms && t <= tk.start_ms + tk.dur_ms) return { line, token: tk, tokenIndex: i }
+    }
+    return { line, tokenIndex: -1 }
+  }
+  return { tokenIndex: -1 }
+}

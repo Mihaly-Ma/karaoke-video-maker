@@ -12,6 +12,21 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# HTTP API 层。此前各模块都靠 `uv run --with ...` 临时依赖验证，
+# 导致后端进程实际起不来 —— 补齐后 `uv run uvicorn kvm.api.app:app` 才能跑。
+api = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "python-multipart>=0.0.12",
+    "httpx>=0.27",
+]
+# 字体服务与预览字体子集化。brotli 供 woff2 读写；
+# 注意产出给 libass 的字体必须是 OTF/TTF，woff2 只用于读取源文件。
+fonts = [
+    "fonttools>=4.55",
+    "brotli>=1.1",
+]
 # 节拍检测与引导声。librosa 会拉入 numba/llvmlite，必须约束版本：
 # 不约束时会解析到不兼容 Python 3.12 的 numba 0.53 并编译失败。
 audio = [

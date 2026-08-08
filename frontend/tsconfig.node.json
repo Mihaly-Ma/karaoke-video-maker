@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    // composite 要求可产出声明文件，不能设 noEmit——把产物与增量构建信息
+    // 都挪到 node_modules 下，不污染源码目录（vite.config.ts 本身不会被引用）
+    "composite": true,
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo",
+    "outDir": "./node_modules/.tmp/node-build",
+    "skipLibCheck": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "allowSyntheticDefaultImports": true,
+    "strict": true
+  },
+  "include": ["vite.config.ts"]
+}

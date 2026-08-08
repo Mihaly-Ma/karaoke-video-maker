@@ -1,0 +1,1688 @@
+/**
+ * 三级调轴时间轴 —— 本工具的核心界面。
+ *
+ * CLAUDE.md §2.5：**自动化可以打折，一站式不能**。所以这个组件的验收标准不是
+ * 「自动对齐跑完之后能微调」，而是**哪怕自动对齐完全不可用，用户也能从零打完一首歌**。
+ * 由此推出下面几条设计：
+ *
+ * ## 三级调轴（§1「三级调轴 UI 就是核心功能」）
+ *
+ * | 级别 | 交互 | 落到哪里 |
+ * |---|---|---|
+ * | 整体 | 顶部偏移滑块 / 数字框 / 归零 | `project.global_offset_ms`，**不动任何 token** |
+ * | 单句 | 拖「行轨」上的整条，或选中行后按方向键 | `shift(scope='line')` |
+ * | 单词 | 拖「词轨」上的 token 本体或它的左右边界 | `shift(scope='token')` / `setTiming` |
+ *
+ * 整体偏移刻意不写进 token 时间：写进去就再也回不来了，而重锚定（§5.3）本身
+ * 是个高不确定性的自动环节，用户必须能随时归零重来。
+ *
+ * ## tap-to-time 是一等公民，不是降级方案
+ *
+ * 摆在工具栏第一排，按 `T` 直接进入。空格/回车逐字打点、退格回退上一个点、
+ * 点任意字即可从那里开始打。**打点面板按「字的顺序」排列而不是按时间位置排列**——
+ * 纯文本歌词刚导入时所有 token 时间都是 0，按时间摆的话它们全叠在原点，
+ * 那个界面根本没法用，而这恰恰是「从零打完一首歌」的起点。
+ *
+ * ## 来源可见（§4.4 / §7.4）
+ *
+ * 每个 token 按 `timing_source` 着色：`interpolated`（插值推算，最不可信）加斜纹，
+ * `unset`（还没打过轴）用中性灰 + 虚线边框，另有一枚常驻的「尚未打轴 N/M 字」徽标。
+ * 用户需要知道该复核哪几个字、还差多少字没打，而不是面对一堆看起来同样自信的数字
+ * 逐个核对。
+ *
+ * ## 时间从哪来：没有自己的播放器
+ *
+ * 播放位置、播放状态、试听速率全部来自 store，唯一写入者是 `Preview.tsx`
+ * （CLAUDE.md D15：Web Audio 主时钟 + `<video>` 从动）。本组件只做两件事：
+ * 读播放头来画播放头标记、跟随滚动、取打点时间；把用户的播放/暂停/跳转/变速
+ * **意图**写回 store。波形层曾经自带一份时钟并把结果写回 store，与预览层互相追时间，
+ * 表现为播放头抖动 —— 不要恢复那条路。
+ *
+ * ## 跟手
+ *
+ * 编辑要往后端发请求，因此拖动全程只改本地预览状态，**松手才提交**；
+ * 打轴的一串点也先攒在本地草稿里，暂停 / 退出 / 手动提交时才落库。
+ * 所有请求排成一条串行队列 —— 每个编辑接口都返回整份工程，并发发出去的话
+ * 后到的旧响应会把新改动覆盖掉。
+ */
+
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
+
+import * as api from '../api/client'
+import type { Line, Token } from '../api/types'
+import { locate, useProject } from '../state/projectStore'
+import {
+  buildTicks,
+  clamp,
+  clampPxPerSec,
+  clampScroll,
+  contentWidthPx,
+  createScale,
+  fitPxPerSec,
+  formatDeltaMs,
+  formatMs,
+  scrollToCenter,
+  stepZoom,
+  toAudioMs,
+  toProjectMs,
+  visibleRangeMs,
+} from '../lib/timeScale'
+import { Waveform } from './Waveform'
+import type { WaveformHandle, WaveformStatus } from './Waveform'
+
+// ---------------------------------------------------------------- 常量
+
+const RULER_H = 22
+const WAVE_H = 156
+/** 行轨叠在波形上半部。行时间允许互相重叠（§8.5），所以要多备几排 */
+const LINE_ROW_H = 15
+const LINE_ROWS = 3
+const LINES_STRIP_H = LINE_ROW_H * LINE_ROWS
+const TOKEN_STRIP_H = 50
+const TOKEN_STRIP_TOP = WAVE_H - TOKEN_STRIP_H
+const OVERVIEW_H = 26
+
+/** 任何编辑都不许把 token 拖成 0 时长：零时长音节会触发 libass #124（§5.7） */
+const MIN_TOKEN_DUR_MS = 20
+/** 打点时先给当前字一个临时时长，下一次打点会把它改写成真实值 */
+const TAP_PROVISIONAL_DUR_MS = 300
+/** 跨句打点时上一句末字的收尾上限 —— 否则它会一路拖过整段间奏 */
+const TAP_MAX_TAIL_MS = 1500
+
+const NUDGE_MS = 10
+/** Shift+方向键 = 1 帧（按 30fps 估算） */
+const NUDGE_FRAME_MS = 33
+const NUDGE_FINE_MS = 1
+
+interface SourceMeta {
+  label: string
+  color: string
+  hint: string
+  /** 斜纹填充，用来标「算出来的、不可信的」 */
+  hatch: boolean
+  /** 虚线边框，用来标「这里还是空的」 */
+  dashed: boolean
+}
+
+/**
+ * `unset` 排在最前面：它不是一种「时间来源」，而是**还没有时间**。
+ * 纯文本导入后整首歌都是这个状态，正是 tap-to-time 的目标，
+ * 所以给中性灰 + 虚线边框（看着就像个待填的空框），图例里还带未打轴字数。
+ * 不要复用 `manual` 的紫色 —— 那表示用户确实调过，混用会让人以为这个 0 是他认可的。
+ */
+const SOURCE_META: Record<Token['timing_source'], SourceMeta> = {
+  unset: {
+    label: '未打轴',
+    color: '#94a3b8',
+    hint: '尚未打轴，等待手工设定：这些字还没有真实时间，请按 T 进入打轴模式逐字打点',
+    hatch: false,
+    dashed: true,
+  },
+  provider: {
+    label: '歌词源',
+    color: '#3b82f6',
+    hint: '歌词源自带的逐字轴（QRC/KRC），通常最可信',
+    hatch: false,
+    dashed: false,
+  },
+  aligned: {
+    label: '自动对齐',
+    color: '#22c55e',
+    hint: '强制对齐算出来的，误差预期 50–150ms',
+    hatch: false,
+    dashed: false,
+  },
+  interpolated: {
+    label: '插值推算',
+    color: '#f59e0b',
+    hint: '由更粗的粒度等分推算而来，最不可信，请优先复核',
+    hatch: true,
+    dashed: false,
+  },
+  manual: {
+    label: '手工',
+    color: '#a855f7',
+    hint: '你自己改过的，自动重算不会覆盖它',
+    hatch: false,
+    dashed: false,
+  },
+}
+
+const CSS = `
+.kvm-tl { color:#dbe4ee; font:12px/1.5 system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif; user-select:none; }
+.kvm-tl button { font:inherit; color:#dbe4ee; background:#243244; border:1px solid #3b4d64;
+  border-radius:5px; padding:3px 9px; cursor:pointer; }
+.kvm-tl button:hover:not(:disabled) { background:#2f4157; }
+.kvm-tl button:disabled { opacity:.38; cursor:default; }
+.kvm-tl button[data-on="1"] { background:#2563eb; border-color:#3b82f6; color:#fff; }
+.kvm-tl input[type=number] { font:inherit; color:#dbe4ee; background:#1a2432; border:1px solid #3b4d64;
+  border-radius:5px; padding:2px 6px; width:74px; }
+.kvm-tl-tok { position:absolute; box-sizing:border-box; border-radius:3px; overflow:hidden;
+  cursor:grab; display:flex; align-items:center; justify-content:center; }
+.kvm-tl-tok:hover { filter:brightness(1.3); }
+.kvm-tl-tok:active { cursor:grabbing; }
+.kvm-tl-hnd { position:absolute; top:0; bottom:0; width:9px; cursor:ew-resize; z-index:2; }
+.kvm-tl-hnd:hover { background:rgba(255,255,255,.45); }
+.kvm-tl-line { position:absolute; box-sizing:border-box; border-radius:3px; cursor:grab;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; padding:0 4px; }
+.kvm-tl-line:hover { filter:brightness(1.3); }
+.kvm-tl-next { animation:kvm-tl-pulse 1.1s ease-in-out infinite; }
+@keyframes kvm-tl-pulse {
+  0%,100% { box-shadow:0 0 0 0 rgba(255,209,71,.85); }
+  50%     { box-shadow:0 0 0 7px rgba(255,209,71,0); }
+}
+.kvm-tl-chip { border:1px solid #3b4d64; background:#1d2836; border-radius:6px;
+  padding:4px 8px; min-width:32px; text-align:center; cursor:pointer; }
+.kvm-tl-chip:hover { background:#2a3a4d; }
+`
+
+// ---------------------------------------------------------------- 小工具
+
+const tokenKey = (lineId: string, index: number): string => `${lineId}#${index}`
+
+interface Timing {
+  start: number
+  dur: number
+}
+
+interface DragConfig {
+  kind: 'line' | 'token-move' | 'token-start' | 'token-end'
+  lineId: string
+  index: number
+  startClientX: number
+  pxPerMs: number
+  minDelta: number
+  maxDelta: number
+  /** 与相邻 token 严丝合缝：拖边界要连带改邻居，否则会拉出缝隙或造成重叠 */
+  linked: boolean
+}
+
+interface FlatRef {
+  lineIndex: number
+  tokenIndex: number
+  lineId: string
+}
+
+function lineBounds(line: Line): Timing {
+  if (!line.tokens.length) return { start: 0, dur: 0 }
+  const first = line.tokens[0]
+  const last = line.tokens[line.tokens.length - 1]
+  return { start: first.start_ms, dur: last.start_ms + last.dur_ms - first.start_ms }
+}
+
+function lineText(line: Line): string {
+  return line.tokens.map((t) => t.text).join('')
+}
+
+/**
+ * token 底色。插值推算加斜纹：只靠色相区分，扫一眼很容易漏掉最不可信的那一类；
+ * 未打轴的填色压到最淡，配上虚线边框读起来就是「一个还没填的空框」。
+ */
+function blockBg(meta: SourceMeta, drafted: boolean): string {
+  const { color } = meta
+  if (meta.hatch && !drafted) {
+    return `repeating-linear-gradient(45deg, ${color}66 0 5px, ${color}1f 5px 10px)`
+  }
+  if (meta.dashed && !drafted) return `${color}1f`
+  return `${color}${drafted ? '77' : '55'}`
+}
+
+// ---------------------------------------------------------------- 组件
+
+export function Timeline() {
+  const project = useProject((s) => s.project)
+  const selection = useProject((s) => s.selection)
+  const canUndo = useProject((s) => s.canUndo)
+  const canRedo = useProject((s) => s.canRedo)
+  const audioMode = useProject((s) => s.audioMode)
+  const storeError = useProject((s) => s.error)
+  // 播放状态与速率都是 Preview 的（唯一时钟，见 projectStore 文件头）：
+  // 这里只负责显示按钮状态、以及把用户的播放/变速意图写进去
+  const playing = useProject((s) => s.playing)
+  const rate = useProject((s) => s.playbackRate)
+  const select = useProject((s) => s.select)
+  const setPlayhead = useProject((s) => s.setPlayhead)
+  const setPlaying = useProject((s) => s.setPlaying)
+  const setRate = useProject((s) => s.setPlaybackRate)
+  const setAudioMode = useProject((s) => s.setAudioMode)
+  const undo = useProject((s) => s.undo)
+  const redo = useProject((s) => s.redo)
+  const shift = useProject((s) => s.shift)
+  const setTiming = useProject((s) => s.setTiming)
+  const splitLine = useProject((s) => s.splitLine)
+  const mergeLine = useProject((s) => s.mergeLine)
+
+  const hostRef = useRef<HTMLDivElement | null>(null)
+  const rulerTrackRef = useRef<HTMLDivElement | null>(null)
+  const overlayTrackRef = useRef<HTMLDivElement | null>(null)
+  const playheadRef = useRef<HTMLDivElement | null>(null)
+  const overviewBoxRef = useRef<HTMLDivElement | null>(null)
+  const waveRef = useRef<WaveformHandle | null>(null)
+  const tapChipRef = useRef<HTMLDivElement | null>(null)
+
+  const [viewportPx, setViewportPx] = useState(900)
+  const [pxPerSec, setPxPerSec] = useState(24)
+  const [waveDurationMs, setWaveDurationMs] = useState(0)
+  const [status, setStatus] = useState<WaveformStatus>({ kind: 'idle' })
+  const [follow, setFollow] = useState(true)
+  const [linkNeighbor, setLinkNeighbor] = useState(true)
+  const [viewWindow, setViewWindow] = useState({ startMs: 0, endMs: 0 })
+  const [playheadLineId, setPlayheadLineId] = useState<string | null>(null)
+
+  /** 整体偏移的本地草稿：拖滑块时立刻生效，松手才发请求 */
+  const [offsetDraft, setOffsetDraft] = useState<number | null>(null)
+
+  const [dragging, setDragging] = useState(false)
+  const [dragUI, setDragUI] = useState({ delta: 0, x: 0, y: 0 })
+  const dragRef = useRef<DragConfig | null>(null)
+
+  const [tapMode, setTapMode] = useState(false)
+  const [tapPos, setTapPos] = useState(0)
+  const [tapDraft, setTapDraft] = useState<Record<string, Timing>>({})
+  const [tapStackLen, setTapStackLen] = useState(0)
+  const [commit, setCommit] = useState({ done: 0, total: 0 })
+
+  const scrollRef = useRef(0)
+  const viewportRef = useRef(viewportPx)
+  const contentPxRef = useRef(0)
+  const windowRef = useRef(viewWindow)
+  const projectRef = useRef(project)
+  const tapDraftRef = useRef(tapDraft)
+  const tapPosRef = useRef(tapPos)
+  const tapStackRef = useRef<Array<{ pos: number; draft: Record<string, Timing> }>>([])
+  const committingRef = useRef(false)
+  const zoomInitedRef = useRef(false)
+  const queueRef = useRef<Promise<void>>(Promise.resolve())
+  /** 「跟随」开关给逐帧回调用的镜像，免得订阅因为它变化而重挂 */
+  const followRef = useRef(follow)
+
+  viewportRef.current = viewportPx
+  followRef.current = follow
+  projectRef.current = project
+  tapDraftRef.current = tapDraft
+  tapPosRef.current = tapPos
+
+  const durationMs = Math.max(waveDurationMs, project?.duration_ms ?? 0) || 60_000
+  const minPxPerSec = fitPxPerSec(durationMs, viewportPx)
+  const scale = useMemo(() => createScale(pxPerSec), [pxPerSec])
+  const scaleRef = useRef(scale)
+  scaleRef.current = scale
+  const contentPx = contentWidthPx(durationMs, scale, viewportPx)
+  contentPxRef.current = contentPx
+
+  const globalOffset = offsetDraft ?? project?.global_offset_ms ?? 0
+
+  const enqueue = useCallback((fn: () => Promise<void>): Promise<void> => {
+    const run = queueRef.current.then(fn)
+    queueRef.current = run.catch(() => undefined)
+    return run
+  }, [])
+
+  /** 移动打点光标（「下一个要打的字」）。state 与 ref 必须一起改 */
+  const moveTapCursor = useCallback((pos: number) => {
+    tapPosRef.current = pos
+    setTapPos(pos)
+  }, [])
+
+  // ------------------------------------------------------------ 视口 / 滚动 / 缩放
+
+  useEffect(() => {
+    const el = hostRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => setViewportPx(el.clientWidth))
+    ro.observe(el)
+    setViewportPx(el.clientWidth)
+    return () => ro.disconnect()
+  }, [])
+
+  /** 覆盖层与刻度尺跟着波形滚动。命令式赋值，和 wavesurfer 的滚动事件同一帧生效 */
+  const applyTranslate = useCallback((px: number) => {
+    const t = `translate3d(${-px}px,0,0)`
+    if (rulerTrackRef.current) rulerTrackRef.current.style.transform = t
+    if (overlayTrackRef.current) overlayTrackRef.current.style.transform = t
+    const box = overviewBoxRef.current
+    if (box) {
+      const c = Math.max(1, contentPxRef.current)
+      box.style.left = `${(px / c) * 100}%`
+      box.style.width = `${(viewportRef.current / c) * 100}%`
+    }
+  }, [])
+
+  /** 只在滚出预渲染范围时才更新虚拟化窗口，否则每帧都要重渲整棵树 */
+  const ensureWindow = useCallback((scrollPx: number) => {
+    const s = scaleRef.current
+    const vp = viewportRef.current
+    const pad = Math.max(300, s.pxToMs(vp * 0.6))
+    const vis = visibleRangeMs(scrollPx, vp, s)
+    const w = windowRef.current
+    if (vis.startMs >= w.startMs + pad * 0.25 && vis.endMs <= w.endMs - pad * 0.25) return
+    const next = { startMs: vis.startMs - pad, endMs: vis.endMs + pad }
+    windowRef.current = next
+    setViewWindow(next)
+  }, [])
+
+  const handleScrollPx = useCallback(
+    (px: number) => {
+      scrollRef.current = px
+      applyTranslate(px)
+      ensureWindow(px)
+    },
+    [applyTranslate, ensureWindow],
+  )
+
+  // 缩放或视口变化后必须重算窗口，否则放大之后会有一大片方块不渲染
+  useEffect(() => {
+    windowRef.current = { startMs: 0, endMs: 0 }
+    ensureWindow(scrollRef.current)
+    applyTranslate(scrollRef.current)
+  }, [pxPerSec, viewportPx, durationMs, ensureWindow, applyTranslate])
+
+  // 缩放下限跟着视口走：整曲已经铺满之后再往外缩只会留白
+  useEffect(() => {
+    setPxPerSec((v) => clampPxPerSec(v, minPxPerSec))
+  }, [minPxPerSec])
+
+  const movePlayheadMarker = useCallback((audioMs: number) => {
+    const el = playheadRef.current
+    if (el) el.style.transform = `translate3d(${scaleRef.current.msToPx(audioMs)}px,0,0)`
+  }, [])
+
+  useEffect(() => {
+    movePlayheadMarker(useProject.getState().playheadMs)
+  }, [pxPerSec, movePlayheadMarker])
+
+  /**
+   * 播放跟随。以前是 wavesurfer 的 `autoScroll` 干的，但它只认自己的播放进度，
+   * 而波形层已经不播了（唯一时钟在 Preview），所以这件事只能自己做。
+   *
+   * 只在播放头快要滑出视口时才把它重新居中：每帧都居中的话整条波形一直在漂，
+   * 反而看不清自己正对着哪一段能量。
+   */
+  const followPlayhead = useCallback(
+    (audioMs: number) => {
+      if (!followRef.current || !useProject.getState().playing) return
+      const vp = viewportRef.current
+      const px = scaleRef.current.msToPx(audioMs)
+      const left = scrollRef.current
+      if (px >= left + vp * 0.15 && px <= left + vp * 0.85) return
+      const target = clampScroll(
+        scrollToCenter(audioMs, vp, scaleRef.current),
+        vp,
+        contentPxRef.current,
+      )
+      if (Math.abs(target - left) < 1) return
+      waveRef.current?.setScrollPx(target)
+      handleScrollPx(target)
+    },
+    [handleScrollPx],
+  )
+
+  /**
+   * 播放头：**只读** store。写入者只有 Preview（CLAUDE.md D15 的唯一时钟）。
+   *
+   * 用命令式订阅而不是 `useProject((s) => s.playheadMs)`：后者会让整棵时间轴
+   * 每帧重渲一次。只有「播放头进了另一行」这种低频事件才值得进 state。
+   */
+  useEffect(() => {
+    const onPlayhead = (ms: number): void => {
+      movePlayheadMarker(ms)
+      followPlayhead(ms)
+      // locate 是 O(行数) 的线性扫描，逐帧跑也远不到一帧预算；
+      // 且行号相同时 setState 会被 React 直接丢弃，不会引起重渲
+      const id = locate(projectRef.current, ms).line?.id ?? null
+      setPlayheadLineId((prev) => (prev === id ? prev : id))
+    }
+    onPlayhead(useProject.getState().playheadMs)
+    return useProject.subscribe((state, prev) => {
+      if (state.playheadMs !== prev.playheadMs) onPlayhead(state.playheadMs)
+    })
+  }, [followPlayhead, movePlayheadMarker])
+
+  const zoomBy = useCallback(
+    (dir: number, anchorPx?: number) => {
+      const old = scaleRef.current
+      const next = createScale(stepZoom(old.pxPerSec, dir, minPxPerSec))
+      if (next.pxPerSec === old.pxPerSec) return
+      const anchor = anchorPx ?? viewportRef.current / 2
+      const anchorMs = old.pxToMs(scrollRef.current + anchor)
+      setPxPerSec(next.pxPerSec)
+      // 等 wavesurfer 自己重排完再定位，否则会被它的 reRender 覆盖掉
+      requestAnimationFrame(() => {
+        const target = clampScroll(
+          next.msToPx(anchorMs) - anchor,
+          viewportRef.current,
+          contentWidthPx(durationMs, next, viewportRef.current),
+        )
+        waveRef.current?.setScrollPx(target)
+        handleScrollPx(target)
+      })
+    },
+    [durationMs, handleScrollPx, minPxPerSec],
+  )
+
+  // 滚轮：横向滚动 + Ctrl/Cmd 缩放。React 的 onWheel 是被动监听，preventDefault 无效
+  // （会退化成浏览器整页缩放），必须自己挂一个非被动的原生监听
+  useEffect(() => {
+    const el = hostRef.current
+    if (!el) return
+    const onWheel = (e: WheelEvent) => {
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault()
+        zoomBy(e.deltaY < 0 ? 1 : -1, e.clientX - el.getBoundingClientRect().left)
+        return
+      }
+      const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY
+      if (!d) return
+      e.preventDefault()
+      const target = clampScroll(scrollRef.current + d, viewportRef.current, contentPxRef.current)
+      waveRef.current?.setScrollPx(target)
+      handleScrollPx(target)
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [zoomBy, handleScrollPx])
+
+  // ------------------------------------------------------------ 音源
+
+  // 调轴时看伴奏的波形更容易分辨节拍（§5.10），有伴奏就默认切过去
+  useEffect(() => {
+    if (project?.instrumental_path) setAudioMode('instrumental')
+  }, [project?.instrumental_path, setAudioMode])
+
+  const sources = useMemo(() => {
+    if (!project) return []
+    const order: Array<'instrumental' | 'audio' | 'video'> =
+      audioMode === 'instrumental'
+        ? ['instrumental', 'audio', 'video']
+        : ['audio', 'instrumental', 'video']
+    const has: Record<'instrumental' | 'audio' | 'video', boolean> = {
+      instrumental: !!project.instrumental_path,
+      audio: !!project.audio_path,
+      video: !!project.video_path,
+    }
+    return order.filter((k) => has[k]).map((k) => api.mediaUrl(project.id, k))
+  }, [project, audioMode])
+
+  // ------------------------------------------------------------ 生效时间（草稿 + 拖动预览）
+
+  /** 只叠加打轴草稿，不含拖动预览。提交时要以它为基准 */
+  const baseTiming = useCallback(
+    (line: Line, index: number): Timing => {
+      const d = tapDraft[tokenKey(line.id, index)]
+      if (d) return d
+      const tk = line.tokens[index]
+      return { start: tk.start_ms, dur: tk.dur_ms }
+    },
+    [tapDraft],
+  )
+
+  const effTiming = useCallback(
+    (line: Line, index: number): Timing => {
+      const b = baseTiming(line, index)
+      const cfg = dragRef.current
+      if (!dragging || !cfg || cfg.lineId !== line.id) return b
+      const d = dragUI.delta
+      let { start, dur } = b
+      if (cfg.kind === 'line') start += d
+      else if (cfg.kind === 'token-move' && cfg.index === index) start += d
+      else if (cfg.kind === 'token-start') {
+        if (cfg.index === index) {
+          start += d
+          dur -= d
+        } else if (cfg.linked && cfg.index - 1 === index) dur += d
+      } else if (cfg.kind === 'token-end') {
+        if (cfg.index === index) dur += d
+        else if (cfg.linked && cfg.index + 1 === index) {
+          start += d
+          dur -= d
+        }
+      }
+      return { start, dur }
+    },
+    [baseTiming, dragging, dragUI.delta],
+  )
+
+  const effLineBounds = useCallback(
+    (line: Line): Timing => {
+      if (!line.tokens.length) return { start: 0, dur: 0 }
+      const a = effTiming(line, 0)
+      const b = effTiming(line, line.tokens.length - 1)
+      return { start: a.start, dur: b.start + b.dur - a.start }
+    },
+    [effTiming],
+  )
+
+  // ------------------------------------------------------------ 可见行 / 当前行
+
+  const flat = useMemo(() => {
+    const out: FlatRef[] = []
+    project?.lines.forEach((ln, li) => {
+      if (ln.is_metadata) return
+      ln.tokens.forEach((_, ti) => out.push({ lineIndex: li, tokenIndex: ti, lineId: ln.id }))
+    })
+    return out
+  }, [project])
+
+  const activeLineId =
+    selection.kind !== 'none'
+      ? selection.lineId
+      : tapMode && flat[tapPos]
+        ? flat[tapPos].lineId
+        : playheadLineId
+  const activeLine = project?.lines.find((l) => l.id === activeLineId) ?? null
+
+  /** 视口内的行，重叠的分排显示（行时间允许重叠，§8.5） */
+  const visibleLines = useMemo(() => {
+    if (!project) return []
+    const rowEndMs: number[] = new Array<number>(LINE_ROWS).fill(-Infinity)
+    const out: Array<{ line: Line; row: number }> = []
+    const items = project.lines
+      .filter((l) => l.tokens.length)
+      .map((line) => ({ line, b: lineBounds(line) }))
+      .filter(({ b }) => {
+        const s = toAudioMs(b.start, globalOffset)
+        return s + b.dur >= viewWindow.startMs && s <= viewWindow.endMs
+      })
+      .sort((a, b) => a.b.start - b.b.start)
+    const gapMs = scale.pxToMs(6)
+    for (const { line, b } of items) {
+      const s = toAudioMs(b.start, globalOffset)
+      let row = rowEndMs.findIndex((end) => s >= end)
+      if (row < 0) row = 0
+      rowEndMs[row] = s + b.dur + gapMs
+      out.push({ line, row })
+    }
+    return out
+  }, [project, viewWindow, globalOffset, scale])
+
+  const ticks = useMemo(
+    () => buildTicks(viewWindow.startMs, viewWindow.endMs, scale),
+    [viewWindow, scale],
+  )
+
+  /**
+   * 还有多少字没打轴。这是「这首歌还差多远能用」的唯一硬指标，必须常驻可见。
+   * 已经打进草稿的字算作已完成 —— 打轴过程中这个数字要肉眼可见地往下掉，
+   * 否则一整段打完了还显示原样，人会以为白干了。
+   */
+  const { unset: unsetCount, total: totalTokens } = useMemo(() => {
+    let unset = 0
+    let total = 0
+    for (const line of project?.lines ?? []) {
+      if (line.is_metadata) continue
+      line.tokens.forEach((tk, i) => {
+        total += 1
+        if (tk.timing_source === 'unset' && !tapDraft[tokenKey(line.id, i)]) unset += 1
+      })
+    }
+    return { unset, total }
+  }, [project, tapDraft])
+
+  // ------------------------------------------------------------ 拖动：本地预览 → 松手提交
+
+  const beginDrag = useCallback(
+    (e: ReactPointerEvent, cfg: Omit<DragConfig, 'startClientX' | 'pxPerMs'>) => {
+      e.stopPropagation()
+      e.preventDefault()
+      dragRef.current = { ...cfg, startClientX: e.clientX, pxPerMs: scaleRef.current.pxPerMs }
+      setDragUI({ delta: 0, x: e.clientX, y: e.clientY })
+      setDragging(true)
+    },
+    [],
+  )
+
+  useEffect(() => {
+    if (!dragging) return
+    let raf = 0
+    let pending: { x: number; y: number } | null = null
+    const flush = () => {
+      raf = 0
+      const cfg = dragRef.current
+      if (!cfg || !pending) return
+      const raw = (pending.x - cfg.startClientX) / cfg.pxPerMs
+      setDragUI({
+        delta: Math.round(clamp(raw, cfg.minDelta, cfg.maxDelta)),
+        x: pending.x,
+        y: pending.y,
+      })
+    }
+    const onMove = (e: PointerEvent) => {
+      pending = { x: e.clientX, y: e.clientY }
+      if (!raf) raf = requestAnimationFrame(flush)
+    }
+    const onUp = () => {
+      if (raf) {
+        cancelAnimationFrame(raf)
+        flush()
+      }
+      setDragging(false)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+    window.addEventListener('pointercancel', onUp)
+    return () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('pointercancel', onUp)
+    }
+  }, [dragging])
+
+  // 提交逻辑放进 ref：它要读最新的 project/选择，又不该让拖动 effect 反复重挂
+  const commitDragRef = useRef<(delta: number) => void>(() => undefined)
+  commitDragRef.current = (delta: number) => {
+    const cfg = dragRef.current
+    dragRef.current = null
+    const p = projectRef.current
+    if (!cfg || !p || Math.abs(delta) < 1) return
+    const line = p.lines.find((l) => l.id === cfg.lineId)
+    if (!line) return
+    const i = cfg.index
+
+    if (cfg.kind === 'line') {
+      select({ kind: 'line', lineId: cfg.lineId })
+      void enqueue(() => shift('line', delta))
+      return
+    }
+    if (cfg.kind === 'token-move') {
+      select({ kind: 'token', lineId: cfg.lineId, tokenIndex: i })
+      void enqueue(() => shift('token', delta))
+      return
+    }
+    if (!line.tokens[i]) return
+    const cur = baseTiming(line, i)
+
+    if (cfg.kind === 'token-start') {
+      const prev = i > 0 ? baseTiming(line, i - 1) : null
+      void enqueue(async () => {
+        await setTiming(cfg.lineId, i, Math.round(cur.start + delta), Math.round(cur.dur - delta))
+        // 联动改邻居只能再发一次请求（后端没有批量端点），因此会占两步撤销
+        if (cfg.linked && prev) {
+          await setTiming(cfg.lineId, i - 1, undefined, Math.round(prev.dur + delta))
+        }
+      })
+    } else {
+      const next = i + 1 < line.tokens.length ? baseTiming(line, i + 1) : null
+      void enqueue(async () => {
+        await setTiming(cfg.lineId, i, undefined, Math.round(cur.dur + delta))
+        if (cfg.linked && next) {
+          await setTiming(
+            cfg.lineId,
+            i + 1,
+            Math.round(next.start + delta),
+            Math.round(next.dur - delta),
+          )
+        }
+      })
+    }
+  }
+
+  const prevDraggingRef = useRef(false)
+  useEffect(() => {
+    if (prevDraggingRef.current && !dragging) commitDragRef.current(dragUI.delta)
+    prevDraggingRef.current = dragging
+  }, [dragging, dragUI.delta])
+
+  const onTokenPointerDown = useCallback(
+    (e: ReactPointerEvent, line: Line, i: number, kind: DragConfig['kind']) => {
+      select({ kind: 'token', lineId: line.id, tokenIndex: i })
+      if (tapMode) {
+        // 打轴模式下点字 =「从这里开始打」，不进入拖动
+        const pos = flat.findIndex((f) => f.lineId === line.id && f.tokenIndex === i)
+        if (pos >= 0) moveTapCursor(pos)
+        e.stopPropagation()
+        return
+      }
+      const t = baseTiming(line, i)
+      const prev = i > 0 ? baseTiming(line, i - 1) : null
+      const next = i + 1 < line.tokens.length ? baseTiming(line, i + 1) : null
+      let minDelta = -t.start
+      let maxDelta = 600_000
+      let linked = false
+
+      if (kind === 'token-start') {
+        linked = linkNeighbor && !!prev && Math.abs(prev.start + prev.dur - t.start) <= 1
+        if (linked && prev) minDelta = Math.max(minDelta, prev.start + MIN_TOKEN_DUR_MS - t.start)
+        else if (prev) minDelta = Math.max(minDelta, prev.start + prev.dur - t.start)
+        maxDelta = t.dur - MIN_TOKEN_DUR_MS
+      } else if (kind === 'token-end') {
+        linked = linkNeighbor && !!next && Math.abs(t.start + t.dur - next.start) <= 1
+        minDelta = MIN_TOKEN_DUR_MS - t.dur
+        if (linked && next) maxDelta = next.start + next.dur - MIN_TOKEN_DUR_MS - (t.start + t.dur)
+        else if (next) maxDelta = next.start - (t.start + t.dur)
+      }
+      if (maxDelta < minDelta) maxDelta = minDelta
+      beginDrag(e, { kind, lineId: line.id, index: i, minDelta, maxDelta, linked })
+    },
+    [baseTiming, beginDrag, flat, linkNeighbor, moveTapCursor, select, tapMode],
+  )
+
+  // ------------------------------------------------------------ 整体偏移
+
+  const commitOffset = useCallback(() => {
+    const p = projectRef.current
+    if (offsetDraft === null || !p) return
+    const delta = Math.round(offsetDraft - p.global_offset_ms)
+    if (!delta) {
+      setOffsetDraft(null)
+      return
+    }
+    // 草稿留到请求回来再清，否则会先弹回旧值、再跳到新值，看起来像抖了一下
+    const clear = () => setOffsetDraft(null)
+    void enqueue(() => shift('global', delta)).then(clear, clear)
+  }, [enqueue, offsetDraft, shift])
+
+  const nudgeOffset = useCallback(
+    (delta: number) => {
+      if (!delta) return
+      void enqueue(() => shift('global', delta))
+    },
+    [enqueue, shift],
+  )
+
+  // ------------------------------------------------------------ tap-to-time
+
+  const tapTimingOf = useCallback((ref: FlatRef): Timing => {
+    const d = tapDraftRef.current[tokenKey(ref.lineId, ref.tokenIndex)]
+    if (d) return d
+    const tk = projectRef.current?.lines[ref.lineIndex]?.tokens[ref.tokenIndex]
+    return { start: tk?.start_ms ?? 0, dur: tk?.dur_ms ?? 0 }
+  }, [])
+
+  const pushTapSnapshot = useCallback(() => {
+    tapStackRef.current.push({ pos: tapPosRef.current, draft: { ...tapDraftRef.current } })
+    setTapStackLen(tapStackRef.current.length)
+  }, [])
+
+  /**
+   * 打点取的时间点：直接读唯一时钟（store 的 `playheadMs`，由 Preview 逐帧写入）。
+   * 以前读的是波形层自己那份播放器时间，而用户听到的其实是 Preview 的声音 ——
+   * 两份时钟一旦不同步，打出来的点就整体偏一截。
+   */
+  const nowProjectMs = useCallback(
+    (): number => Math.round(toProjectMs(useProject.getState().playheadMs, globalOffset)),
+    [globalOffset],
+  )
+
+  const doTap = useCallback(() => {
+    // 读 ref 而不是 state：连续快打时两次按键可能落在同一次渲染之间
+    const tapPos = tapPosRef.current
+    if (tapPos < 0 || tapPos >= flat.length) return
+    const p = nowProjectMs()
+    const cur = flat[tapPos]
+
+    pushTapSnapshot()
+    const draft = { ...tapDraftRef.current }
+
+    // 收尾上一个字 —— 只收尾**本次打过的**，否则从中间开始打会改到不该动的地方
+    if (tapPos > 0) {
+      const prev = flat[tapPos - 1]
+      const key = tokenKey(prev.lineId, prev.tokenIndex)
+      const prevDraft = draft[key]
+      if (prevDraft) {
+        const raw = p - prevDraft.start
+        const capped = prev.lineIndex === cur.lineIndex ? raw : Math.min(raw, TAP_MAX_TAIL_MS)
+        draft[key] = { start: prevDraft.start, dur: Math.max(MIN_TOKEN_DUR_MS, Math.round(capped)) }
+      }
+    }
+
+    const curDur = tapTimingOf(cur).dur
+    draft[tokenKey(cur.lineId, cur.tokenIndex)] = {
+      start: p,
+      dur: Math.max(MIN_TOKEN_DUR_MS, curDur || TAP_PROVISIONAL_DUR_MS),
+    }
+    tapDraftRef.current = draft
+    setTapDraft(draft)
+    moveTapCursor(tapPos + 1)
+  }, [flat, moveTapCursor, nowProjectMs, pushTapSnapshot, tapTimingOf])
+
+  /** 结束当前句：给刚打完的最后一个字收尾，光标跳到下一句首字 */
+  const doEndPhrase = useCallback(() => {
+    const tapPos = tapPosRef.current
+    if (tapPos <= 0 || tapPos > flat.length) return
+    const prev = flat[tapPos - 1]
+    const key = tokenKey(prev.lineId, prev.tokenIndex)
+    const p = nowProjectMs()
+    pushTapSnapshot()
+    const draft = { ...tapDraftRef.current }
+    const prevDraft = draft[key]
+    if (prevDraft) {
+      draft[key] = { start: prevDraft.start, dur: Math.max(MIN_TOKEN_DUR_MS, p - prevDraft.start) }
+    }
+    tapDraftRef.current = draft
+    setTapDraft(draft)
+    let np = tapPos
+    while (np < flat.length && flat[np].lineIndex === prev.lineIndex) np++
+    moveTapCursor(np)
+  }, [flat, moveTapCursor, nowProjectMs, pushTapSnapshot])
+
+  const doTapUndo = useCallback(() => {
+    const snap = tapStackRef.current.pop()
+    setTapStackLen(tapStackRef.current.length)
+    if (!snap) return
+    tapDraftRef.current = snap.draft
+    setTapDraft(snap.draft)
+    moveTapCursor(snap.pos)
+  }, [moveTapCursor])
+
+  /**
+   * 把打轴草稿落库。
+   *
+   * 后端只有逐个 token 的 `setTiming`，所以整首歌的打轴结果只能一条条发，
+   * 也就会占掉同样多的撤销步数。**这是目前最该补的后端接口**（见文件末尾说明）。
+   * 这里的补偿是：提交成功一个才从草稿里摘掉一个，屏幕上不会先整片弹回旧时间。
+   */
+  const commitTapDraft = useCallback(async () => {
+    if (committingRef.current) return
+    const entries = Object.entries(tapDraftRef.current)
+    if (!entries.length) return
+    committingRef.current = true
+    tapStackRef.current = []
+    setTapStackLen(0)
+    setCommit({ done: 0, total: entries.length })
+    try {
+      let done = 0
+      for (const [key, v] of entries) {
+        const at = key.lastIndexOf('#')
+        const lineId = key.slice(0, at)
+        const index = Number(key.slice(at + 1))
+        await enqueue(() => setTiming(lineId, index, Math.round(v.start), Math.round(v.dur)))
+        done += 1
+        setCommit({ done, total: entries.length })
+        // 只摘掉这一个 key：提交期间用户新打的点必须原样留着
+        const rest = { ...tapDraftRef.current }
+        delete rest[key]
+        tapDraftRef.current = rest
+        setTapDraft(rest)
+      }
+    } finally {
+      committingRef.current = false
+      setCommit({ done: 0, total: 0 })
+    }
+  }, [enqueue, setTiming])
+
+  const enterTapMode = useCallback(() => {
+    // 从选中的字开始；没选中就从播放头所在的字开始；都没有就从头开始
+    let pos = 0
+    if (selection.kind === 'token') {
+      const i = flat.findIndex(
+        (f) => f.lineId === selection.lineId && f.tokenIndex === selection.tokenIndex,
+      )
+      if (i >= 0) pos = i
+    } else {
+      const p = nowProjectMs()
+      const i = flat.findIndex((f) => tapTimingOf(f).start >= p)
+      pos = i >= 0 ? i : 0
+    }
+    moveTapCursor(pos)
+    setRate(0.75)
+    setTapMode(true)
+  }, [flat, moveTapCursor, nowProjectMs, selection, setRate, tapTimingOf])
+
+  const exitTapMode = useCallback(() => {
+    setTapMode(false)
+    setRate(1)
+    void commitTapDraft()
+  }, [commitTapDraft, setRate])
+
+  /**
+   * 暂停是「这一段打完了」的天然节点，顺手落库，免得草稿越攒越大。
+   * 播放状态来自 store（Preview 写的），所以这里盯的是它的下降沿。
+   */
+  const prevPlayingRef = useRef(playing)
+  useEffect(() => {
+    const wasPlaying = prevPlayingRef.current
+    prevPlayingRef.current = playing
+    if (wasPlaying && !playing && Object.keys(tapDraftRef.current).length) void commitTapDraft()
+  }, [commitTapDraft, playing])
+
+  useEffect(() => {
+    if (tapMode) tapChipRef.current?.scrollIntoView({ block: 'nearest', inline: 'center' })
+  }, [tapMode, tapPos])
+
+  // ------------------------------------------------------------ 其它编辑动作
+
+  const nudgeSelection = useCallback(
+    (delta: number) => {
+      if (selection.kind === 'token') void enqueue(() => shift('token', delta))
+      else if (selection.kind === 'line') void enqueue(() => shift('line', delta))
+    },
+    [enqueue, selection, shift],
+  )
+
+  const doSplit = useCallback(() => {
+    if (selection.kind !== 'token' || selection.tokenIndex <= 0) return
+    void enqueue(() => splitLine(selection.lineId, selection.tokenIndex))
+  }, [enqueue, selection, splitLine])
+
+  const doMerge = useCallback(() => {
+    if (selection.kind === 'none') return
+    void enqueue(() => mergeLine(selection.lineId))
+  }, [enqueue, mergeLine, selection])
+
+  /**
+   * 点波形定位。这里**只发出跳转意图**（写 store 的播放头），真正的 seek 由
+   * Preview 执行；播放头标记也由上面那个订阅统一移动，不在这里抢着画 ——
+   * 早先是「波形自己 seek 完再把结果写回 store」，于是两个时钟互相追。
+   */
+  const seekAt = useCallback(
+    (clientX: number) => {
+      const el = hostRef.current
+      if (!el) return
+      const ms = scaleRef.current.pxToMs(
+        scrollRef.current + (clientX - el.getBoundingClientRect().left),
+      )
+      setPlayhead(Math.round(clamp(ms, 0, durationMs)))
+    },
+    [durationMs, setPlayhead],
+  )
+
+  // ------------------------------------------------------------ 快捷键
+
+  const keyRef = useRef<(e: KeyboardEvent) => void>(() => undefined)
+  keyRef.current = (e: KeyboardEvent) => {
+    const t = e.target
+    if (
+      t instanceof HTMLElement &&
+      (t.tagName === 'INPUT' ||
+        t.tagName === 'TEXTAREA' ||
+        t.tagName === 'SELECT' ||
+        t.isContentEditable)
+    ) {
+      return
+    }
+    const mod = e.metaKey || e.ctrlKey
+    const k = e.key.toLowerCase()
+
+    if (mod && k === 'z') {
+      e.preventDefault()
+      void enqueue(e.shiftKey ? redo : undo)
+      return
+    }
+    if (mod && k === 'y') {
+      e.preventDefault()
+      void enqueue(redo)
+      return
+    }
+    if (mod) return
+
+    if (e.key === ' ' || e.key === 'Enter') {
+      e.preventDefault()
+      /*
+       * 空格必须由这里独占。App.tsx 也在 window 上挂了「空格 = 播放/暂停」，
+       * 而打轴模式下空格是「打一个点」—— 两个监听器都跑的话，每打一个点就会
+       * 顺手把播放停掉，playheadMs 随之冻住，后面几个点会全落在同一个时刻。
+       * 子组件的 effect 先于父组件执行，本监听器排在 App 之前，
+       * 所以掐断同一事件上后续的 window 监听器是有效的（React 的合成事件挂在
+       * 根容器上，冒泡时早已处理完，不受影响）。
+       */
+      e.stopImmediatePropagation()
+      // 非打轴模式下空格 = 播放/暂停意图，交给 Preview 执行
+      if (!tapMode) setPlaying(!useProject.getState().playing)
+      else if (e.key === ' ' && e.shiftKey) doEndPhrase()
+      else doTap()
+      return
+    }
+    if (e.key === 'Backspace' && tapMode) {
+      e.preventDefault()
+      doTapUndo()
+      return
+    }
+    if (e.key === 'Escape') {
+      if (tapMode) exitTapMode()
+      else select({ kind: 'none' })
+      return
+    }
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault()
+      const step = e.shiftKey ? NUDGE_FRAME_MS : e.altKey ? NUDGE_FINE_MS : NUDGE_MS
+      nudgeSelection((e.key === 'ArrowLeft' ? -1 : 1) * step)
+      return
+    }
+    if (k === 't') {
+      e.preventDefault()
+      if (tapMode) exitTapMode()
+      else enterTapMode()
+      return
+    }
+    if (e.key === '=' || e.key === '+') {
+      e.preventDefault()
+      zoomBy(1)
+      return
+    }
+    if (e.key === '-' || e.key === '_') {
+      e.preventDefault()
+      zoomBy(-1)
+    }
+  }
+
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => keyRef.current(e)
+    window.addEventListener('keydown', h)
+    return () => window.removeEventListener('keydown', h)
+  }, [])
+
+  // ------------------------------------------------------------ 渲染
+
+  if (!project) {
+    return (
+      <div className="kvm-tl" style={{ padding: 16, color: '#8ea2b8' }}>
+        <style>{CSS}</style>
+        尚未打开工程。
+      </div>
+    )
+  }
+
+  const tapCur = flat[tapPos] ?? null
+  const tapLine = tapCur ? project.lines[tapCur.lineIndex] : null
+  const tapNextLine = (() => {
+    if (!tapCur) return null
+    for (let i = tapCur.lineIndex + 1; i < project.lines.length; i++) {
+      const l = project.lines[i]
+      if (!l.is_metadata && l.tokens.length) return l
+    }
+    return null
+  })()
+  const tappedCount = Object.keys(tapDraft).length
+  const selTok =
+    selection.kind === 'token'
+      ? (project.lines.find((l) => l.id === selection.lineId)?.tokens[selection.tokenIndex] ?? null)
+      : null
+
+  return (
+    <div className="kvm-tl" style={S.root}>
+      <style>{CSS}</style>
+
+      {/* ------------------------------------------------ 工具栏 */}
+      <div style={S.bar}>
+        {/* 播放与变速都只是意图：真正在放的是预览层（唯一时钟，CLAUDE.md D15） */}
+        <button onClick={() => setPlaying(!playing)}>{playing ? '⏸ 暂停' : '▶ 播放'}</button>
+        <label style={S.dim} title="变速试听由预览层执行；Web Audio 变速会同时改变音高">
+          速率
+          <select value={rate} onChange={(e) => setRate(Number(e.target.value))} style={S.select}>
+            <option value={0.5}>0.5x</option>
+            <option value={0.75}>0.75x</option>
+            <option value={1}>1.0x</option>
+          </select>
+        </label>
+        <button
+          data-on={follow ? '1' : '0'}
+          onClick={() => setFollow((v) => !v)}
+          title="播放时自动跟随播放头滚动"
+        >
+          跟随
+        </button>
+
+        <span style={S.sep} />
+
+        <button
+          data-on={tapMode ? '1' : '0'}
+          onClick={() => (tapMode ? exitTapMode() : enterTapMode())}
+        >
+          {tapMode ? '● 打轴中（Esc 退出）' : '✚ 手工打轴 (T)'}
+        </button>
+        {/* 还剩多少字没打轴要能一眼看到：它直接决定「这首歌还差多远能用」，
+            所以贴着打轴按钮放，而不是塞进底部图例 */}
+        {unsetCount > 0 && (
+          <span style={S.todo} title="这些字还没有真实时间，等待手工设定">
+            尚未打轴 {unsetCount}/{totalTokens} 字
+          </span>
+        )}
+
+        <span style={S.sep} />
+
+        <button onClick={() => void enqueue(undo)} disabled={!canUndo} title="Cmd/Ctrl+Z">
+          ↶ 撤销
+        </button>
+        <button onClick={() => void enqueue(redo)} disabled={!canRedo} title="Cmd/Ctrl+Shift+Z">
+          ↷ 重做
+        </button>
+
+        <span style={S.sep} />
+
+        <button
+          onClick={doSplit}
+          disabled={selection.kind !== 'token' || selection.tokenIndex <= 0}
+          title="在选中的字之前把这一行拆成两行"
+        >
+          ✂ 拆行
+        </button>
+        <button onClick={doMerge} disabled={selection.kind === 'none'} title="把选中行与下一行合并">
+          ⇥ 合并行
+        </button>
+
+        <span style={S.sep} />
+
+        <button
+          data-on={linkNeighbor ? '1' : '0'}
+          onClick={() => setLinkNeighbor((v) => !v)}
+          title="开启后拖边界会同时改相邻的字，保持首尾相接；关闭则只改当前这个字"
+        >
+          边界联动
+        </button>
+
+        <span style={{ marginLeft: 'auto' }} />
+
+        <label style={S.dim}>
+          试听
+          <select
+            value={audioMode}
+            onChange={(e) =>
+              setAudioMode(e.target.value === 'instrumental' ? 'instrumental' : 'original')
+            }
+            style={S.select}
+          >
+            <option value="instrumental">伴奏</option>
+            <option value="original">原声</option>
+          </select>
+        </label>
+        <button onClick={() => zoomBy(-1)} title="缩小 (-)">
+          −
+        </button>
+        <button onClick={() => zoomBy(1)} title="放大 (+)">
+          ＋
+        </button>
+        <button
+          onClick={() => {
+            setPxPerSec(minPxPerSec)
+            waveRef.current?.setScrollPx(0)
+            handleScrollPx(0)
+          }}
+          title="缩到整曲铺满"
+        >
+          整曲
+        </button>
+      </div>
+
+      {/* ------------------------------------------------ 整体调轴 */}
+      <div style={S.bar}>
+        <strong style={{ color: '#9fb4cc' }}>整体偏移</strong>
+        <button onClick={() => nudgeOffset(-100)}>−100ms</button>
+        <button onClick={() => nudgeOffset(-10)}>−10ms</button>
+        <input
+          type="range"
+          min={-10000}
+          max={10000}
+          step={10}
+          value={globalOffset}
+          onChange={(e) => setOffsetDraft(Number(e.target.value))}
+          onPointerUp={commitOffset}
+          onKeyUp={commitOffset}
+          onBlur={commitOffset}
+          style={{ flex: '1 1 240px', maxWidth: 420 }}
+        />
+        <button onClick={() => nudgeOffset(10)}>+10ms</button>
+        <button onClick={() => nudgeOffset(100)}>+100ms</button>
+        <input
+          type="number"
+          step={10}
+          value={globalOffset}
+          onChange={(e) => setOffsetDraft(Number(e.target.value))}
+          onBlur={commitOffset}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') commitOffset()
+          }}
+        />
+        <span style={S.dim}>ms</span>
+        <button
+          onClick={() => nudgeOffset(-project.global_offset_ms)}
+          disabled={!project.global_offset_ms}
+        >
+          归零
+        </button>
+        <span style={S.dim}>整体偏移只改这一个数，不动逐字时间，随时可以归零重来</span>
+      </div>
+
+      {/* ------------------------------------------------ 打轴面板 */}
+      {tapMode && (
+        <div style={S.tapPanel}>
+          <div style={S.tapHeadRow}>
+            <span style={{ color: '#ffd147', fontWeight: 600 }}>打轴中</span>
+            <span style={S.dim}>
+              空格/回车 = 打下一个字 ・ Shift+空格 = 结束当前句 ・ 退格 = 回退上一个点 ・
+              点任意字可从那里开始
+            </span>
+            <span style={{ marginLeft: 'auto' }} />
+            <span style={S.dim}>
+              本次已打 {tappedCount} 字 ・ 进度 {Math.min(tapPos, flat.length)}/{flat.length}
+            </span>
+            <button onClick={doTapUndo} disabled={!tapStackLen}>
+              ↶ 回退一个点
+            </button>
+            <button onClick={() => void commitTapDraft()} disabled={!tappedCount}>
+              提交
+            </button>
+          </div>
+
+          {tapLine ? (
+            <>
+              <div style={S.chipRow}>
+                {tapLine.tokens.map((tk, i) => {
+                  const isNext = tapCur !== null && tapCur.tokenIndex === i
+                  const d = tapDraft[tokenKey(tapLine.id, i)]
+                  const pos = flat.findIndex((f) => f.lineId === tapLine.id && f.tokenIndex === i)
+                  return (
+                    <div
+                      key={i}
+                      ref={isNext ? tapChipRef : undefined}
+                      className={`kvm-tl-chip${isNext ? ' kvm-tl-next' : ''}`}
+                      onClick={() => pos >= 0 && moveTapCursor(pos)}
+                      style={{
+                        borderColor: isNext ? '#ffd147' : d ? SOURCE_META.manual.color : '#3b4d64',
+                        background: isNext ? '#3a3115' : d ? '#2b2136' : '#1d2836',
+                        opacity: d || isNext ? 1 : 0.72,
+                      }}
+                    >
+                      <div style={{ fontSize: isNext ? 22 : 16, lineHeight: 1.2 }}>{tk.text}</div>
+                      <div style={{ fontSize: 10, color: '#8ea2b8' }}>
+                        {d ? formatMs(d.start, true) : '—'}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+              {tapNextLine && (
+                <div style={{ ...S.dim, marginTop: 2 }}>下一句：{lineText(tapNextLine)}</div>
+              )}
+            </>
+          ) : (
+            <div style={S.dim}>已经打到最后一个字，按 Esc 退出并提交。</div>
+          )}
+
+          {status.kind !== 'ready' && (
+            <div style={{ color: '#f59e0b' }}>
+              音频尚未就绪，打点取不到准确时间 —— 请先导入音频，或等待分离完成。
+            </div>
+          )}
+        </div>
+      )}
+
+      {commit.total > 0 && (
+        <div style={{ ...S.bar, color: '#ffd147' }}>
+          正在提交打轴结果 {commit.done}/{commit.total} …
+        </div>
+      )}
+
+      {/* ------------------------------------------------ 刻度 + 波形 + 覆盖层 */}
+      <div
+        ref={hostRef}
+        style={S.host}
+        onPointerDown={(e) => {
+          if (e.button === 0) seekAt(e.clientX)
+        }}
+      >
+        <div style={S.rulerClip}>
+          <div ref={rulerTrackRef} style={S.track}>
+            {ticks.map((tk) => (
+              <div
+                key={tk.ms}
+                style={{
+                  position: 'absolute',
+                  left: tk.px,
+                  bottom: 0,
+                  height: tk.major ? 10 : 5,
+                  borderLeft: `1px solid ${tk.major ? '#5a748f' : '#33465c'}`,
+                }}
+              >
+                {tk.label && <span style={S.tickLabel}>{tk.label}</span>}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ position: 'relative', height: WAVE_H, background: '#111a24' }}>
+          <Waveform
+            ref={waveRef}
+            sources={sources}
+            height={WAVE_H}
+            pxPerSec={pxPerSec}
+            onStatus={(s) => {
+              setStatus(s)
+              if (s.kind !== 'ready') return
+              setWaveDurationMs(s.durationMs)
+              // 第一次拿到真实时长时先缩到整曲概览，让用户看清全局再往下钻
+              if (!zoomInitedRef.current) {
+                zoomInitedRef.current = true
+                setPxPerSec(fitPxPerSec(s.durationMs, viewportRef.current))
+              }
+            }}
+            onScrollPx={handleScrollPx}
+          />
+
+          {status.kind !== 'ready' && (
+            <div style={S.waveNotice}>
+              {status.kind === 'loading'
+                ? `波形加载中 ${Math.round(status.percent)}%`
+                : status.kind === 'error'
+                  ? `${status.message} —— 仍可继续调轴，只是看不到波形`
+                  : '尚未导入音频'}
+            </div>
+          )}
+
+          {/* 覆盖层：行轨 + 边界参考线 + 词轨 + 播放头 */}
+          <div style={S.overlayClip}>
+            <div ref={overlayTrackRef} style={S.track}>
+              {/* 行轨（单句级） */}
+              {visibleLines.map(({ line, row }) => {
+                const b = effLineBounds(line)
+                const isActive = line.id === activeLineId
+                return (
+                  <div
+                    key={line.id}
+                    className="kvm-tl-line"
+                    title={`${lineText(line)}｜${formatMs(b.start, true)} + ${Math.round(b.dur)}ms`}
+                    onPointerDown={(e) => {
+                      select({ kind: 'line', lineId: line.id })
+                      if (tapMode) {
+                        e.stopPropagation()
+                        return
+                      }
+                      beginDrag(e, {
+                        kind: 'line',
+                        lineId: line.id,
+                        index: -1,
+                        minDelta: -b.start,
+                        maxDelta: 600_000,
+                        linked: false,
+                      })
+                    }}
+                    style={{
+                      left: scale.msToPx(toAudioMs(b.start, globalOffset)),
+                      width: scale.durToPx(b.dur, 6),
+                      top: row * LINE_ROW_H,
+                      height: LINE_ROW_H - 2,
+                      lineHeight: `${LINE_ROW_H - 2}px`,
+                      fontSize: 10,
+                      background: line.is_metadata
+                        ? 'rgba(140,140,160,.30)'
+                        : isActive
+                          ? 'rgba(59,130,246,.46)'
+                          : 'rgba(70,97,127,.34)',
+                      border: `1px solid ${isActive ? '#7fb2ff' : 'rgba(160,190,220,.35)'}`,
+                      color: line.locked ? '#ffd147' : '#dbe4ee',
+                      pointerEvents: 'auto',
+                    }}
+                  >
+                    {line.locked ? '🔒' : ''}
+                    {lineText(line)}
+                  </div>
+                )
+              })}
+
+              {/* 当前行的字界参考线：画到波形上，才能对着能量突变去看 */}
+              {activeLine?.tokens.map((_, i) => (
+                <div
+                  key={`guide-${i}`}
+                  style={{
+                    position: 'absolute',
+                    left: scale.msToPx(toAudioMs(effTiming(activeLine, i).start, globalOffset)),
+                    top: LINES_STRIP_H,
+                    height: TOKEN_STRIP_TOP - LINES_STRIP_H,
+                    borderLeft: '1px dashed rgba(180,205,230,.45)',
+                    pointerEvents: 'none',
+                  }}
+                />
+              ))}
+
+              {/* 词轨（单词级）：只画当前行 —— 一首歌几百个音节全实例化会卡死（§5.10） */}
+              {activeLine?.tokens.map((tk, i) => {
+                const t = effTiming(activeLine, i)
+                const meta = SOURCE_META[tk.timing_source]
+                const drafted = !!tapDraft[tokenKey(activeLine.id, i)]
+                const isSel =
+                  selection.kind === 'token' &&
+                  selection.lineId === activeLine.id &&
+                  selection.tokenIndex === i
+                const isNext =
+                  tapMode && tapCur?.lineId === activeLine.id && tapCur.tokenIndex === i
+                // 打进草稿的字立刻按「手工」显示：它已经有用户给的真实时间了
+                const shown = drafted ? SOURCE_META.manual : meta
+                return (
+                  <div
+                    key={i}
+                    className={`kvm-tl-tok${isNext ? ' kvm-tl-next' : ''}`}
+                    title={`${tk.text}｜${meta.label}：${meta.hint}\n起点 ${formatMs(t.start, true)}　时长 ${Math.round(t.dur)}ms${
+                      tk.locked_timing ? '\n🔒 已锁定，自动重算不会覆盖' : ''
+                    }`}
+                    onPointerDown={(e) => onTokenPointerDown(e, activeLine, i, 'token-move')}
+                    style={{
+                      left: scale.msToPx(toAudioMs(t.start, globalOffset)),
+                      width: scale.durToPx(t.dur, 6),
+                      top: TOKEN_STRIP_TOP,
+                      height: TOKEN_STRIP_H,
+                      background: blockBg(shown, drafted),
+                      border: `${isSel ? 2 : 1}px ${shown.dashed ? 'dashed' : 'solid'} ${
+                        isSel ? '#ffffff' : shown.color
+                      }`,
+                      pointerEvents: 'auto',
+                    }}
+                  >
+                    <span style={S.tokText}>{tk.text}</span>
+                    {tk.locked_timing && <span style={S.lock}>🔒</span>}
+                    <div
+                      className="kvm-tl-hnd"
+                      style={{ left: 0 }}
+                      onPointerDown={(e) => onTokenPointerDown(e, activeLine, i, 'token-start')}
+                    />
+                    <div
+                      className="kvm-tl-hnd"
+                      style={{ right: 0 }}
+                      onPointerDown={(e) => onTokenPointerDown(e, activeLine, i, 'token-end')}
+                    />
+                  </div>
+                )
+              })}
+
+              {/* 播放头：位置走命令式更新，不进 state，避免每帧重渲 */}
+              <div ref={playheadRef} style={S.playhead} />
+            </div>
+          </div>
+        </div>
+
+        {/* 概览条：整曲导航 */}
+        <div
+          style={S.overview}
+          onPointerDown={(e) => {
+            e.stopPropagation()
+            const rect = e.currentTarget.getBoundingClientRect()
+            const ms = ((e.clientX - rect.left) / rect.width) * durationMs
+            const target = clampScroll(scrollToCenter(ms, viewportPx, scale), viewportPx, contentPx)
+            waveRef.current?.setScrollPx(target)
+            handleScrollPx(target)
+          }}
+        >
+          {project.lines.map((l) => {
+            if (!l.tokens.length) return null
+            const b = lineBounds(l)
+            return (
+              <div
+                key={l.id}
+                style={{
+                  position: 'absolute',
+                  left: `${(toAudioMs(b.start, globalOffset) / durationMs) * 100}%`,
+                  width: `${Math.max(0.15, (b.dur / durationMs) * 100)}%`,
+                  top: 6,
+                  height: OVERVIEW_H - 12,
+                  background: l.id === activeLineId ? '#7fb2ff' : 'rgba(150,180,210,.5)',
+                  borderRadius: 2,
+                }}
+              />
+            )
+          })}
+          <div ref={overviewBoxRef} style={S.overviewBox} />
+        </div>
+      </div>
+
+      {/* ------------------------------------------------ 图例 + 状态 */}
+      <div style={S.bar}>
+        <span style={S.dim}>时间来源：</span>
+        {(Object.keys(SOURCE_META) as Array<Token['timing_source']>).map((k) => (
+          <span key={k} title={SOURCE_META[k].hint} style={S.legendItem}>
+            <span
+              style={{
+                width: 14,
+                height: 10,
+                borderRadius: 2,
+                border: `1px ${SOURCE_META[k].dashed ? 'dashed' : 'solid'} ${SOURCE_META[k].color}`,
+                background: blockBg(SOURCE_META[k], false),
+                display: 'inline-block',
+              }}
+            />
+            {SOURCE_META[k].label}
+          </span>
+        ))}
+        <span style={S.dim}>🔒 = 已锁定，自动重算不会覆盖</span>
+
+        <span style={{ marginLeft: 'auto' }} />
+        {selTok ? (
+          <span style={S.dim}>
+            选中「{selTok.text}」 起点 {formatMs(selTok.start_ms, true)} ・ 时长{' '}
+            {Math.round(selTok.dur_ms)}ms ・ 来源 {SOURCE_META[selTok.timing_source].label}
+            {selTok.locked_timing ? ' ・ 已锁定' : ''}
+          </span>
+        ) : (
+          <span style={S.dim}>
+            方向键 ±{NUDGE_MS}ms ・ Shift 1 帧 ・ Alt ±{NUDGE_FINE_MS}ms ・ Ctrl/Cmd+滚轮 缩放
+          </span>
+        )}
+      </div>
+
+      {storeError && <div style={{ ...S.bar, color: '#ff6b81' }}>后端返回错误：{storeError}</div>}
+
+      {/* 拖动时的数值实时预览 */}
+      {dragging && dragRef.current && (
+        <div style={{ ...S.tip, left: dragUI.x + 14, top: dragUI.y + 16 }}>
+          {dragPreviewText(dragRef.current, dragUI.delta, project.lines, effTiming)}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------- 渲染辅助
+
+function dragPreviewText(
+  cfg: DragConfig,
+  delta: number,
+  lines: Line[],
+  eff: (line: Line, index: number) => Timing,
+): string {
+  const line = lines.find((l) => l.id === cfg.lineId)
+  if (!line || !line.tokens.length) return formatDeltaMs(delta)
+  if (cfg.kind === 'line') {
+    const b = eff(line, 0)
+    return `整句平移 ${formatDeltaMs(delta)}　新起点 ${formatMs(b.start, true)}`
+  }
+  const t = eff(line, cfg.index)
+  const text = line.tokens[cfg.index]?.text ?? ''
+  return `${text} ${formatDeltaMs(delta)}　起点 ${formatMs(t.start, true)}　时长 ${Math.round(
+    t.dur,
+  )}ms　终点 ${formatMs(t.start + t.dur, true)}`
+}
+
+// ---------------------------------------------------------------- 样式
+
+const S: Record<string, CSSProperties> = {
+  root: { display: 'flex', flexDirection: 'column', gap: 6, background: '#0e1620', padding: 8 },
+  bar: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
+  sep: { width: 1, height: 18, background: '#2b3b4f', margin: '0 2px' },
+  dim: { color: '#8ea2b8', display: 'inline-flex', alignItems: 'center', gap: 4 },
+  select: {
+    font: 'inherit',
+    color: '#dbe4ee',
+    background: '#1a2432',
+    border: '1px solid #3b4d64',
+    borderRadius: 5,
+    padding: '2px 4px',
+  },
+  host: {
+    position: 'relative',
+    overflow: 'hidden',
+    border: '1px solid #24344a',
+    borderRadius: 6,
+    background: '#111a24',
+  },
+  rulerClip: { position: 'relative', height: RULER_H, overflow: 'hidden', background: '#0e1620' },
+  overlayClip: { position: 'absolute', inset: 0, overflow: 'hidden', pointerEvents: 'none' },
+  track: { position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, willChange: 'transform' },
+  tickLabel: { position: 'absolute', left: 3, top: -13, color: '#8ea2b8', fontSize: 10 },
+  playhead: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    width: 2,
+    marginLeft: -1,
+    background: '#ff4d6d',
+    pointerEvents: 'none',
+  },
+  waveNotice: {
+    position: 'absolute',
+    inset: 0,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    color: '#8ea2b8',
+    pointerEvents: 'none',
+  },
+  tokText: {
+    fontSize: 15,
+    pointerEvents: 'none',
+    textShadow: '0 1px 2px rgba(0,0,0,.9)',
+    whiteSpace: 'nowrap',
+  },
+  lock: { position: 'absolute', top: 1, right: 2, fontSize: 9, pointerEvents: 'none' },
+  overview: {
+    position: 'relative',
+    height: OVERVIEW_H,
+    overflow: 'hidden',
+    background: '#0b131b',
+    borderTop: '1px solid #24344a',
+    cursor: 'pointer',
+  },
+  overviewBox: {
+    position: 'absolute',
+    left: 0,
+    width: '100%',
+    top: 0,
+    bottom: 0,
+    border: '1px solid #ffd147',
+    background: 'rgba(255,209,71,.12)',
+    borderRadius: 2,
+    pointerEvents: 'none',
+  },
+  tapPanel: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 4,
+    padding: 8,
+    border: '1px solid #6b5a1c',
+    borderRadius: 6,
+    background: '#1b1a10',
+  },
+  tapHeadRow: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
+  chipRow: { display: 'flex', gap: 5, overflowX: 'auto', padding: '4px 0' },
+  legendItem: { display: 'inline-flex', alignItems: 'center', gap: 4, color: '#b9c8da' },
+  todo: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    padding: '1px 9px',
+    borderRadius: 10,
+    border: '1px dashed #94a3b8',
+    background: 'rgba(148,163,184,.16)',
+    color: '#cbd5e1',
+  },
+  tip: {
+    position: 'fixed',
+    zIndex: 50,
+    padding: '4px 8px',
+    background: '#0b131b',
+    border: '1px solid #3b4d64',
+    borderRadius: 5,
+    color: '#ffd147',
+    pointerEvents: 'none',
+    whiteSpace: 'nowrap',
+  },
+}
+
+export default Timeline

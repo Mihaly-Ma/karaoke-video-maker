@@ -17,6 +17,22 @@
 
 `\\t` 内的矩形 `\\clip` 动画已实测可用（CLAUDE.md §9 P0-1 结项）。
 
+## 一行内的多声部分色
+
+声部标识行级是默认值、**Token 级可覆盖**（CLAUDE.md §8.5）——
+对唱歌曲一行内男女交替是常态（`A: 君の / B: 声が / 合: 聞こえる`）。
+一个 Dialogue 只能有一组颜色，所以按有效声部把 token 切成**连续段**，
+每段各出一对（未唱层 + 已唱层）Dialogue。
+
+每段画的仍是**整行文本**、用同一个 `\\pos` —— 只靠 `\\clip` 把它限制在
+本段的 x 区间内。不切文本是刻意的：切了就等于让 libass 分别排版几个片段，
+字距与整行排版不再一致，段与段的接缝会错位。
+
+段界取 token 的 advance 边界，各段 clip 区间**严丝合缝且互不重叠**；
+首段左界与末段右界放开到画面边缘，免得把首尾字符溢出 advance 盒的描边裁掉。
+单声部行（绝大多数）只有一段，此时**不输出这个区间 clip**，
+输出与未支持多声部时逐字节一致。
+
 ## 坐标策略
 
 一律用 `\\an7`（左上）+ 显式 `\\pos`，自己算居中，而不是用 `\\an2` 让 libass 居中。
@@ -28,7 +44,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from itertools import pairwise
 
-from kvm.models.karaoke import KaraokeProject, Line, RubySpan
+from kvm.models.karaoke import KaraokeProject, Line, RubySpan, Token
 from kvm.render.text_metrics import FontSpec, LibassMetrics
 
 _HEADER_TMPL = """[Script Info]
@@ -387,7 +403,6 @@ class AssBuilder:
         p = self._p
         st = p.style
         ln = lo.line
-        pal = p.palette_for(ln.voice_part)
         off = p.global_offset_ms
 
         show, hide = window
@@ -398,37 +413,56 @@ class AssBuilder:
 
         sc = f"\\fscx{lo.scale}" if lo.scale != 100 else ""
 
-        # 底层：未唱色整行
-        base_tags = (
-            f"\\an7\\pos({lo.x0},{lo.y}){sc}"
-            f"\\1c{pal.unsung_fill}\\3c{pal.unsung_outline}"
-        )
-        under = (
-            f"Dialogue: 0,{t_show},{t_hide},Main,,0,0,0,,"
-            f"{{{base_tags}}}{body}\n"
-        )
+        segments = _voice_segments(ln)
+        multi = len(segments) > 1
 
-        # 顶层：已唱色 + 逐 token 推进的 clip
-        clip_tags = [
-            f"\\an7\\pos({lo.x0},{lo.y}){sc}",
-            f"\\1c{pal.sung_fill}\\3c{pal.sung_outline}",
-            f"\\clip({lo.x0},0,{lo.x0},{h})",
-        ]
-        for i, tk in enumerate(ln.tokens):
-            # dur=0 的块（QRC 实测存在，多为半角空格）会触发 libass #124，
-            # 必须跳过而不是输出零时长动画
-            if tk.dur_ms <= 0:
-                continue
-            rel_a = max(0, tk.start_ms + off - show)
-            rel_b = max(rel_a + 1, tk.end_ms + off - show)
-            x_to = lo.token_x[i + 1]
-            clip_tags.append(f"\\t({rel_a},{rel_b},\\clip({lo.x0},0,{x_to},{h}))")
-        over = (
-            f"Dialogue: 1,{t_show},{t_hide},Main,,0,0,0,,"
-            f"{{{''.join(clip_tags)}}}{body}\n"
-        )
+        events: list[str] = []
+        for si, (i0, i1, voice) in enumerate(segments):
+            pal = p.palette_for(voice)
+            seg_x0 = lo.token_x[i0]
 
-        events = [under, over]
+            # 只有真的分了段才加区间 clip：单声部行不加，输出与旧版逐字节一致。
+            # 首段左界与末段右界放开到画面边缘，否则首尾字符溢出 advance 盒的
+            # 描边会被裁掉，行的两端看起来像被削平了一层。
+            if multi:
+                bound_l = 0 if si == 0 else seg_x0
+                bound_r = p.video_width if si == len(segments) - 1 else lo.token_x[i1]
+                seg_clip = f"\\clip({bound_l},0,{bound_r},{h})"
+            else:
+                seg_clip = ""
+
+            # 底层：未唱色整行（按段裁出本段区间）
+            base_tags = (
+                f"\\an7\\pos({lo.x0},{lo.y}){sc}"
+                f"\\1c{pal.unsung_fill}\\3c{pal.unsung_outline}{seg_clip}"
+            )
+            events.append(
+                f"Dialogue: 0,{t_show},{t_hide},Main,,0,0,0,,"
+                f"{{{base_tags}}}{body}\n"
+            )
+
+            # 顶层：已唱色 + 逐 token 推进的 clip。
+            # 推进起点取本段左界、终点最远只到本段右界，所以这一个 clip
+            # 同时承担了"扫描进度"与"限制在本段内"两件事，不需要额外的区间 clip。
+            clip_tags = [
+                f"\\an7\\pos({lo.x0},{lo.y}){sc}",
+                f"\\1c{pal.sung_fill}\\3c{pal.sung_outline}",
+                f"\\clip({seg_x0},0,{seg_x0},{h})",
+            ]
+            for i in range(i0, i1):
+                tk = ln.tokens[i]
+                # dur=0 的块（QRC 实测存在，多为半角空格）会触发 libass #124，
+                # 必须跳过而不是输出零时长动画
+                if tk.dur_ms <= 0:
+                    continue
+                rel_a = max(0, tk.start_ms + off - show)
+                rel_b = max(rel_a + 1, tk.end_ms + off - show)
+                x_to = lo.token_x[i + 1]
+                clip_tags.append(f"\\t({rel_a},{rel_b},\\clip({seg_x0},0,{x_to},{h}))")
+            events.append(
+                f"Dialogue: 1,{t_show},{t_hide},Main,,0,0,0,,"
+                f"{{{''.join(clip_tags)}}}{body}\n"
+            )
 
         # 注音行
         ruby_y = lo.y - ruby_size - st.ruby_gap
@@ -441,8 +475,16 @@ class AssBuilder:
             placed = _layout_ruby(ln.ruby, widths, char_x, min_gap)
 
             char_time = self._char_time(ln)
+            char_voice = _char_voice(ln)
             for r, rw, rx in placed:
                 rtext = _escape(r.text)
+                # 注音跟随其**基字所属声部**的配色，而不是行声部——
+                # 一行内分色时注音若还用行的颜色，会与它标注的基字对不上。
+                # 注音区间理论上可能横跨段界（实际不会：段界取在 token 边界，
+                # 而一条注音总落在同一个词里），真跨了就随首个基字所在的段。
+                pal = p.palette_for(
+                    char_voice[r.start] if 0 <= r.start < len(char_voice) else ln.voice_part
+                )
                 # 底层：未唱色
                 events.append(
                     f"Dialogue: 2,{t_show},{t_hide},Ruby,,0,0,0,,"
@@ -500,6 +542,42 @@ class AssBuilder:
         adv = self._m.advances(lo.line.text, font)
         f = lo.scale / 100.0
         return [lo.x0] + [lo.x0 + int(a * f) for a in adv]
+
+
+def _effective_voice(line: Line, token: Token) -> str:
+    """Token 的有效声部：token 级覆盖优先，缺省继承行级（CLAUDE.md §8.5）。"""
+    return token.voice_part or line.voice_part
+
+
+def _voice_segments(line: Line) -> list[tuple[int, int, str]]:
+    """按有效声部把行内 token 切成连续段：`[(起始下标, 结束下标（不含）, 声部)]`。
+
+    相邻同声部的 token 并成一段，段数因此等于行内的**换声次数 + 1**；
+    绝大多数行只换 0 次，返回单段，渲染层据此走与旧版完全相同的输出路径。
+
+    没有 token 的行（理论上不会进到这里）返回一个空段，
+    保证调用方仍会输出那对空文本 Dialogue，行为与旧版一致。
+    """
+    segs: list[tuple[int, int, str]] = []
+    for i, tk in enumerate(line.tokens):
+        voice = _effective_voice(line, tk)
+        if segs and segs[-1][2] == voice:
+            segs[-1] = (segs[-1][0], i + 1, voice)
+        else:
+            segs.append((i, i + 1, voice))
+    return segs or [(0, 0, line.voice_part)]
+
+
+def _char_voice(line: Line) -> list[str]:
+    """行内每个**字符**的有效声部（长度 = 字符数）。
+
+    注音挂在字符区间上而不是 token 上，要判断一段注音归哪个声部，
+    得先把 token 级声部摊到字符级。
+    """
+    out: list[str] = []
+    for tk in line.tokens:
+        out.extend([_effective_voice(line, tk)] * len(tk.text))
+    return out
 
 
 def _choose_split(line: Line, adv: list[int], avail: int) -> int:
