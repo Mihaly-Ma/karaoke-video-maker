@@ -6,9 +6,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 0. 当前状态（重要）
 
-**这是一个空仓库。除本文件外没有任何代码。** 目录 `assets/ backend/ docs/ frontend/ tests/` 目前均为空脚手架。
+**已有一条可运行的端到端出片管线**（2026-08-09），但**没有任何 GUI**——
+"一站式"所依赖的三级调轴与注音编辑界面尚未开始。
 
-本文件中出现的一切架构描述、目录约定、数据结构、命令，除非明确标注"已实测"，否则都是**已确定的设计决策**或**待实现项**，不是既成事实。写代码时以本文件为设计契约，不要假设某个模块、脚本、接口已经存在。
+已经能跑的（`backend/kvm/`）：
+
+| 模块 | 作用 |
+|---|---|
+| `models/karaoke.py` | 工程数据模型：Project → Line → Token + RubySpan |
+| `pipeline/qrc_import.py` | QRC 逐字轴 + `[kana:]` 注音 → 工程 |
+| `render/text_metrics.py` | 向 libass 实测 advance（尾随标记块法） |
+| `render/ass_builder.py` | ASS 生成：双层 clip 描边翻色、注音布局、拆行、引导点、制作名单 |
+| `pipeline/make_video.py` | 端到端 CLI：探测 → 生成 ASS → ffmpeg 烧录 |
+
+`experiments/` 下是各阻断问题的实测脚本，结论已固化进本文件，脚本保留作为证据与回归基线。
+
+除此之外，本文件中的架构描述、目录约定、数据结构、命令，凡未标"已实测"或未在上表中，
+都仍是**设计决策**或**待实现项**，不要假设它已经存在。
 
 标注体系：
 
@@ -62,7 +76,42 @@ Windows x64 与 macOS Apple Silicon (arm64) 双端。任何"只有 Linux 有 whe
 
 开发机现状（2026-08-08 实测）：已装 `ffmpeg-full` 8.1.2_2，带 `libass + libharfbuzz + libfontconfig + libfreetype`，`ass`/`subtitles` 滤镜可用。注意 **Homebrew 主线 `ffmpeg` formula 不含 libass**，`ffmpeg@6` 含但版本旧——所以探测 ffmpeg 时必须**以滤镜是否注册为准**，不能只看版本号，也不能假设 `which ffmpeg` 拿到的那个可用。系统 Python 是 3.14，项目用 3.12，由 uv 管理，不动系统 Python。
 
-### 2.5 依赖必须能自动查找 / 获取 / 安装
+### 2.5 自动化可以打折，一站式不能
+
+**自动化 = 省力；一站式 = 不用出门。** 前者可以打折，后者不行。
+
+这条定位重排了整个优先级。它**降低**了一批技术风险：对齐精度差 80ms、
+读音把「運命」猜成 うんめい、歌词源完全查不到——都可以接受，因为用户能在工具里改。
+
+但它**硬性要求**：
+
+> **每个自动环节都必须有等价的手工旁路，且失败时要降级、不能终止。**
+
+反面例子：歌词源查不到 → 弹「获取失败」→ 流程卡死。用户此刻唯一的出路是打开别的软件，
+**一站式就在这一刻破功**。正确行为是直接打开歌词粘贴框，让他往下走。
+
+| 环节 | 自动 | 手工旁路（必须存在） |
+|---|---|---|
+| 视频获取 | yt-dlp 下载 | 选本地文件 |
+| 歌词 | provider 搜索 | 粘贴文本 / 导入 LRC |
+| 时间轴 | QRC 逐字轴 / 强制对齐 | **tap-to-time 打轴 + 波形拖拽** |
+| 读音 | `[kana:]` / 形态素 / 声学消歧 | 逐词输入假名 |
+| 分行 | 自动断句 | 拆行 / 并行 |
+| 段落 | 间隙检测 | 手工标间奏 |
+| 声部 | （暂无可靠自动方案） | 选中词句指派声部 |
+
+**tap-to-time 手工打轴是一等公民，不是降级方案**——要做到哪怕自动对齐完全不可用，
+用户也能舒服地从零打完一首歌，因此不能藏在高级菜单里。
+
+由此**编辑器状态层（撤销/重做、工程持久化、崩溃恢复）是第一优先级**，
+不是完备性审查里排的第 4 位：用户手工调 40 分钟的轴，进程崩了就全没，
+这在"高度自动化"的定位下只是遗憾，在"一站式"的定位下是致命伤。
+
+反过来，这条也让一件事**更重要**：**自动环节的错误必须可见**。
+`(value, source, locked)` 横切机制（§4.4）的价值因此上升——用户需要一眼看出
+"这几个字是机器猜的，我得检查"，而不是面对一堆看起来同样自信的结果逐个核对。
+
+### 2.6 依赖必须能自动查找 / 获取 / 安装
 
 **用户不应该为了跑起这个工具去手动 `brew install` 任何东西。** 应用要自己搞定依赖。
 
@@ -296,9 +345,9 @@ Provider 清单（**优先级未最终裁决，见 §9**）：
 
 | Provider | 粒度 | 端点/方式 | 状态 |
 |---|---|---|---|
-| QQ音乐 QRC | 逐字 + `[kana:]` + 罗马音 + 翻译 | `POST https://u.y.qq.com/cgi-bin/musicu.fcg`，`module=music.musichallSong.PlayLyricInfo` / `method=GetPlayLyricInfo`，param 含 `crypt:1, qrc:1, roma:1, trans:1` | 端点已实测；**解密闭环未裁决** |
+| QQ音乐 QRC | 逐字 + `[kana:]` + 罗马音 + 翻译 | `POST https://u.y.qq.com/cgi-bin/musicu.fcg`，`module=music.musichallSong.PlayLyricInfo` / `method=GetPlayLyricInfo`，param 含 `crypt:1, qrc:1, roma:1, trans:1` | **已实测端到端闭环，全程零 Cookie**。第一版主源，实现见 `experiments/qrc_decrypt.py` |
 | 酷狗 KRC | 逐字 + `[kana:]` | 三步：`mobiles.kugou.com/api/v3/search/song` → `krcs.kugou.com/search` → `lyrics.kugou.com/download`；解密 = base64 → 去 4 字节 `krc1` 头 → 与 16 字节密钥 `40 47 61 77 5E 32 74 47 51 36 31 2D CE D2 6E 69` 循环 XOR → zlib | 已实测端到端跑通 |
-| 网易云 | 行级 LRC + 中译 + **按拍分词罗马音** | `music.163.com/api/song/lyric?id=...&lv=1&kv=1&tv=1&rv=1` | 已实测；**匿名 API 与匿名 eapi 都拿不到 yrc 逐字**，别为 yrc 投入 eapi 工程量 |
+| 网易云 | 行级 LRC + 中译 + **按拍分词罗马音** | `music.163.com/api/song/lyric?id=...&lv=1&kv=1&tv=1&rv=1` | 已实测；**匿名 API 与匿名 eapi 都拿不到 yrc 逐字**，别为 yrc 投入 eapi 工程量。**后期计划接入**（用户 2026-08-09 指定）：作为行级兜底与 QQ 的交叉校验源，不指望它提供逐字轴 |
 | YouTube 官方 ja 字幕 | 句级，**已在 MV 时间轴上** | yt-dlp `subtitles.ja`（与 `automatic_captions` 分离即人工轨） | 已实测，65 行。**最稳的兜底，完全不依赖中国大陆 API** |
 | LRCLIB | 行级 | `https://lrclib.net/api/search`，无鉴权 | 已实测 |
 | UtaTen | 纯文本 + **权威 ruby** | 页面 `<span class="rb">/<span class="rt">` 成对 | 已实测可抓 |
@@ -684,6 +733,74 @@ effective = manual_override if manual_override.locked else computed
 
 ---
 
+## 8.5 渲染规格（第一版已实现并出片验证）
+
+以下行为已在 `render/ass_builder.py` 中实现，并通过赤春花全片验证。
+改动这些默认值前请先理解它们的由来。
+
+### 版面
+
+| 项 | 规格 | 由来 |
+|---|---|---|
+| 字号 | 画面高度的 **7.5%**（4K → 162px） | 5.2% 实测偏小，卡拉OK 字幕要压在任意画面上仍醒目 |
+| 描边 / 阴影 | 字号的 **5.5% / 2.2%**，随字号自适应 | 固定 3px 在 4K 下细到几乎不可见 |
+| 上下行 | **上行贴左、下行贴右** | 日式卡拉OK 的经典错开布局，同屏两行也能一眼分清 |
+| 间奏后 | **重新从上行开始** | 否则新段落可能突然从下行冒出，视觉接不上 |
+| 超宽行 | **拆行**，不做水平压缩 | 压缩会让字变形；拆分点优先选**时间间隙最大处**（自然停顿） |
+| 配色 | 未唱白 + 近黑描边；已唱亮蓝 + 深蓝描边 | nicokara 惯例 |
+
+### 时间
+
+- 下一句在**当前句还在唱时**就已显示（从上一行开唱起），最多提前 `max_lead_ms`（5s）。
+  只提前几百毫秒不符合卡拉OK 实际观感。
+- **同槽位冲突消解**：槽位只有两个，隔一行就复用同一位置；歌词密集时前一行尚未消失、
+  新行已压上，字会叠在一起。策略是优先让前一行提前退场（但不早于唱完），
+  腾不出位置时再推后新行入场。
+- **开唱引导点**：三点齐亮、**自右向左**依次熄灭，最左那点消失即开唱。
+  剩几个点就是还剩几拍——反向熄灭才读得出倒计时的意思。
+  **点必须踩在真实拍点上**（`pipeline/beat_detect.py`），固定间隔只是"三个会消失的点"，
+  与音乐无关，演唱者跟不进。节拍检测**优先用分离出的 drums stem**——
+  鼓点是节拍最强的证据，而这条轨在去人声阶段本就会产出，属于免费信号。
+  赤春花实测 136.0 BPM，引导点间隔 440ms，与 60000/136=441ms 吻合。
+  空档不足时（如首句在 0.836s 就开唱）自动压缩间隔；检测失败则回退固定间隔，
+  **不因节拍检测失败就不显示引导点**。
+  只在第一句与**间奏之后**出现（阈值与段落判定共用），否则满屏是点反而干扰。
+
+### 制作名单
+
+- 曲名 / 歌手 / 词曲编曲制作人**单独成屏**，**居画面正中**。
+- **不能沿用歌词源给的时间**：QRC 把这些行塞在正文里，实测每行只有几十毫秒
+  （0/222/355/518/577ms），照搬根本来不及读。
+- 显示位置是**第一段屏幕上没有歌词的区间**——不能假设片头有前奏（赤春花首句在 774ms），
+  放不下就顺着找行间的第一个间隙（通常是间奏）。
+- 窗口边界必须按**字幕实际出现/消失**算，而非开唱时间：下一句会提前最多 `max_lead_ms`
+  显示，只看开唱时间会让制作名单和歌词叠在一起。
+
+### 声部
+
+- 一个声部需要的是**四个颜色而不是一个**：未唱填充/未唱描边/已唱填充/已唱描边。
+  因为描边跟着填充一起翻色（双层 clip 方案），两层各需一组。
+- 配色（`VoicePalette`）与排版（`KaraokeStyle`）**分离**：换声部只换配色，不动排版。
+- 声部标识行级是默认值，**Token 级可覆盖**——对唱歌曲一行内男女交替是常态。
+- **`Line` 的时间允许互相重叠**，这是为"同一时刻两个声部唱不同歌词、同屏各走各的轴"
+  预留的。第一版编辑器不支持编辑重叠行，但**渲染层与数据结构不得假设行之间时间互斥**。
+
+---
+
+## 8.6 待实现的功能（按用户指定的优先级）
+
+| 优先级 | 功能 | 说明 |
+|---|---|---|
+| **高** | 编辑器状态层 | 撤销/重做、工程持久化、崩溃恢复。见 §2.5——"一站式"定位下这是致命伤而非遗憾 |
+| **高** | 三级调轴 UI + 注音编辑 | 整体 / 单句 / 单词，以及 tap-to-time 手工打轴 |
+| **高** | 歌词**搜索 + 下载**界面 | 不是"抓取"：多源并行搜索，把候选摆出来让用户挑。详见 §5.2 备注 |
+| **中** | **引导声（ガイドメロディ）** | 卡拉OK 的音高引导电子音。本地方案：分离出的 vocals stem → pYIN 音高提取 → 音符量化 → 合成音色 → 混入伴奏。**不是把人声调小混回去**，那不是引导音 |
+| **中** | 声部自动归属 | `pyannote.audio` 本地推理，或用 karaoke 分离模型拆 lead/backing 后按能量归属。手工标记已是可用主路径，这只是省力 |
+| **低** | 网易云歌词源 | 行级兜底 + 与 QQ 交叉校验，**不指望逐字**（匿名 API 拿不到 yrc） |
+| **低** | 同屏多声部各走各的轴 | 数据结构已预留（`Line` 时间可重叠 + `voice_part`），编辑器支持待做 |
+
+---
+
 ## 9. 待实测的开放问题（按阻断性排序）
 
 **前四项里有三项不需要联网调研，只需要写 50 行代码跑一次实验。在补更多外部调研之前，先把这三个实验做掉。**
@@ -713,7 +830,7 @@ nicokara 的招牌观感有干净解法。`Kirakara-Player` 在 Canvas 里靠 4-
 
 在 4 个风格迥异的字体（Noto Sans CJK JP / Hiragino Sans / Hiragino Mincho ProN / YuGothic）
 与日英混排文本上均成立：CJK advance 恒定，西文按比例各异。
-**方法不读 hmtx/kern、不做 shaping 推演，因此对任意自定义字体天然兼容**（见 §2.5）。
+**方法不读 hmtx/kern、不做 shaping 推演，因此对任意自定义字体天然兼容**。
 
 两条派生的硬性规则：
 
@@ -812,14 +929,51 @@ uv run pytest -v
 npm run lint && npm run typecheck
 ```
 
-### 待实现的实验脚本（对应 §9 的 P0）
+### 出片（已可用）
 
 ```bash
-# 这些脚本都还不存在，是 §9 前四项实验的落点，命名为约定
-uv run python -m experiments.ass_clip_animation      # P0-1 描边翻色
-uv run python -m experiments.text_metrics_libass     # P0-2 度量闭环
-uv run python -m experiments.qrc_decrypt             # P0-3 QRC 解密闭环
-uv run python -m experiments.reanchor_xcorr          # P0-4 重锚定实验
+# 完整链路：QRC 工程 → 度量 → ASS → 烧录
+uv run --python 3.12 --with numpy --with "librosa>=0.11" --with "numba>=0.61" \
+  python backend/kvm/pipeline/make_video.py \
+  --video   workspace/media/<视频>.mkv \
+  --parsed  workspace/qrc/qrc_parsed.json \
+  --kana    workspace/qrc/kana_entries.json \
+  --drums   "workspace/sep_full/<曲名>_(Drums)_htdemucs.flac" \
+  --out     workspace/out/成品.mp4
+
+# 只出 ASS 不烧录（迭代样式时用，秒级）
+… --ass-only --ass-out workspace/out/x.ass
+
+# 试渲染片段（--start 用 output seek，字幕时间才不会错位）
+… --start 34 --duration 14
+
+# OFF VOCAL：替换音轨
+… --audio workspace/sep_full/instrumental.wav
+```
+
+**注意 librosa 的依赖坑**：直接 `--with librosa` 会解析到不兼容 Python 3.12 的旧版
+numba/llvmlite 并编译失败，必须显式约束 `--with "numba>=0.61"`。
+
+人声分离（`audio-separator` 不会自动带上 `onnxruntime`，必须显式加）：
+
+```bash
+uv run --python 3.12 --with audio-separator --with onnxruntime audio-separator \
+  workspace/media/audio_44k.wav --model_filename htdemucs.yaml \
+  --model_file_dir workspace/sep_probe/models --output_dir workspace/sep_full
+# 伴奏 = Bass + Drums + Other 相加（amix 必须 normalize=0，否则会被平均而变轻）
+```
+
+### 实验脚本（已存在，作为结论证据与回归基线）
+
+```bash
+uv run python -m experiments.ass_clip_animation      # P0-1 描边翻色（已结项）
+uv run python -m experiments.text_metrics_advance    # P0-2 度量闭环（已结项，采用这个）
+uv run python -m experiments.text_metrics_libass     # P0-2 墨迹法对照（有偏差，勿用于生产）
+uv run python -m experiments.qrc_decrypt             # P0-3 QRC 解密（已结项）
+uv run python -m experiments.reanchor_xcorr          # P0-4 重锚定
+uv run python -m experiments.download_bilibili       # bilibili 兼容性
+uv run python -m experiments.furigana_local          # 注音链路
+uv run python -m experiments.separation_check        # 分离后端
 ```
 
 ### 环境自检（待实现）
