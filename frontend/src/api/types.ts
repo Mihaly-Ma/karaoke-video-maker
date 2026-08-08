@@ -193,21 +193,57 @@ export interface PaletteTemplate {
 }
 
 // ---- 字体服务 ----
+//
+// 与 backend/kvm/api/routes/fonts.py 的 FontInfo / FontScanStatus / PresetInfo /
+// FontCoverage 一一对应——字体扫描后台化后端已落地，前端以它为准。
 
 export interface FontInfo {
   family: string
   path: string
-  style: string
+  /** TTC 字体集合内的族下标；非集合为 0 */
+  index: number
+  /** 是否覆盖日文字形。不覆盖的字体拿来排日语歌词只会渲染成豆腐块 */
+  is_cjk: boolean
+  /** 该 family 下观测到的全部字重（子族名，如 W3/W6/W8/Regular/Bold），已排序去重 */
+  weights: string[]
 }
 
+/**
+ * 系统字体后台扫描状态。冷启动扫描约需 30~40 秒，期间前端应轮询
+ * `GET /api/fonts/status` 并显示 `message`（已是中文），而不是让用户
+ * 面对一个逐渐变长又不知道何时完整的字体列表。
+ */
+export interface FontScanStatus {
+  state: 'idle' | 'scanning' | 'ready' | 'failed'
+  /** 给用户看的中文状态说明，可直接显示 */
+  message: string
+  family_count: number
+  scanned_files: number
+  total_files: number
+  elapsed_s: number
+  /** 本次结果是否直接来自磁盘缓存（是则说明没有真的重扫，耗时可忽略） */
+  from_cache: boolean
+  error: string | null
+}
+
+/** 卡拉OK 常用字体档位（粗ゴシック/ゴシック/丸ゴシック/明朝体），见 GET /api/fonts/presets */
 export interface FontPreset {
-  name: string
-  family: string
+  key: string
+  label: string
+  note: string
+  /** 本机实际选中的字体族。为 null 表示该档在本机不可用（除非 pending=true） */
+  resolved: string | null
+  candidates: string[]
+  /**
+   * 该档尚未命中候选，但系统字体还在后台扫描中，结果可能变化。
+   * 界面此时应显示"正在扫描系统字体…"，**不能显示"该档不可用"**。
+   */
+  pending: boolean
 }
 
 export interface FontCoverageResult {
   family: string
   /** 未覆盖到的字符列表，为空即完全覆盖 */
   missing: string[]
-  covered: boolean
+  total_checked: number
 }

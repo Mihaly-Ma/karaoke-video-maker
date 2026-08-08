@@ -9,6 +9,7 @@ import type {
   FontCoverageResult,
   FontInfo,
   FontPreset,
+  FontScanStatus,
   JobStatus,
   LockTarget,
   LyricPreview,
@@ -165,9 +166,16 @@ export const deletePaletteTemplate = (id: string) =>
 
 // ---- 字体服务 ----
 
-export const listFonts = () => req<FontInfo[]>('/fonts/')
+/** `cjkOnly=true` 时只返回覆盖日文的字体（后端 `GET /api/fonts/?cjk_only=`） */
+export const listFonts = (cjkOnly = false) => req<FontInfo[]>(`/fonts/?cjk_only=${cjkOnly}`)
 
 export const listFontPresets = () => req<FontPreset[]>('/fonts/presets')
+
+/**
+ * 系统字体后台扫描状态，供前端轮询显示"正在扫描系统字体…"。
+ * 调用它本身也会触发扫描（幂等），组件可以直接拿它当轮询入口。
+ */
+export const getFontStatus = () => req<FontScanStatus>('/fonts/status')
 
 /**
  * 字体子集资源的直链，用法与 mediaUrl 相同——具体是二进制字体文件还是别的表示形式
@@ -189,6 +197,16 @@ export const exportVideo = (body: {
   use_instrumental: boolean
 }) => post<JobStatus>('/render/export', body)
 
-/** 媒体文件的可直接播放 URL。走后端是为了带上 CORP 头。 */
-export const mediaUrl = (projectId: string, kind: 'video' | 'audio' | 'instrumental') =>
-  `/media/file/${projectId}/${kind}`
+/**
+ * 媒体文件的可直接播放 URL。走后端是为了带上 CORP 头
+ * （跨源隔离页面加载不了没有 CORP 的资源）。
+ *
+ * **必须带 `/api` 前缀**——后端路由是 `/api/media/file/...`。
+ * 曾经漏掉它，表现为音频一律 404、波形永远画不出来、预览退化成
+ * "Web Audio 没拿到可用音轨"的降级提示，看起来像是降级逻辑在正常工作，
+ * 实际是请求压根没到后端。这类错误 tsc / lint / build 全都发现不了。
+ */
+export const mediaUrl = (
+  projectId: string,
+  kind: 'video' | 'audio' | 'instrumental' | 'vocals' | 'drums',
+) => `${BASE}/media/file/${projectId}/${kind}`

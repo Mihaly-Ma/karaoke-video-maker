@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
-import type { Palette, Style } from '../api/types'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import * as api from '../api/client'
+import type { FontInfo, FontPreset, FontScanStatus, Palette, Style } from '../api/types'
 import { useProject } from '../state/projectStore'
 import PalettePicker, { PALETTE_PRESETS } from './PalettePicker'
 
@@ -113,46 +114,187 @@ function CheckboxField({
   )
 }
 
-const FONT_PRESETS = ['源真ゴシック Heavy', 'Noto Sans JP Black', 'Noto Sans CJK JP']
+/** 字体扫描状态轮询间隔。太密没意义（后端扫描是秒级推进的），太疏用户等得难受。 */
+const FONT_POLL_INTERVAL_MS = 1500
 
-function FontField({ value, onChange, onCommit }: { value: string; onChange: (v: string) => void; onCommit: () => void }) {
-  const isPreset = FONT_PRESETS.includes(value)
+/**
+ * 字体选择：四档卡拉OK 常用预置 + 完整系统字体列表，替换掉原来的自由输入框。
+ *
+ * 字体一律经后端从本机系统扫描取得（CLAUDE.md §2.6），冷启动扫描约需 30~40 秒，
+ * 期间 `GET /api/fonts/status` 处于 `scanning`——本组件据此轮询，转为 `ready` 后
+ * 重新拉取字体列表与预置，而不是让用户永远停留在扫描到一半的不完整列表上。
+ *
+ * 某档 `resolved=null` 且非 `pending` 时按钮禁用并说明原因，**绝不允许悄悄换成
+ * 别的字体**——用户选了明朝体却渲染出黑体，比"该档不可用"更糟
+ * （backend/kvm/api/routes/fonts.py 的 `PresetInfo` 文档）。
+ */
+function FontField({
+  value,
+  onChange,
+  onCommit,
+}: {
+  value: string
+  onChange: (v: string) => void
+  onCommit: () => void
+}) {
+  const [status, setStatus] = useState<FontScanStatus | null>(null)
+  const [presets, setPresets] = useState<FontPreset[]>([])
+  const [fonts, setFonts] = useState<FontInfo[]>([])
+  const [cjkOnly, setCjkOnly] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
+
+  const pollTimerRef = useRef<number | null>(null)
+  const lastStateRef = useRef<FontScanStatus['state'] | null>(null)
+
+  const loadFontList = useCallback(async (onlyCjk: boolean) => {
+    try {
+      setFonts(await api.listFonts(onlyCjk))
+      setLoadError(null)
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : String(e))
+    }
+  }, [])
+
+  const loadPresets = useCallback(async () => {
+    try {
+      setPresets(await api.listFontPresets())
+      setLoadError(null)
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : String(e))
+    }
+  }, [])
+
+  // cjkOnly 切换（或首次挂载）时重新拉字体列表
+  useEffect(() => {
+    void loadFontList(cjkOnly)
+  }, [cjkOnly, loadFontList])
+
+  useEffect(() => {
+    void loadPresets()
+  }, [loadPresets])
+
+  // 轮询扫描状态；scanning → ready 时重新拉一次完整列表与预置——
+  // 冷启动期间只拉一次会永久停留在不完整的结果上（任务背景问题 2）
+  useEffect(() => {
+    let cancelled = false
+
+    const poll = async (): Promise<void> => {
+      try {
+        const s = await api.getFontStatus()
+        if (cancelled) return
+        setStatus(s)
+        setLoadError(null)
+        const prevState = lastStateRef.current
+        lastStateRef.current = s.state
+        if (prevState === 'scanning' && s.state === 'ready') {
+          void loadFontList(cjkOnly)
+          void loadPresets()
+        }
+        if (s.state === 'scanning') {
+          pollTimerRef.current = window.setTimeout(() => void poll(), FONT_POLL_INTERVAL_MS)
+        }
+      } catch (e) {
+        if (!cancelled) setLoadError(e instanceof Error ? e.message : String(e))
+      }
+    }
+
+    void poll()
+    return () => {
+      cancelled = true
+      if (pollTimerRef.current !== null) window.clearTimeout(pollTimerRef.current)
+    }
+  }, [cjkOnly, loadFontList, loadPresets])
+
+  const pick = (family: string) => {
+    onChange(family)
+    onCommit()
+  }
+
   return (
-    <div className="kvm-style-field">
-      <div className="kvm-style-field-label-col">
-        <div className="kvm-style-field-label">字体</div>
-        <div className="kvm-style-field-hint">
-          推荐「源真ゴシック Heavy」（SIL OFL 1.1，随应用打包）；系统缺字时兜底到「Noto Sans JP Black」。
-        </div>
+    <div className="kvm-font-field">
+      <div className="kvm-style-field-label">字体</div>
+      <div className="kvm-style-field-hint">
+        先在下面四档卡拉OK 常用字体里选一档；也可以在系统字体列表里直接选具体字体。
+        字体经后端从本机系统扫描并子集化后供预览与导出共用，首次冷启动扫描约需 30~40 秒。
       </div>
-      <select
-        className="kvm-style-select"
-        value={isPreset ? value : '__custom__'}
-        onChange={(e) => {
-          const next = e.target.value === '__custom__' ? value : e.target.value
-          onChange(next)
-          onCommit()
-        }}
-      >
-        {FONT_PRESETS.map((f) => (
-          <option key={f} value={f}>
-            {f}
-          </option>
+
+      {status && (status.state === 'scanning' || status.state === 'failed') && (
+        <div
+          className={
+            'kvm-font-status' +
+            (status.state === 'failed' ? ' kvm-font-status-error' : ' kvm-font-status-scanning')
+          }
+        >
+          {status.message}
+        </div>
+      )}
+      {loadError && <div className="kvm-font-status kvm-font-status-error">获取字体信息失败：{loadError}</div>}
+
+      <div className="kvm-font-presets">
+        {presets.length === 0 && <div className="kvm-font-status">正在加载预置字体…</div>}
+        {presets.map((p) => {
+          const selected = p.resolved !== null && p.resolved === value
+          const unavailable = p.resolved === null && !p.pending
+          return (
+            <button
+              key={p.key}
+              type="button"
+              disabled={p.resolved === null}
+              className={
+                'kvm-font-preset' +
+                (selected ? ' kvm-font-preset-selected' : '') +
+                (unavailable ? ' kvm-font-preset-unavailable' : '') +
+                (p.pending ? ' kvm-font-preset-pending' : '')
+              }
+              title={unavailable ? `本机未安装以下任一候选字体：${p.candidates.join('、')}` : undefined}
+              onClick={() => {
+                if (p.resolved) pick(p.resolved)
+              }}
+            >
+              <div className="kvm-font-preset-label">{p.label}</div>
+              <div className="kvm-font-preset-note">{p.note}</div>
+              <div className="kvm-font-preset-resolved">
+                {p.pending
+                  ? '系统字体扫描中，稍后可能可用…'
+                  : p.resolved
+                    ? `实际字体：${p.resolved}`
+                    : '本机不可用'}
+              </div>
+            </button>
+          )
+        })}
+      </div>
+
+      <div className="kvm-font-list-header">
+        <span>系统字体列表{cjkOnly ? '（仅显示覆盖日文的）' : '（全部）'}</span>
+        <label className="kvm-font-toggle">
+          <input type="checkbox" checked={!cjkOnly} onChange={(e) => setCjkOnly(!e.target.checked)} />
+          显示全部字体
+        </label>
+      </div>
+      <div className="kvm-font-list">
+        {fonts.map((f) => (
+          <button
+            key={f.family}
+            type="button"
+            className={'kvm-font-item' + (f.family === value ? ' kvm-font-item-selected' : '')}
+            onClick={() => pick(f.family)}
+          >
+            <span>{f.family}</span>
+            {!f.is_cjk && <span className="kvm-font-item-warn">不含日文字形</span>}
+          </button>
         ))}
-        <option value="__custom__">自定义…</option>
-      </select>
-      {!isPreset && (
-        <input
-          type="text"
-          className="kvm-style-text"
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          onBlur={onCommit}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') e.currentTarget.blur()
-          }}
-          placeholder="输入系统已安装的字体名"
-        />
+        {fonts.length === 0 && (
+          <div className="kvm-font-status">
+            {status?.state === 'scanning' ? status.message : '没有匹配的系统字体'}
+          </div>
+        )}
+      </div>
+
+      {value && !fonts.some((f) => f.family === value) && !presets.some((p) => p.resolved === value) && (
+        <div className="kvm-font-current">
+          当前字体：{value}（未出现在上方列表中，可能是历史数据或扫描尚未覆盖到）
+        </div>
       )}
     </div>
   )
@@ -655,4 +797,89 @@ const CSS = `
   cursor: pointer;
 }
 .kvm-style-checkbox-row input { margin-top: 3px; accent-color: #4a8fd0; }
+
+.kvm-font-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 0 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+}
+.kvm-font-status {
+  padding: 6px 10px;
+  border-radius: 4px;
+  background: #24303d;
+  color: #cfe0f5;
+  font-size: 11.5px;
+}
+.kvm-font-status-scanning { background: #24303d; color: #cfe0f5; }
+.kvm-font-status-error { background: #3a1c1c; color: #ef8080; }
+
+.kvm-font-presets {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 8px;
+}
+.kvm-font-preset {
+  text-align: left;
+  padding: 8px 10px;
+  border: 1px solid #444852;
+  border-radius: 5px;
+  background: #14161a;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.kvm-font-preset:hover:not(:disabled) { border-color: #4a8fd0; }
+.kvm-font-preset:disabled { cursor: not-allowed; opacity: 0.55; }
+.kvm-font-preset-selected { border-color: #4a8fd0; background: #1c2733; }
+.kvm-font-preset-unavailable { border-style: dashed; }
+.kvm-font-preset-pending { border-color: #e0a83e; }
+.kvm-font-preset-label { font-size: 12.5px; font-weight: 700; }
+.kvm-font-preset-note { font-size: 11px; color: #9aa0aa; }
+.kvm-font-preset-resolved { font-size: 11px; color: #6fb0ea; }
+.kvm-font-preset-unavailable .kvm-font-preset-resolved { color: #e0a83e; }
+
+.kvm-font-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11.5px;
+  color: #9aa0aa;
+  margin-top: 4px;
+}
+.kvm-font-toggle { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+.kvm-font-toggle input { accent-color: #4a8fd0; }
+
+.kvm-font-list {
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid #444852;
+  border-radius: 5px;
+  background: #14161a;
+  display: flex;
+  flex-direction: column;
+}
+.kvm-font-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border: none;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.kvm-font-item:last-child { border-bottom: none; }
+.kvm-font-item:hover { background: #1c1f26; }
+.kvm-font-item-selected { background: #1c2733; color: #cfe0f5; font-weight: 700; }
+.kvm-font-item-warn { font-size: 10.5px; color: #e0a83e; flex: 0 0 auto; }
+
+.kvm-font-current { font-size: 11px; color: #9aa0aa; }
 `

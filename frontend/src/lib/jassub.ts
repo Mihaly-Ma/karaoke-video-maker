@@ -14,6 +14,7 @@
  */
 
 import JASSUB from 'jassub'
+import { fontSubsetUrl } from '../api/client'
 
 // ---------------------------------------------------------------------------
 // 常量
@@ -342,7 +343,7 @@ function sameEvent(a: AssEvent, b: AssEvent): boolean {
 export interface PreviewFontSource {
   /** ASS 里引用的字体族名，必须与后端 style.font_name 对得上 */
   family: string
-  /** 字体文件 URL。放在 frontend/public/fonts/ 下即可用 /fonts/xxx 访问 */
+  /** 字体文件 URL */
   url: string
 }
 
@@ -351,47 +352,132 @@ export interface PreviewFontSource {
  * （CLAUDE.md §5.12）。它自带的 default.woff2 只有 145KB，不含任何 CJK 字形，
  * 所以不显式喂字体文件，日文歌词会整片渲染成豆腐块。
  *
- * 这里给出约定路径；文件不存在时会降级并给出中文警告，而不是白屏。
- * 后端默认 style.font_name 是 `Noto Sans CJK JP`（backend/kvm/models/karaoke.py），
- * 想换成 CLAUDE.md §5.8 推荐的「源真ゴシック Heavy」时，同步改这里与后端默认值。
+ * 字体不预打包（CLAUDE.md §2.6：一律经后端从本机系统按需提取），默认字体来源
+ * 就是当前工程的 `style.font_name`，经 `GET /api/fonts/subset?family=` 子集化，
+ * 与导出侧 ffmpeg 用的是同一份字节，WYSIWYG 才成立。传入空 family（工程还没
+ * 设置字体）时返回空数组，交由 `loadFonts` 走"没有字体可用"的降级路径。
  */
-export const DEFAULT_FONT_SOURCES: PreviewFontSource[] = [
-  { family: 'Noto Sans CJK JP', url: '/fonts/NotoSansCJKjp-Regular.otf' },
-  { family: 'Noto Sans JP', url: '/fonts/NotoSansJP-Regular.otf' },
-]
+export function defaultFontSources(fontFamily: string): PreviewFontSource[] {
+  const family = fontFamily.trim()
+  return family ? [{ family, url: fontSubsetUrl(family) }] : []
+}
 
 interface LoadedFont {
   family: string
   data: Uint8Array
 }
 
+/** 503（后端字体扫描/子集化尚未就绪）时按 `Retry-After` 兜底的重试间隔 */
+const FONT_FETCH_RETRY_FALLBACK_MS = 2_000
+/**
+ * 503 重试的总等待上限。系统字体冷扫描本机实测 40.9 秒
+ * （backend/kvm/api/routes/fonts.py 模块文档），留出余量避免刚好卡在边界。
+ */
+const FONT_FETCH_MAX_WAIT_MS = 60_000
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
+}
+
+/** 响应体是 JSON 且带 `detail` 字段时取出来；不是 JSON（比如静态文件的 404）时返回 null */
+async function readErrorDetail(resp: Response): Promise<string | null> {
+  try {
+    const body = (await resp.json()) as { detail?: unknown }
+    if (body?.detail) return typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail)
+  } catch {
+    /* 响应体不是 JSON，保留状态行 */
+  }
+  return null
+}
+
+type FontFetchResult =
+  | { kind: 'ok'; data: Uint8Array }
+  | { kind: 'pending'; detail: string }
+  | { kind: 'error'; detail: string }
+
+/**
+ * 取一个字体文件的字节。后端字体扫描/子集化未完成时返回 503 + `Retry-After`
+ * （见 `backend/kvm/api/routes/fonts.py` 的 `_require_font`），这里按该间隔重试，
+ * **不当作错误**——这是"自动环节失败要降级、不能终止"在字体加载上的体现
+ * （CLAUDE.md §2.5）。超过 `FONT_FETCH_MAX_WAIT_MS` 仍是 503 才作为 `pending`
+ * 上报给调用方，由它决定怎么提示用户，而不是直接抛错炸掉整个预览。
+ */
+async function fetchFontData(url: string): Promise<FontFetchResult> {
+  const deadline = Date.now() + FONT_FETCH_MAX_WAIT_MS
+  for (;;) {
+    let resp: Response
+    try {
+      resp = await fetch(url)
+    } catch (e) {
+      return { kind: 'error', detail: describeError(e) }
+    }
+    if (resp.ok) return { kind: 'ok', data: new Uint8Array(await resp.arrayBuffer()) }
+
+    if (resp.status === 503) {
+      const detail = (await readErrorDetail(resp)) ?? '字体准备中，请稍候。'
+      if (Date.now() >= deadline) return { kind: 'pending', detail }
+      const retryAfter = Number(resp.headers.get('Retry-After'))
+      const waitMs =
+        Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : FONT_FETCH_RETRY_FALLBACK_MS
+      await sleep(Math.max(0, Math.min(waitMs, deadline - Date.now())))
+      continue
+    }
+
+    return { kind: 'error', detail: (await readErrorDetail(resp)) ?? `${resp.status} ${resp.statusText}` }
+  }
+}
+
 async function loadFonts(
   sources: PreviewFontSource[],
 ): Promise<{ fonts: LoadedFont[]; warnings: PreviewIssue[] }> {
+  if (!sources.length) {
+    return {
+      fonts: [],
+      warnings: [
+        {
+          level: 'warn',
+          title: '工程未设置字体',
+          detail: '工程的 style.font_name 为空，无法确定该加载哪个字体；请在样式面板里选择字体。',
+        },
+      ],
+    }
+  }
+
   const fonts: LoadedFont[] = []
   const missing: string[] = []
+  const pending: string[] = []
 
   await Promise.all(
     sources.map(async (source) => {
-      try {
-        const resp = await fetch(source.url)
-        if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`)
-        fonts.push({ family: source.family, data: new Uint8Array(await resp.arrayBuffer()) })
-      } catch {
-        missing.push(`${source.family}（${source.url}）`)
+      const result = await fetchFontData(source.url)
+      if (result.kind === 'ok') {
+        fonts.push({ family: source.family, data: result.data })
+      } else if (result.kind === 'pending') {
+        pending.push(`${source.family}：${result.detail}`)
+      } else {
+        missing.push(`${source.family}（${result.detail}）`)
       }
     }),
   )
 
   const warnings: PreviewIssue[] = []
-  if (!fonts.length) {
+  if (pending.length) {
+    warnings.push({
+      level: 'warn',
+      title: '字体准备中',
+      detail:
+        `${pending.join('；')}。预览暂时用不到该字体，画面可能出现豆腐块或临时使用其它已加载字体代替，` +
+        '字体准备完成后重新打开工程或切换一次字体即可恢复正常。',
+    })
+  }
+  if (!fonts.length && !pending.length) {
     warnings.push({
       level: 'warn',
       title: '预览缺少字体文件，日文字形会渲染成豆腐块',
       detail:
         `以下字体都没取到：${missing.join('、')}。JASSUB 在 WebAssembly 里拿不到系统字体，` +
-        '必须显式提供字体文件。把字体放进 frontend/public/fonts/ 后刷新即可；' +
-        '注意导出侧的 ffmpeg 会回退到系统字体，两端字体不一致会直接摧毁「所见即所得」。',
+        '必须显式提供字体文件；字体一律经后端从本机系统按需提取（GET /api/fonts/subset），' +
+        '请确认后端服务正常运行。注意导出侧的 ffmpeg 会回退到系统字体，两端字体不一致会直接摧毁「所见即所得」。',
     })
   } else if (missing.length) {
     warnings.push({
@@ -414,6 +500,10 @@ export interface OverlayOptions {
   ass: string
   /** 工程使用的字体族名（project.style.font_name），用于挑选默认字体 */
   fontFamily: string
+  /**
+   * 覆盖默认字体来源；不传时按 `fontFamily` 经 `GET /api/fonts/subset` 动态取字体
+   * （见 `defaultFontSources`），仅用于测试或需要额外候选字体的场景。
+   */
   fontSources?: PreviewFontSource[]
 }
 
@@ -463,7 +553,7 @@ export class SubtitleOverlay {
   ) {}
 
   static async create(opts: OverlayOptions): Promise<SubtitleOverlay> {
-    const { fonts, warnings } = await loadFonts(opts.fontSources ?? DEFAULT_FONT_SOURCES)
+    const { fonts, warnings } = await loadFonts(opts.fontSources ?? defaultFontSources(opts.fontFamily))
 
     // 工程指定的字体优先；它没加载上就退到任意一个已加载字体，
     // 一个都没有时干脆不设 defaultFont，让 JASSUB 用自带的 Liberation Sans

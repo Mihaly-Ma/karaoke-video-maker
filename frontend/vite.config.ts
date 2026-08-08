@@ -22,7 +22,14 @@ export default defineConfig({
     },
   },
   preview: { headers: crossOriginIsolation },
-  // jassub 的 worker 与 wasm 需要以资源形式产出，不能被内联
-  optimizeDeps: { exclude: ['jassub'] },
+  optimizeDeps: {
+    // jassub 的 worker 与 wasm 需要以资源形式产出，不能被内联
+    exclude: ['jassub'],
+    // 但排除 jassub 会连带跳过它的依赖预构建，而 `throughput` 是 CJS 包
+    // （无 type:module / exports）。浏览器直接 ESM import 一个 CJS 包会抛
+    // "does not provide an export named 'default'"，整个应用白屏 ——
+    // 且这个错误只在运行时出现，tsc / lint / vite build 全部检测不到。
+    include: ['throughput'],
+  },
   worker: { format: 'es' },
 })
