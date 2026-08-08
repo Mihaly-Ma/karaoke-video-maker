@@ -185,7 +185,9 @@ export function RubyEditor({ lineId, className }: RubyEditorProps) {
     return () => window.removeEventListener('mouseup', up)
   }, [dragging])
 
-  const spans = line?.ruby ?? []
+  // 用 useMemo 稳定引用：`line?.ruby ?? []` 在 line 为空时每次渲染都会
+  // 生成新数组，会让下面依赖 spans 的 useMemo 白白重算
+  const spans = useMemo(() => line?.ruby ?? [], [line])
   const reviewCount = spans.filter(needsReview).length
   const lockedCount = spans.filter((s) => s.locked).length
 

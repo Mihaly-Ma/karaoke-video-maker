@@ -994,16 +994,11 @@ export function Timeline() {
     const mod = e.metaKey || e.ctrlKey
     const k = e.key.toLowerCase()
 
-    if (mod && k === 'z') {
-      e.preventDefault()
-      void enqueue(e.shiftKey ? redo : undo)
-      return
-    }
-    if (mod && k === 'y') {
-      e.preventDefault()
-      void enqueue(redo)
-      return
-    }
+    // Cmd/Ctrl+Z（撤销）与 Cmd/Ctrl+Shift+Z / Cmd/Ctrl+Y（重做）统一交给
+    // App.tsx 的全局监听器处理，这里不再重复注册：两处都监听同一个组合键的话，
+    // 一次按键会触发两次 undo/redo 请求，表现为「按一次退两步」。
+    // 工具栏的撤销/重做按钮（下方 JSX）仍然直接调用 enqueue(undo)/enqueue(redo)，
+    // 那是点击触发，不受这条规则影响。
     if (mod) return
 
     if (e.key === ' ' || e.key === 'Enter') {

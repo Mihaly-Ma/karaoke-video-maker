@@ -1,7 +1,8 @@
 """视频下载（yt-dlp）：YouTube / bilibili。
 
-复用 `experiments/download_provider.py` 已实测的 provider 抽象与选流策略
-（音频优先于画质、跨编码等效码率比较、bilibili 分P 拦截等），本文件只做**编排**：
+复用 `kvm.media.providers` 的 provider 抽象与选流策略（音频优先于画质、
+跨编码等效码率比较、bilibili 分P 拦截等，实测证据见
+`experiments/download_provider.py`），本文件只做**编排**：
 
     解析链接 → 探测 → 选流 → 下载 → 核算时间基准 → 抽音频 → 写回工程
 
@@ -46,21 +47,21 @@ import uuid
 from pathlib import Path
 from typing import IO, Any
 
-from experiments.download_provider import (
+from kvm.api.schemas import DownloadRequest, ProjectDTO
+from kvm.api.store import ProjectStore, default_root
+from kvm.jobs import JobCancelled, JobHandle, run_cancelable
+from kvm.media.ffmpeg import find_ffmpeg_with_libass
+from kvm.media.providers import (
     SelectionPolicy,
     StreamSelector,
     TargetKind,
     YtDlpManager,
     build_registry,
 )
-from experiments.ffmpeg_locate import find_ffmpeg_with_libass
-from kvm.api.schemas import DownloadRequest, ProjectDTO
-from kvm.api.store import ProjectStore, default_root
-from kvm.jobs import JobCancelled, JobHandle, run_cancelable
 
-# 借用 `experiments/download_provider.py` 的 `VideoProvider._with_retry()` 里对
-# "已失效" 关键字的 fatal 判定（该文件不可修改），让取消请求立刻终止重试循环，
-# 而不是被当成瞬时网络错误重试数次、拖上几十秒才真正停下。
+# 借用 `kvm.media.providers` 的 `VideoProvider._with_retry()` 里对 "已失效"
+# 关键字的 fatal 判定（见 `FATAL_ERROR_KEYWORDS`），让取消请求立刻终止重试
+# 循环，而不是被当成瞬时网络错误重试数次、拖上几十秒才真正停下。
 _CANCEL_SENTINEL = "已失效：用户已取消下载"
 
 
@@ -184,8 +185,8 @@ def run_download(handle: JobHandle, store: ProjectStore, req: DownloadRequest) -
     status = manager.locate()
     try:
         # `status.available` 在只找到系统 PATH 里的 yt-dlp **命令行**、但没有
-        # 可 `import` 的 yt_dlp **库**时也会是 True（见 YtDlpManager.locate()，
-        # 该文件不可改）。真正会被用到的是 `.module`（下载走的是
+        # 可 `import` 的 yt_dlp **库**时也会是 True（见 YtDlpManager.locate()）。
+        # 真正会被用到的是 `.module`（下载走的是
         # `import yt_dlp`，不是子进程调用命令行），这里显式把它当作权威判据。
         manager.module  # noqa: B018 —— 有意的探测性访问，触发其内部校验
     except RuntimeError as exc:
@@ -239,7 +240,7 @@ def run_download(handle: JobHandle, store: ProjectStore, req: DownloadRequest) -
     handle.check_cancelled()
 
     # 音频优先于画质：视频按 prefer_audio_quality 决定是否封顶 1080p，
-    # 音频始终不设上限（StreamSelector 的固定策略，见 experiments/download_provider.py）。
+    # 音频始终不设上限（StreamSelector 的固定策略，见 kvm.media.providers）。
     policy = SelectionPolicy(max_video_height=1080 if req.prefer_audio_quality else None)
     selector = StreamSelector(policy)
     selection = selector.select(probe)

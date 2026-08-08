@@ -13,19 +13,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent))
 
+from kvm.media.ffmpeg import find_ffmpeg_with_libass
 from kvm.models.karaoke import VoicePalette
 from kvm.pipeline.qrc_import import load_project
 from kvm.render.ass_builder import AssBuilder
 from kvm.render.text_metrics import LibassMetrics
 
-_REPO = Path(__file__).resolve().parents[2].parent
-
 
 def _find_ffmpeg() -> str:
-    """复用实验层已验证的探测逻辑：以 ass 滤镜是否注册为准，而非版本号。"""
-    sys.path.insert(0, str(_REPO))
-    from experiments.ffmpeg_locate import find_ffmpeg_with_libass
-
+    """探测判据：以 ass 滤镜是否注册为准，而非版本号（见 `kvm.media.ffmpeg`）。"""
     return find_ffmpeg_with_libass()
 
 

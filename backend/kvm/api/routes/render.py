@@ -25,7 +25,6 @@ CLAUDE.md §5.13 定义的通用长任务编排（独立子进程 + JSON-lines �
 
 from __future__ import annotations
 
-import sys
 import threading
 import uuid
 from pathlib import Path
@@ -34,6 +33,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import PlainTextResponse
 from kvm.api.schemas import AssResponse, JobStatus, ProjectDTO, RenderRequest
 from kvm.api.store import ProjectStore, default_root
+from kvm.media.ffmpeg import find_ffmpeg_with_libass
 from kvm.models.karaoke import (
     KaraokeProject,
     KaraokeStyle,
@@ -52,9 +52,6 @@ from kvm.render.text_metrics import LibassMetrics
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/render", tags=["render"])
-
-_REPO_ROOT = Path(__file__).resolve().parents[3].parent
-"""仓库根目录。用于把 `experiments/` 加入 `sys.path`，复用其中的 ffmpeg 探测逻辑。"""
 
 
 # ---- 工程存取 ----
@@ -163,16 +160,12 @@ _beat_cache: dict[tuple[str | None, str | None, str | None], BeatGrid | None] = 
 def _get_ffmpeg() -> str:
     """探测带 libass 的 ffmpeg，进程内只探测一次并缓存路径。
 
-    复用 `experiments/ffmpeg_locate.py` 的判据——`ass` 滤镜是否注册，而非版本号
-    （Homebrew 主线 ffmpeg 不含 libass，见 CLAUDE.md §2.4 / §6.4）。
+    判据是 `ass` 滤镜是否注册，而非版本号（Homebrew 主线 ffmpeg 不含 libass，
+    见 CLAUDE.md §2.4 / §6.4），实现在 `kvm.media.ffmpeg`。
     """
     global _ffmpeg_path
     with _singleton_lock:
         if _ffmpeg_path is None:
-            if str(_REPO_ROOT) not in sys.path:
-                sys.path.insert(0, str(_REPO_ROOT))
-            from experiments.ffmpeg_locate import find_ffmpeg_with_libass
-
             _ffmpeg_path = find_ffmpeg_with_libass()
         return _ffmpeg_path
 

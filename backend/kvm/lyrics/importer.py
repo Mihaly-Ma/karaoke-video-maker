@@ -67,26 +67,35 @@ def _assign_tids(lines: list[LineDTO]) -> None:
     """为每个 token 生成内容寻址身份键 `tid`。
 
     CLAUDE.md §4.4：**绝对不要用「第几行第几个 token」做主键**——重新分行或
-    重新对齐之后必然漂移，用户锁定的时间与注音会整体错位。主键取内容寻址三元组
-    `(归一化行文本的 hash, surface, 该 surface 在本行的第 n 次出现)`，
-    拼成一个不可再解析的字符串（surface 里可能出现任何字符，tid 只作整体比较，
-    不承诺能拆回三元组）。
+    重新对齐之后必然漂移，用户锁定的时间与注音会整体错位。主键取内容寻址
+    四元组，拼成一个不可再解析的字符串（surface 里可能出现任何字符，tid 只作
+    整体比较，不承诺能拆回各维）：
+
+    1. 归一化行文本的 hash
+    2. **该行文本在全曲的第几次出现**
+    3. surface
+    4. 该 surface 在本行的第 n 次出现
+
+    第 2 维是对 §4.4 三元组的必要补强：三元组只保证**行内唯一**，副歌重复行
+    （赤春花实测「桜舞って宙を舞って宙を舞って」出现 4 次）会算出完全相同的
+    一组 tid，重绑时无从判断该落到哪一行——而 tid 的全部用途就是"重新分行后
+    重新绑定手工修改"，绑错行比绑不上更糟。加上这一维后 tid 全局唯一。
 
     tid 只在**导入这一刻**生成一次。此后拆行/合并只是搬运既有 token
     （`editing.ops` 用 `model_copy` 复制，不重算 tid），tid 因此保持不变，
-    重绑才有依据。
-
-    副歌重复导致两行文本完全相同时，两行会算出完全相同的一组 tid ——
-    这是内容寻址的固有性质而非缺陷：消费端在多个同 tid 候选之间还需按行的
-    先后就近消歧。
+    重绑才有依据——这条性质不能因为多了一维而破坏，所以出现次数按**导入时的
+    原始行序**计数，不随后续编辑重算。
     """
+    line_seen: Counter[str] = Counter()
     for line in lines:
         digest = hashlib.blake2s(
             _normalize_for_tid(line_text(line)).encode("utf-8"), digest_size=6
         ).hexdigest()
+        line_occurrence = line_seen[digest]
+        line_seen[digest] += 1
         seen: Counter[str] = Counter()
         for tok in line.tokens:
-            tok.tid = f"{digest}#{tok.text}#{seen[tok.text]}"
+            tok.tid = f"{digest}.{line_occurrence}#{tok.text}#{seen[tok.text]}"
             seen[tok.text] += 1
 
 

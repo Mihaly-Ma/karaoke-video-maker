@@ -88,8 +88,14 @@ export default function App() {
     if (project?.id) localStorage.setItem(LAST_PROJECT_KEY, project.id)
   }, [project?.id])
 
-  // 键盘快捷键：Cmd/Ctrl+Z 撤销、Shift+Cmd/Ctrl+Z 重做、空格播放/暂停。
+  // 键盘快捷键：Cmd/Ctrl+Z 撤销、Shift+Cmd/Ctrl+Z 或 Cmd/Ctrl+Y 重做、空格播放/暂停。
   // 输入框/下拉框/可编辑区域聚焦时不拦截，否则用户没法正常打字或用浏览器自带撤销。
+  //
+  // 这是全应用唯一注册这组组合键的地方——Timeline.tsx 曾经在 window 上重复监听
+  // 同一组合键，导致按一次 Cmd/Ctrl+Z 发出两次 undo 请求（用户按一次退两步），
+  // Redo 同理。现在撤销/重做的键盘快捷键统一收在这里；Timeline 只保留它自己
+  // 工具栏按钮的点击调用，以及打轴模式下需要独占的空格键处理（见 Timeline.tsx
+  // 的 stopImmediatePropagation 注释）。
   useEffect(() => {
     const isEditableTarget = (el: EventTarget | null) =>
       el instanceof HTMLElement &&
@@ -98,10 +104,16 @@ export default function App() {
     const onKeyDown = (e: KeyboardEvent) => {
       if (isEditableTarget(e.target)) return
       const mod = e.metaKey || e.ctrlKey
-      if (mod && e.key.toLowerCase() === 'z') {
+      const key = e.key.toLowerCase()
+      if (mod && key === 'z') {
         e.preventDefault()
         if (e.shiftKey) void redo()
         else void undo()
+        return
+      }
+      if (mod && key === 'y') {
+        e.preventDefault()
+        void redo()
         return
       }
       if (e.code === 'Space') {
@@ -281,7 +293,7 @@ function AlignPanel() {
     <div className="panel align-panel">
       <h3>对轴</h3>
       <p className="hint">
-        自动轴来自 QRC 逐字轴 / 强制对齐，精度约 50–150ms，够"整行同时亮起"但不够"逐字擦除严丝合缝"。
+        自动轴来自 QRC 逐字轴 / 强制对齐，精度约 50–150ms，够“整行同时亮起”但不够“逐字擦除严丝合缝”。
         精调请直接在下方时间轴上 tap-to-time 打轴或拖拽波形边界；这里的按钮用于快速整体/局部平移。
       </p>
       <p className="align-panel__scope">

@@ -271,7 +271,7 @@ def run_separate(handle: JobHandle, store: ProjectStore, req: SeparateRequest) -
     handle.check_cancelled()
     handle.report(0.92, "正在合成伴奏轨…")
 
-    from experiments.ffmpeg_locate import find_ffmpeg_with_libass
+    from kvm.media.ffmpeg import find_ffmpeg_with_libass
 
     ffmpeg_bin = find_ffmpeg_with_libass()
     final_paths = _finalize_outputs(handle, ffmpeg_bin, produced_files, run_output_dir)

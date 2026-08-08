@@ -27,6 +27,11 @@ from kvm.api.store import ProjectStore
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.store = ProjectStore()
+    # 系统字体冷扫描本机实测 40.9 秒（862 个 family）。放到启动时的后台线程里预热，
+    # 用户打开样式面板时通常已经扫完；没扫完也能查 `GET /api/fonts/status` 显示
+    # "正在扫描系统字体…"，而不是干等一个 41 秒不返回的请求。
+    # 这里只启动线程、不等待，绝不能阻塞 lifespan——否则后端 41 秒起不来。
+    fonts.ensure_scan_started()
     yield
 
 

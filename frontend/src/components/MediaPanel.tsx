@@ -24,15 +24,13 @@ const SEPARATE_MODELS: { value: SeparateModel; label: string; hint: string }[] =
 /**
  * 手工旁路：直接导入本地文件，绕开下载/分离。
  *
- * 注意：`POST /api/media/import` 这个端点目前不在 client.ts / schemas.py 的
- * 契约里——后端 media 路由还在并行开发中。这里按本项目已有的"编辑类接口
- * 返回完整新工程"惯例（见 client.ts 头部注释）约定它的形状：multipart 字段
- * project_id / kind / file，返回完整 Project JSON。若后端还没实现这个路由，
- * 导入会报 404，不影响下载/分离等其余功能。
+ * 后端 `POST /api/media/import`（`backend/kvm/api/routes/media.py`）已实现，
+ * 支持 kind ∈ video/audio/instrumental/vocals/drums 全部五种，multipart 字段
+ * project_id / kind / file，返回完整 Project JSON。
  */
 async function importLocalFile(
   projectId: string,
-  kind: 'video' | 'vocals' | 'instrumental',
+  kind: 'video' | 'audio' | 'vocals' | 'instrumental' | 'drums',
   file: File,
 ): Promise<Project> {
   const form = new FormData()
@@ -82,12 +80,22 @@ export default function MediaPanel({
   const [separateError, setSeparateError] = useState<string | null>(null)
 
   const [importError, setImportError] = useState<string | null>(null)
-  const [importingKind, setImportingKind] = useState<null | 'video' | 'vocals' | 'instrumental'>(null)
+  const [importingKind, setImportingKind] = useState<
+    null | 'video' | 'audio' | 'vocals' | 'instrumental' | 'drums'
+  >(null)
 
   const videoFileRef = useRef<HTMLInputElement>(null)
+  const audioFileRef = useRef<HTMLInputElement>(null)
   const vocalsFileRef = useRef<HTMLInputElement>(null)
   const instrumentalFileRef = useRef<HTMLInputElement>(null)
-  const fileRefs = { video: videoFileRef, vocals: vocalsFileRef, instrumental: instrumentalFileRef }
+  const drumsFileRef = useRef<HTMLInputElement>(null)
+  const fileRefs = {
+    video: videoFileRef,
+    audio: audioFileRef,
+    vocals: vocalsFileRef,
+    instrumental: instrumentalFileRef,
+    drums: drumsFileRef,
+  }
 
   const projectId = project?.id
 
@@ -113,7 +121,10 @@ export default function MediaPanel({
     }
   }
 
-  const handleImport = async (kind: 'video' | 'vocals' | 'instrumental', file: File | undefined) => {
+  const handleImport = async (
+    kind: 'video' | 'audio' | 'vocals' | 'instrumental' | 'drums',
+    file: File | undefined,
+  ) => {
     if (!projectId || !file) return
     setImportError(null)
     setImportingKind(kind)
@@ -143,10 +154,14 @@ export default function MediaPanel({
         <h3>视频获取</h3>
         <div className="media-panel__status">
           <span className={`badge${project.video_path ? ' badge--ok' : ''}`}>
-            {project.video_path ? '已就绪' : '未获取'}
+            视频 {project.video_path ? '已就绪' : '未获取'}
           </span>
-          {project.video_path && <code className="path">{project.video_path}</code>}
+          <span className={`badge${project.audio_path ? ' badge--ok' : ''}`}>
+            音频 {project.audio_path ? '已就绪' : '未获取'}
+          </span>
         </div>
+        {project.video_path && <code className="path">{project.video_path}</code>}
+        {project.audio_path && <code className="path">{project.audio_path}</code>}
 
         <div className="media-panel__row">
           <input
@@ -164,14 +179,31 @@ export default function MediaPanel({
         </div>
 
         <div className="media-panel__manual">
-          <span className="muted">或直接选择本地视频/音频文件：</span>
-          <input
-            ref={videoFileRef}
-            type="file"
-            accept="video/*,audio/*"
-            onChange={(e) => void handleImport('video', e.target.files?.[0])}
-          />
-          {importingKind === 'video' && <span className="muted">导入中…</span>}
+          {/* 视频与音频分成两个明确入口，而不是共用一个 accept="video/*,audio/*"
+              的输入框固定传 kind='video'——那样选了纯音频文件会让 video_path
+              指向一个没有视频流的文件，下游渲染/预览会出问题 */}
+          <span className="muted">或直接选择本地文件：</span>
+          <label className="media-panel__file-label">
+            视频
+            <input
+              ref={videoFileRef}
+              type="file"
+              accept="video/*"
+              onChange={(e) => void handleImport('video', e.target.files?.[0])}
+            />
+          </label>
+          <label className="media-panel__file-label">
+            音频
+            <input
+              ref={audioFileRef}
+              type="file"
+              accept="audio/*"
+              onChange={(e) => void handleImport('audio', e.target.files?.[0])}
+            />
+          </label>
+          {(importingKind === 'video' || importingKind === 'audio') && (
+            <span className="muted">导入中…</span>
+          )}
         </div>
 
         {downloadError && <p className="error">{downloadError}</p>}
@@ -233,9 +265,18 @@ export default function MediaPanel({
               onChange={(e) => void handleImport('instrumental', e.target.files?.[0])}
             />
           </label>
-          {(importingKind === 'vocals' || importingKind === 'instrumental') && (
-            <span className="muted">导入中…</span>
-          )}
+          <label className="media-panel__file-label" title="用于节拍检测（引导旋律），跳过完整分离时可以只导入这一轨">
+            鼓声
+            <input
+              ref={drumsFileRef}
+              type="file"
+              accept="audio/*"
+              onChange={(e) => void handleImport('drums', e.target.files?.[0])}
+            />
+          </label>
+          {(importingKind === 'vocals' ||
+            importingKind === 'instrumental' ||
+            importingKind === 'drums') && <span className="muted">导入中…</span>}
         </div>
 
         {separateError && <p className="error">{separateError}</p>}
