@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Node / 前端
+node_modules/
+dist/
+.vite/
+
+# 应用私有依赖目录（§2.5：自动获取的 ffmpeg / 模型权重 / 字体一律装在这里）
+.kvm/
+models/
+bin/
+
+# 工作产物：单曲工程动辄 3-5 GB（原视频 + 音轨 + stem + 代理视频 + 成片）
+workspace/
+output/
+*.mkv
+*.mp4
+*.wav
+*.flac
+
+# 实验产物
+experiments/out/
+
+# 系统
+.DS_Store
