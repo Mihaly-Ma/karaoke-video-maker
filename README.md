@@ -10,7 +10,13 @@ Nothing is sent to a cloud AI service.
 
 ![Rendered output — color-sweep lyrics with furigana over the source MV](docs/images/hero-render.png)
 *A still frame from an actual rendered output: the currently-sung phrase turns blue, furigana
-sits above the kanji, and the rest of the line stays white — the classic nicokara look.*
+sits above the kanji, and the rest of the line stays white — the classic nicokara look. Note
+that the outline flips colour with the fill, which plain `\k` karaoke tags cannot do.*
+
+![Countdown dots before an entry, with the next two lines already faded in](docs/images/render-countdown.png)
+*Coming out of an instrumental break: three dots go out one at a time, right to left, and the
+singer comes in as the last one disappears. The dots sit on beats detected from the separated
+drum stem — evenly spaced dots look right but are useless to sing to.*
 
 ---
 
@@ -21,18 +27,23 @@ This repository is under active development. There is a real, working **FastAPI 
 document. Concretely, today you can:
 
 - Pull a video via `yt-dlp` (YouTube, and experimentally Bilibili) or import a local file
-- Separate vocals from instrumental locally with `audio-separator` (three quality tiers)
+- Separate vocals from instrumental locally with `audio-separator` (three quality tiers), and
+  get a lightweight H.264 proxy video generated automatically so scrubbing a 4K AV1 source
+  doesn't crawl
 - Search QQ Music for a character-level, furigana-tagged lyric source (QRC), or paste/import
-  lyrics by hand
-- Manually time every line and word against a waveform (tap-to-time, drag boundaries, global
-  offset nudge) with full undo/redo and per-item lock so hand-tuned timing is never silently
-  overwritten
-- Edit furigana per character span, with a visible "where did this reading come from" badge
-- Pick a font from your installed system fonts (with a CJK-coverage check before you commit to
-  one), tune size/outline/shadow as a percentage of frame height, and assign color palettes per
-  voice part
-- Export a burned-in MP4, optionally with a second OFF VOCAL cut and/or a synthesized guide
-  melody (ガイドメロディ) mixed into the instrumental track
+  lyrics by hand (plain text, LRC, or QRC)
+- Time every line and word against a waveform — tap-to-time, drag boundaries, ripple-link
+  neighbours, global offset nudge — with full undo/redo and per-item locks, so hand-tuned
+  timing is never silently overwritten by a later automatic pass
+- Edit furigana per character span, with a visible "where did this reading come from" badge,
+  and rewrite a line's lyric text in place when the source got the words wrong — the editor
+  reports how much timing survived the rewrite instead of quietly discarding it
+- Pick a font from the fonts installed on your machine, tune size/outline/shadow as a
+  percentage of frame height, assign a four-colour palette per voice part, and check all of it
+  against a **real libass render of the actual finished frame**, not a CSS mock-up
+- Export a burned-in MP4, optionally with an OFF VOCAL cut and/or a synthesized guide melody
+  (ガイドメロディ) mixed into the instrumental track, and download the result straight from
+  the browser
 
 The project's working contract — `CLAUDE.md` at the repo root — describes a considerably
 larger target architecture (forced alignment, morphological-analysis-based reading generation,
@@ -42,8 +53,12 @@ an honest, code-verified breakdown — read it before assuming a feature exists.
 
 | | |
 |---|---|
-| ![Timing editor: waveform, tap-to-time, timing-source legend, undo/redo](docs/images/editor-timing.png) | ![Furigana editor: per-span reading with source badges](docs/images/editor-ruby.png) |
-| Timing step — waveform + tap-to-time + timing-source colors | Furigana step — per-character-span reading editor |
+| ![Edit step: waveform, per-token timeline, tap-to-time, timing-source legend](docs/images/editor-timing.png) | ![Edit step: per-span furigana with source badges and a reading inspector](docs/images/editor-ruby.png) |
+| **Edit** step — waveform + per-token timeline + timing-source colours | **Edit** step — the same selection, inspected as a reading |
+
+Timing and furigana are deliberately *one* step, not two: they fix the same selected word from
+two angles (when it is sung, how it is read), and a separate furigana step had no way to play
+audio — which is the only way to check a reading.
 
 ---
 
@@ -137,16 +152,17 @@ you'll land on the project library (create a new project, or open an existing on
 ![Project library — multiple in-progress karaoke projects with completion status](docs/images/editor-home.png)
 
 The editor
-is a six-step flow: **素材/Material → 歌词/Lyrics → 对轴/Timing → 注音/Furigana →
-样式/Style → 导出/Export**, each step's stage using the full main area for whatever that step
-actually needs (waveform for timing, ruby editor for furigana, etc.) rather than a fixed
-"video player + timeline" layout.
+is a five-step flow: **素材/Material → 歌词/Lyrics → 编辑/Edit → 样式/Style → 导出/Export**.
+Each step's stage takes over the full main area with whatever that step actually needs — a
+waveform and timeline for editing, a rendered film frame for styling — rather than forcing
+everything through a fixed "video player + timeline" shell. Playback belongs to the Edit
+stage alone, so a stray second play button can't exist.
 
 > The editor UI text is **Chinese only** right now. There's an i18n abstraction in
 > `frontend/src/i18n/` (all UI strings already route through a `t()` function), but the
 > Japanese and English string tables haven't been written yet, and there's no in-app language
-> switcher. If you don't read Chinese, the six-step icons and screenshots above are your best
-> guide for now.
+> switcher. If you don't read Chinese, the five step icons and the screenshots in this README
+> are your best guide for now.
 
 ---
 
@@ -154,17 +170,45 @@ actually needs (waveform for timing, ruby editor for furigana, etc.) rather than
 
 ### Via the GUI (recommended)
 
-1. Open the app, create a project, paste a YouTube link (or pick a local video file) in the
-   **Material** step and let it download; optionally kick off vocal separation there too.
-2. In **Lyrics**, search QQ Music (currently the only wired-up automatic lyric source) or paste
-   lyric text / import an LRC/QRC file by hand.
-3. In **Timing**, either accept the QRC-provided character timing, or hand-time from scratch
-   with tap-to-time against the waveform (press <kbd>T</kbd>), then nudge/drag to refine.
-4. In **Furigana**, review and fix any readings — every span shows where its reading came from
-   (lyric source / dictionary / manual).
-5. In **Style**, pick a font your system actually has full coverage for the song's characters,
-   and adjust size/outline/color per voice part.
-6. In **Export**, optionally enable an OFF VOCAL cut and/or a mixed-in guide melody, then export.
+**1. Material.** Create a project, paste a YouTube link (or drop in a local video/audio file)
+and let it download. Vocal separation starts from the same screen — pick a tier and go. Every
+track you end up with (mix, vocals, instrumental, drums) gets its own card with a waveform and
+a play button, and a low-resolution proxy video is built in the background for smooth scrubbing.
+
+![Material step — download or import, separation tiers, per-track waveforms, proxy status](docs/images/step-media.png)
+
+**2. Lyrics.** Search for a lyric source, or paste/import text yourself — the two are
+equal-weight entry points, not a happy path and a fallback. Search results show how far each
+candidate's duration is from your video's, which is the single best signal for telling the
+right release apart from a cover, a live cut, or a 41-second preview clip. Granularity and
+furigana are listed as *unknown* until you actually open a candidate, because the search
+endpoint genuinely doesn't know — the preview pane on the right is where you find out whether
+you got per-character timing and a kana track, before you commit to it.
+
+![Lyrics step — search results with duration-difference badges beside a live preview of the selected candidate](docs/images/step-lyrics.png)
+
+**3. Edit.** The heart of the tool. Accept the character-level timing the lyric source gave
+you, or build it yourself: play at 0.5–1.0×, tap <kbd>Space</kbd> once per syllable
+(tap-to-time), then refine by dragging boundaries, nudging with arrow keys (±10 ms, ±1 ms with
+<kbd>Alt</kbd>), splitting and merging. Colour tells you where every timing came from —
+untimed, from the lyric source, interpolated, or hand-set and locked. The same stage edits
+readings and, when the source got the words wrong, the lyric text itself.
+
+**4. Style.** Choose a font, set size/outline/shadow (as a share of frame height, so the same
+style works at 1080p and 4K), and give each voice part its own four colours — unsung fill and
+outline, sung fill and outline — because the outline flips colour along with the fill as the
+sweep passes. The preview on the left is a genuine libass render of the finished frame, over
+black, green, or white so you can check that the outline survives on any background.
+
+![Style step — real libass preview of the finished frame next to the style and palette controls](docs/images/step-style.png)
+
+**5. Export.** Choose the audio track (original or instrumental) and whether to mix in a
+synthesized guide melody, then render. Before committing to a multi-minute burn, the cue rail
+jumps the preview to the places most likely to be wrong — the first line, each verse head, the
+credits card, the widest line, the most furigana-dense line, the ending. Finished files are
+listed with size and duration and download straight from the browser.
+
+![Export step — output options, cue rail for spot-checking, and finished files as downloads](docs/images/step-export.png)
 
 ### Via the CLI (useful for iterating on rendering/style code without the GUI)
 
@@ -210,35 +254,37 @@ designed to only overwrite fields that haven't been locked by a manual edit — 
 round-tripped, that guarantee would be impossible to keep.
 
 ```
-YouTube link ──▶ download (yt-dlp) ──▶ extract audio
+YouTube link ──▶ download (yt-dlp) ──▶ extract audio ──▶ proxy video (H.264, editing only)
                                             │
                                             ▼
                                    vocal separation (audio-separator)
                                             │
                     ┌───────────────────────┼───────────────────────┐
                     ▼                       ▼                       ▼
-             lyric source            re-anchor timing          guide melody /
-          (QRC search / paste)     to the MV's own audio       beat detection
-                    │                       │                       │
-                    └───────────┬───────────┘                       │
-                                 ▼                                  │
-                    furigana / reading editing                      │
-                                 │                                  │
-                                 ▼                                  │
-                  three-tier timing (whole / line / word)           │
-                        — manual is a first-class path,             │
-                          not a fallback                            │
-                                 │                                  │
-                                 ▼                                  │
-                       layout engine + style ◀──────────────────────┘
-                                 │
-                                 ▼
-                        ASS serialization
-                                 │
-                    ┌────────────┴────────────┐
-                    ▼                          ▼
-           JASSUB preview (WASM libass)   ffmpeg burn-in (same libass build)
+             lyric source           ( re-anchor timing )       guide melody /
+          (QRC search / paste)      ( to the MV audio   )      beat detection
+                    │               (  — NOT BUILT YET  )            │
+                    │                       ┊                        │
+                    └───────────┬───────────┘                        │
+                                ▼                                    │
+                   Edit: three-tier timing (whole / line / word)     │
+                         + readings + furigana + lyric text          │
+                       — manual is a first-class path,               │
+                         not a fallback                              │
+                                │                                    │
+                                ▼                                    │
+                      layout engine + style ◀───────────────────────┘
+                                │
+                                ▼
+                       ASS serialization
+                                │
+                   ┌────────────┴────────────┐
+                   ▼                         ▼
+          JASSUB preview (WASM libass)   ffmpeg burn-in (same libass build)
 ```
+
+The dotted box is the one stage in that picture that does not exist yet — see **§ Project
+status**. Everything else is code you can run today.
 
 A few design points worth calling out:
 
@@ -276,24 +322,37 @@ disagree, the code wins here.
   search/preview/apply/import, media download/separation/proxy generation, editing operations
   (shift/set-timing/lock/ruby/split/merge/voice-part), ASS generation + async export jobs, and
   system-font scanning/coverage-checking/subsetting
-- A six-step React editor (Material / Lyrics / Timing / Furigana / Style / Export) with a
-  project library/home screen, undo/redo, and a stage layout that gives each step the full
-  main area instead of a fixed video-player-centric shell
-- Tap-to-time manual timing against a waveform, boundary dragging, global-offset nudge,
-  line split/merge, and a visible timing-source legend (un-timed / lyric-source / auto-aligned
-  / interpolated / manual+locked)
-- Manual + lyric-source-driven furigana editing with per-span source badges
+- A five-step React editor (Material / Lyrics / Edit / Style / Export) with a project
+  library/home screen, undo/redo, and a stage layout that gives each step the full main area
+  instead of a fixed video-player-centric shell. Timing and furigana were originally two
+  separate steps and have been merged into **Edit**
+- Tap-to-time manual timing against a waveform, boundary dragging with optional ripple into the
+  neighbouring token, global-offset nudge, line/token split and merge, and a visible
+  timing-source legend (un-timed / lyric-source / auto-aligned / interpolated / manual+locked)
+- Manual + lyric-source-driven furigana editing with per-span source badges, plus in-place
+  rewriting of a line's lyric text that carries the existing timing, readings and voice parts
+  across and reports what it could not re-attach
 - YouTube (and experimental Bilibili) download via yt-dlp, with audio-quality-first stream
   selection and content-start-offset detection
 - Local vocal separation via `audio-separator`, run in an isolated subprocess with JSON-lines
   progress reporting and content-hash-keyed caching (not in-process, not blocking the API)
+- Editor proxy video generation — a short-GOP, audio-less H.264/MP4 rendition of an
+  otherwise unplayable source (4K AV1 in Matroska), used for editing only, never for export
+- Backend-precomputed waveform peaks (multi-level LOD, BBC `audiowaveform` binary format) and
+  an ffprobe-backed media probe endpoint, so the browser never has to decode whole tracks
 - QQ Music QRC lyric search/fetch, including the (non-standard, buggy-S-box) DES decryption —
   independently reimplemented in Python from publicly-documented constants, importing no
   third-party decryption code
-- Guide melody synthesis (pYIN/CREPE-based pitch extraction → quantized synthesis, mixed into
-  the instrumental) and drum-stem-based beat detection driving the karaoke "get ready" indicator
-  dots
-- 192 backend tests passing at time of writing (`pytest`, run via `uv run --with pytest pytest`)
+- ASS generation with the double-layer progressive-`\clip` karaoke sweep (fill *and* outline
+  change colour together), per-line fade in/out, per-voice-part colour segmentation within a
+  line, a centred credits card, and "get ready" indicator dots placed on detected beats
+- Guide melody synthesis (CREPE pitch extraction → median filter → note segmentation →
+  semitone quantization → band-limited harmonic synthesis, mixed into the instrumental) and
+  drum-stem-based beat detection
+- Real libass preview in the browser (JASSUB) fed by the *same* ASS the exporter burns, on both
+  the Edit and Style and Export stages; system fonts are subsetted server-side so the preview
+  can use the same family the export will
+- 350 passing tests (1 skipped) at time of writing, run with `uv run pytest -q`
 - ffmpeg auto-*detection* (capability-probed, not version-probed) across known install locations
 
 **Designed but not yet implemented — do not assume these exist:**
@@ -308,13 +367,26 @@ disagree, the code wins here.
 - **Additional lyric providers** — Kugou, NetEase, LRCLIB, UtaTen, and YouTube's own captions
   are all researched (see `CLAUDE.md` §5.2 and the `experiments/` scripts) but only QQ Music is
   wired into the production `kvm.lyrics` package today.
+- **Timeline re-anchoring** — lyric sources are timed against the commercial master, not the
+  MV's audio, and nothing corrects for that automatically. There is one global offset knob you
+  set by ear (`global_offset_ms`), and that's it.
 - **Speaker/voice-part diarization** — voice parts are assigned manually via the editor; there
-  is no automatic lead/backing-vocal detection.
+  is no automatic lead/backing-vocal detection, and no second separation pass that would split
+  a lead vocal from its backing harmonies (so no コーラス入り variant yet).
 - **Automatic dependency acquisition** — ffmpeg is *located* if already present, but not
   auto-downloaded/installed into an app-private directory yet; there's no environment
-  self-check command (`backend.doctor` doesn't exist yet).
-- **Bundled fonts** — the style step lets you pick from fonts already installed on your system
-  (with a CJK-coverage check), it does not ship or auto-fetch any font files itself yet.
+  self-check command (`backend.doctor` doesn't exist yet). Separation and yt-dlp are the
+  exceptions: both install/update themselves into an app-private environment on demand.
+- **Bundled fonts** — the style step lets you pick from fonts already installed on your system,
+  it does not ship or auto-fetch any font files itself. Note the picker only flags whether a
+  family is CJK-capable; there is a per-song glyph-coverage endpoint in the backend
+  (`POST /api/fonts/coverage`) but the UI does not call it yet, so **a font missing a rare
+  kanji will not be caught before you export**.
+- **A persisted phonetic reading layer** — the project model and API do carry a separate
+  "how it is actually sung" reading alongside the displayed furigana (particle は → ワ, and so
+  on), with a rule-based derivation endpoint. The editor, however, still keeps the phonetic
+  field in browser local storage and never sends it, so it does not survive moving to another
+  machine. It matters only once forced alignment lands, which it hasn't.
 - **Japanese/English UI** — as noted above, the editor is Chinese-only; the i18n plumbing exists,
   the translations don't.
 - **Windows** has not been exercised in this environment (developed and verified here on macOS
@@ -356,5 +428,19 @@ A few things that follow from that posture and are worth knowing if you build on
 - `CLAUDE.md` (repo root) — the full engineering contract: data model, every technology
   decision and why, every experiment already run and its result, and every open question still
   being worked through. Long, dense, and the actual source of truth for anyone contributing.
-- `docs/ui-redesign.md` — the current front-end information-architecture spec (the six-step
+- `docs/ui-redesign.md` — the current front-end information-architecture spec (the five-step
   stage-based shell described above is what this document specifies).
+
+Every screenshot in this README is generated by a script, so that changing the UI does not
+silently leave the docs showing last month's build. With the backend and frontend dev servers
+already running, regenerate all of them with:
+
+```bash
+node frontend/scripts/shot-readme.mjs          # all of them
+node frontend/scripts/shot-readme.mjs step-style   # or just one
+```
+
+It picks the project with the most complete data as the sample, strips any absolute paths that
+would otherwise leak a local username into the images, and compresses the results with
+`pngquant`. The two rendered-video frames additionally need a source video and a generated
+`.ass` in `workspace/`; without them that step is skipped rather than failing.
