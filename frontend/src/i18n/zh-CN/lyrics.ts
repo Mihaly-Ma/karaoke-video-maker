@@ -5,6 +5,10 @@
  * 解释性长句一律不进界面。通用词（使用/取消/播放/来源徽章）在 common.ts，别在这里重复定义。
  */
 export const lyrics: Record<string, string> = {
+  // 搜索阶段拿不到歌词正文，粒度与有无注音都只有 fetch 之后才确定。
+  // 「未知」必须与「没有」区分：画成没有会让用户排除掉其实有注音的候选。
+  'lyrics.granUnknown': '粒度未知',
+  'lyrics.rubyUnknown': '注音未知',
   // ---- 两个一等入口（CLAUDE.md §2.5：导入不是搜索失败后的回退）----
   'lyrics.tabSearch': '搜索',
   'lyrics.tabImport': '导入',

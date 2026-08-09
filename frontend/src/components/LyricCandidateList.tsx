@@ -41,10 +41,23 @@ export function providerLabel(provider: string): string {
  * 粒度徽章。颜色沿用来源语义色（CLAUDE.md §7.4）：逐字轴是歌词源实测的时间，
  * 句级轴导入后行内只能靠插值，纯文本干脆没有时间。
  */
-export const GRANULARITY_TAG: Record<LyricCandidate['granularity'], { key: string; tone: string }> = {
+export const GRANULARITY_TAG: Record<string, { key: string; tone: string }> = {
   word: { key: 'lyrics.granWord', tone: 'provider' },
   line: { key: 'lyrics.granLine', tone: 'interp' },
   plain: { key: 'lyrics.granPlain', tone: 'none' },
+  // 搜索阶段拿不到歌词正文，粒度只有 fetch 之后才确定。后端为此保留了 `unknown`
+  // （§5.2「粒度可以被提升，不能被伪造」）——它不是"没有"，是"还不知道"，
+  // 所以给中性色而不是 plain 的样式。
+  unknown: { key: 'lyrics.granUnknown', tone: 'none' },
+}
+
+/**
+ * 取粒度徽章。**必须容忍未知值**：这张表的键来自后端枚举，后端加一个取值就会让
+ * 这里查空——直接 `TAG[g].tone` 会在渲染中抛异常、整棵 React 树卸载、界面变全白。
+ * 这个 bug 真实发生过（后端加 `unknown` 三态时）。查不到就返回 null，让调用方不画徽章。
+ */
+export function granularityTag(g: string): { key: string; tone: string } | null {
+  return GRANULARITY_TAG[g] ?? null
 }
 
 /**
@@ -95,7 +108,7 @@ export default function LyricCandidateList({
     <div className="lyr-cands">
       {candidates.map((c) => {
         const key = candidateKey(c)
-        const gran = GRANULARITY_TAG[c.granularity]
+        const gran = granularityTag(c.granularity)
         const diff = durationDiffMs(c.duration_ms, videoDurationMs)
         const mismatch = isDurationMismatch(diff)
         return (
@@ -114,8 +127,15 @@ export default function LyricCandidateList({
               {[providerLabel(c.provider), c.artist, c.album].filter(Boolean).join(' · ')}
             </span>
             <span className="lyr-cand__tags">
-              <span className={`badge lyr-tag--${gran.tone}`}>{t(gran.key)}</span>
-              {c.has_ruby && <span className="badge lyr-tag--provider">{t('lyrics.hasRuby')}</span>}
+              {gran && <span className={`badge lyr-tag--${gran.tone}`}>{t(gran.key)}</span>}
+              {/*
+                三态：true 有、false 没有、null「搜索阶段还不知道」。
+                后两者必须区分——把"不知道"画成"没有"，用户会据此排除掉其实有注音的候选。
+              */}
+              {c.has_ruby === true && (
+                <span className="badge lyr-tag--provider">{t('lyrics.hasRuby')}</span>
+              )}
+              {c.has_ruby === null && <span className="badge">{t('lyrics.rubyUnknown')}</span>}
               {c.has_translation && <span className="badge">{t('lyrics.hasTranslation')}</span>}
               {mismatch && diff !== null && (
                 <span className="badge lyr-tag--warn" title={t('lyrics.durationDiffTitle')}>

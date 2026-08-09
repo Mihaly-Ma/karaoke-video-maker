@@ -14,7 +14,7 @@ import type { ReactNode } from 'react'
 
 import { t } from '../i18n'
 import type { LyricCandidate } from '../api/types'
-import { GRANULARITY_TAG, durationDiffMs, formatDuration, isDurationMismatch } from './LyricCandidateList'
+import { durationDiffMs, formatDuration, granularityTag, isDurationMismatch } from './LyricCandidateList'
 
 export interface LyricMetaBarProps {
   lineCount: number
@@ -39,7 +39,7 @@ export default function LyricMetaBar({
   extra,
   children,
 }: LyricMetaBarProps) {
-  const gran = granularity ? GRANULARITY_TAG[granularity] : null
+  const gran = granularity ? granularityTag(granularity) : null
   const diff = durationMs === null ? null : durationDiffMs(durationMs, videoDurationMs)
   const mismatch = isDurationMismatch(diff)
 
