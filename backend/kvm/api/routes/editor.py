@@ -34,9 +34,12 @@ from collections.abc import Callable
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from kvm.api.schemas import (
+    DerivePhoneticsRequest,
     MergeLineRequest,
     ProjectDTO,
     SetLockRequest,
+    SetMetadataRequest,
+    SetPhoneticRequest,
     SetRubyRequest,
     SetTimingRequest,
     SetTimingsRequest,
@@ -149,7 +152,7 @@ def set_timings(req: SetTimingsRequest, request: Request, response: Response) ->
 
 @router.post("/lock", response_model=ProjectDTO)
 def set_lock(req: SetLockRequest, request: Request, response: Response) -> ProjectDTO:
-    """批量设置/清除锁定：音节时间锁与注音锁。
+    """批量设置/清除锁定：音节时间锁、注音锁与发音形锁。
 
     §4.4 的 `(value, source, locked)` 只有在用户**能自己动 locked** 时才成立——
     否则界面上的 🔒 只是个只读徽章，重跑一次对齐就把他确认过的边界改回去了。
@@ -176,6 +179,63 @@ def set_ruby(req: SetRubyRequest, request: Request, response: Response) -> Proje
         "设定注音",
         lambda draft: ops.set_ruby(
             draft, line_id=req.line_id, start=req.start, end=req.end, text=req.text
+        ),
+    )
+
+
+@router.post("/phonetic", response_model=ProjectDTO)
+def set_phonetic(req: SetPhoneticRequest, request: Request, response: Response) -> ProjectDTO:
+    """设定字符区间的**发音形**；`text` 为空表示清除覆盖、交还给自动推导。
+
+    与 `/ruby` 分成两个端点，是因为它们是两份独立的读音（§4.2）：注音行显示「は」，
+    喂强制对齐的必须是 ワ。各自带 `source` 与 `locked`，用户常常认可歌词源给的
+    注音而只想改发音形。
+    """
+    return _apply(
+        request,
+        response,
+        req.project_id,
+        "设定发音形",
+        lambda draft: ops.set_phonetic(
+            draft, line_id=req.line_id, start=req.start, end=req.end, text=req.text
+        ),
+    )
+
+
+@router.post("/phonetics/derive", response_model=ProjectDTO)
+def derive_phonetics(
+    req: DerivePhoneticsRequest, request: Request, response: Response
+) -> ProjectDTO:
+    """由表记读法批量推导发音形：整首歌（或指定几行）**一个撤销单元**。
+
+    这是 §4.4 意义上的自动重算，**只覆盖 `locked=False` 的项**。它走 `store.mutate()`
+    而不是 `update_derived()`：推导是用户点的按钮、会一次改到几百段读音，
+    不进撤销栈就等于不可逆（`update_derived()` 是留给后台作业产物的，见 §8）。
+    """
+    return _apply(
+        request,
+        response,
+        req.project_id,
+        "推导发音形",
+        lambda draft: ops.derive_phonetics(draft, line_ids=req.line_ids),
+    )
+
+
+@router.post("/metadata", response_model=ProjectDTO)
+def set_metadata(req: SetMetadataRequest, request: Request, response: Response) -> ProjectDTO:
+    """标记/取消标记一行为制作名单。
+
+    导入时的自动判定必然有误判（§6.1），而误判的两个方向都很难看：漏判会让视频
+    开头闪出五行像乱码一样的名单，误判会让真正在前奏里唱的那句歌词消失。
+    §2.5 要求每个自动环节都有等价的手工旁路，这就是那条旁路，因此**进撤销栈**。
+    """
+    return _apply(
+        request,
+        response,
+        req.project_id,
+        "标记制作名单" if req.is_metadata else "取消制作名单标记",
+        lambda draft: ops.set_metadata(
+            draft, line_id=req.line_id, is_metadata=req.is_metadata
         ),
     )
 

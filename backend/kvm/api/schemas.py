@@ -12,16 +12,46 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, computed_field
 
-
 # ---- 工程 ----
 
 
-class RubySpanDTO(BaseModel):
+class CharSpanDTO(BaseModel):
+    """挂在行内字符区间 `[start, end)` 上的一段读音。
+
+    抽出公共基类是为了让"拆行时按字符切点迁移区间"这套逻辑只写一遍
+    （见 `editing.ops._partition_spans`）：表记读法与发音形的迁移规则完全一样，
+    各写一份必然在某次改动后只改对一个。
+    """
+
     start: int
     end: int
     text: str
     source: str = "provider_kana"
     locked: bool = False
+
+
+class RubySpanDTO(CharSpanDTO):
+    """**表记读法**（振り仮名）：要渲染到成片上的那一份读音。
+
+    纯假名区间不出现在这里（会渲染成「あ|あ」这种冗余标注）。
+    """
+
+
+class PhoneticSpanDTO(CharSpanDTO):
+    """**发音形**：这段字实际唱出来的假名，片假名规范存储。
+
+    §4.2 要求两份读音同时存在：注音行显示「は」，喂强制对齐的必须是 ワ。
+    只存一份是系统性 bug 源——要么注音显示错，要么对齐器拿着 /h/ 去找实际唱的 /w/。
+
+    **单独成一层而不是给 `RubySpanDTO` 加字段**：助词 は→ワ 恰恰发生在没有注音的
+    纯假名字符上，挂在注音上表达不了；而把无注音的条目塞进 `ruby` 会被渲染层
+    当成要画出来的注音。理由详见 `models.karaoke.PhoneticSpan`。
+
+    区间与 `ruby` 用同一套行内字符索引，彼此不重叠。缺省 `source` 是 `derived`
+    （由表记读法按确定规则推出），用户手填的是 `manual`。
+    """
+
+    source: str = "derived"
 
 
 class TokenDTO(BaseModel):
@@ -66,6 +96,17 @@ class LineDTO(BaseModel):
     id: str
     tokens: list[TokenDTO] = Field(default_factory=list)
     ruby: list[RubySpanDTO] = Field(default_factory=list)
+
+    phonetics: list[PhoneticSpanDTO] = Field(default_factory=list)
+    """发音形覆盖层（见 `PhoneticSpanDTO`）。与 `ruby` 同一套行内字符索引。
+
+    **按需物化**：只有推导过或用户填过的工程才有内容，空列表表示这首歌还没启用
+    这一层——所以结构性编辑（拆行/并行/改注音）不会凭空替空列表造出发音形。
+
+    老工程 JSON 没有这个字段，`default_factory` 保证照常读取（与本模型其余字段
+    一致的兼容做法，不需要迁移函数）。
+    """
+
     voice_part: str = "main"
     slot: int = 0
     is_metadata: bool = False
@@ -110,7 +151,7 @@ class OrphanedEdit(BaseModel):
     """
 
     kind: str
-    """`ruby` / `timing` / `voice_part`。"""
+    """`ruby` / `phonetic` / `timing` / `voice_part`。"""
 
     detail: str
     """人类可读的中文说明，例如"「明日」的注音 あした 在拆行后跨越了分界"。"""
@@ -244,6 +285,17 @@ class LyricCandidate(BaseModel):
 
     展示给用户挑选，**不自动替他选**（CLAUDE.md §5.2：resolver 只排序不裁决）。
     界面必须显示 granularity 与 has_ruby——这两项决定用户还要不要手工打轴/注音。
+
+    这条来自 `/search`，provider 此时通常只看到曲目元信息、还没下载歌词正文，
+    因此 `granularity`/`has_ruby` 在这一阶段可能确实无法确定——**三态而非
+    二态**：`granularity="unknown"` / `has_ruby=None` 表示"还不知道，需要
+    `/preview` 才能确认"，不是"没有"。之前的实现把 provider 的整体能力
+    （"QQ 音乐一般有逐字注音"）当成了每条结果的确定事实，导致徽章与
+    `/preview` 实际解析结果不一致（CLAUDE.md §5.2 铁律：粒度可以被提升，
+    不能被伪造）。前端拿到 `unknown`/`None` 时应显示"未知，需预览确认"，
+    不能当作 False 直接隐藏"含注音"徽章，也不能当作 True 直接显示它。
+    `/preview`、`/apply` 返回的 `LyricPreview.granularity`/`has_ruby` 永远是
+    确定值（fetch() 已解析出正文），不受这条三态语义影响。
     """
 
     provider: str
@@ -252,8 +304,9 @@ class LyricCandidate(BaseModel):
     artist: str
     album: str = ""
     duration_ms: int = 0
-    granularity: Literal["word", "line", "plain"] = "line"
-    has_ruby: bool = False
+    granularity: Literal["word", "line", "plain", "unknown"] = "unknown"
+    has_ruby: bool | None = None
+    """`None` = 搜索阶段未知，需 `/preview` 确认；`True`/`False` = 确认过的真实值。"""
     has_translation: bool = False
     score: float = 0.0
     note: str = ""
@@ -474,10 +527,10 @@ class SetTimingsRequest(BaseModel):
 
 
 class LockItem(BaseModel):
-    """一条锁定变更。`target` 决定改的是音节时间锁还是注音锁。"""
+    """一条锁定变更。`target` 决定改的是音节时间锁、注音锁还是发音形锁。"""
 
     line_id: str
-    target: Literal["timing", "ruby"] = "timing"
+    target: Literal["timing", "ruby", "phonetic"] = "timing"
     locked: bool = True
     """False 表示解锁，让自动重算重新接管这一项。"""
 
@@ -486,6 +539,14 @@ class LockItem(BaseModel):
 
     ruby_range: tuple[int, int] | None = None
     """`target=ruby` 时必填，须与已有注音的字符区间**完全一致**。"""
+
+    phonetic_range: tuple[int, int] | None = None
+    """`target=phonetic` 时必填，须与已有发音形的字符区间**完全一致**。
+
+    与 `ruby_range` 分成两个字段而不是共用一个：同一个字符区间上通常两份读音
+    都在，共用字段就无法表达"只锁发音形、注音仍交给自动流程"——而这恰恰是
+    §4.4 把两份读音各配一个 `locked` 的意义。
+    """
 
 
 class SetLockRequest(BaseModel):
@@ -510,6 +571,42 @@ class SetRubyRequest(BaseModel):
     text: str
 
 
+class SetPhoneticRequest(BaseModel):
+    """设定某个字符区间的**发音形**（§4.2 的 `reading_phonetic`）。
+
+    区间口径与 `SetRubyRequest` 完全一致（行内字符索引，左闭右开），
+    通常就是注音区间本身；助词那一类则是没有注音的单个假名。
+    """
+
+    project_id: str
+    line_id: str
+    start: int
+    end: int
+
+    text: str
+    """空串表示**清除手工覆盖**，让这一段回到自动推导值（推不出来就留空）。
+
+    非空时按片假名规范化后存储，并标成 `manual` + `locked`——用户手填发音形
+    正是为了纠正自动推导，不锁住的话下一次推导就把它换回去了。
+    """
+
+
+class DerivePhoneticsRequest(BaseModel):
+    """由表记读法批量推导发音形。
+
+    这是 §4.4 意义上的"自动重算"：**只覆盖 `locked=False` 的项**，
+    用户锁过的发音形一个字都不动。推不出来的（未注音的汉字、拉丁词）留空，
+    界面据此提示用户补。
+
+    是用户主动点的按钮，所以照常占一格撤销——推导会一次改到几百段发音形，
+    没有撤销就等于不可逆。
+    """
+
+    project_id: str
+    line_ids: list[str] | None = None
+    """只推导这几行；缺省表示整首歌。"""
+
+
 class SplitLineRequest(BaseModel):
     project_id: str
     line_id: str
@@ -520,6 +617,22 @@ class MergeLineRequest(BaseModel):
     project_id: str
     line_id: str
     """与下一行合并。"""
+
+
+class SetMetadataRequest(BaseModel):
+    """标记/取消标记一行为制作名单（词/曲/编曲/制作人……）。
+
+    导入时按"时间早于首句人声 **且** 文本形如 `词：xxx`"自动判定，而这条启发式
+    必然有误判：真正在前奏里唱的歌词、含 ` - ` 的歌名式歌词都会被误伤，
+    反过来歌词源把名单写成别的格式时又会漏判——漏判的后果是视频开头闪出五行
+    像乱码一样的名单（CLAUDE.md §6.1）。
+
+    §2.5：每个自动环节都必须有等价的手工旁路，这就是那条旁路。
+    """
+
+    project_id: str
+    line_id: str
+    is_metadata: bool
 
 
 class SetVoicePartRequest(BaseModel):
@@ -589,3 +702,80 @@ class PaletteTemplateSaveRequest(BaseModel):
     description: str = ""
     project_id: str | None = None
     palettes: dict[str, PaletteDTO] = Field(default_factory=dict)
+
+
+# ---- 媒体探测 / 波形峰值 ----
+#
+# 补齐 CLAUDE.md §5.10（波形峰值预计算）与探测两个媒体接口。前端此前分别用
+# 手写 Range + RIFF chunk 遍历、以及整段解码 PCM 凑合，见 `kvm.media.probe`
+# 与 `kvm.media.waveform` 模块文档。
+
+
+class MediaTrackInfo(BaseModel):
+    """一条媒体轨的 ffprobe 探测结果。
+
+    `exists=False` 时只有 `error` 有意义——工程记录着路径但文件已经不在磁盘上
+    （被移动/清理），这不是"这个 kind 从未有过素材"（那种情况路由层直接 404，
+    与 `GET /api/media/file/{project_id}/{kind}` 同一判据），而是"自动环节的
+    错误必须可见，不能终止"（CLAUDE.md §2.5）的一个具体样例：批量探测时一条
+    轨读失败不该连累其余轨。
+    """
+
+    kind: str
+    path: str
+    exists: bool = True
+    error: str = ""
+
+    duration_ms: int = 0
+    size_bytes: int = 0
+
+    sample_rate_hz: int | None = None
+    channels: int | None = None
+    audio_codec: str = ""
+
+    width: int | None = None
+    height: int | None = None
+    fps: float | None = None
+    video_codec: str = ""
+
+
+class MediaProbeResponse(BaseModel):
+    """一个工程当前全部媒体轨的探测结果，按 kind 索引。
+
+    只包含工程里**已经有路径**的 kind——素材面板要展示"目前有哪些轨"，
+    不该对着还没导入的轨逐一报 404。
+    """
+
+    project_id: str
+    tracks: dict[str, MediaTrackInfo] = Field(default_factory=dict)
+
+
+class WaveformLevelInfo(BaseModel):
+    """一级 LOD 的规格：多少个原始采样合并成一个像素点、这一级总共有多少个点。"""
+
+    level: int
+    samples_per_pixel: int
+    length: int
+
+
+class WaveformMetaDTO(BaseModel):
+    """波形峰值的分级元信息。
+
+    前端按当前 `pxPerSec` 换算出理想的 `samples_per_pixel`，在 `levels` 里
+    选最接近的一级，再拿着该级的 `level` 序号去
+    `GET /api/media/waveform/{project_id}/{kind}/{level}` 取那一级的二进制
+    峰值（BBC waveform-data 二进制 v2 格式，见 `kvm.media.waveform` 模块文档；
+    格式本身已经带 sample_rate/channels，这里额外给出是为了不逼前端先下载
+    一份二进制才能知道有哪些级别可选）。
+    """
+
+    project_id: str
+    kind: str
+    sample_rate_hz: int
+    channels: int
+    duration_ms: int
+    levels: list[WaveformLevelInfo] = Field(default_factory=list)
+
+    cached: bool = False
+    elapsed_s: float = 0.0
+    """本次请求实际耗时（秒）。缓存命中时只是文件读取 + 哈希校验的时间。"""

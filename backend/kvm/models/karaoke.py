@@ -43,14 +43,107 @@ class ReadingSource(str, enum.Enum):
     ACOUSTIC = "acoustic"
     """多候选读音 + 强制对齐声学似然消歧。第一版不实现，保留位置。"""
 
+    DERIVED = "derived"
+    """由**表记读法**按确定规则推出的发音形（片假名规范化 + 整词助词 は/へ/を）。
+
+    与上面几档不同，它不是"查到的读音"而是"从已有读音换算的另一种形态"，
+    因此可信度取决于表记读法本身，且只覆盖确定的部分——长音与「ん」的音位变体
+    不在其中（见 `derive_phonetic`）。界面应按"需复核"处理。
+    """
+
     MANUAL = "manual"
+
+
+# ---------------------------------------------------------------------------
+# 表记读法 → 发音形
+#
+# 这几个函数是**领域知识**而不是编辑逻辑，所以放在模型层：注音编辑器与将来的
+# 强制对齐器都要用同一套规则，各写一份必然漂移（前端 lib/kana.ts 是它的对照实现）。
+# 全部是本地纯函数，不引入任何依赖（CLAUDE.md §2.1 禁止云端推理；jaconv 也不装）。
+
+
+_HIRAGANA_MIN = 0x3041
+_HIRAGANA_MAX = 0x3096
+_KANA_GAP = 0x60
+"""平假名与片假名在 Unicode 上的固定间距。"""
+
+_HIRA_ITERATION = (0x309D, 0x309E)
+"""ゝゞ，与 ヽヾ 同样相隔 0x60。"""
+
+PARTICLE_PHONETIC: dict[str, str] = {"ハ": "ワ", "ヘ": "エ", "ヲ": "オ"}
+"""书写形与发音形不一致的三个助词。
+
+这就是 CLAUDE.md §4.2 要求两份读音同时存在的直接理由：注音行要显示「は」，
+喂给强制对齐的必须是 /wa/。
+"""
+
+
+def to_katakana(text: str) -> str:
+    """平假名 → 片假名。其余字符原样保留。
+
+    发音形一律按片假名规范存储（§4.2），这样「は」与「ハ」不会在同一个字段里
+    表示成两种东西，比较与查表都只有一种形态。
+    """
+    out: list[str] = []
+    for ch in text:
+        code = ord(ch)
+        if _HIRAGANA_MIN <= code <= _HIRAGANA_MAX or code in _HIRA_ITERATION:
+            out.append(chr(code + _KANA_GAP))
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def is_kana(ch: str) -> bool:
+    """是否假名（含小写假名、长音符「ー」、叠字符 ゝゞヽヾ）。"""
+    code = ord(ch)
+    return (
+        _HIRAGANA_MIN <= code <= _HIRAGANA_MAX
+        or code in _HIRA_ITERATION
+        or 0x30A1 <= code <= 0x30FA
+        or code in (0x30FD, 0x30FE)
+        or ch == "ー"
+    )
+
+
+def is_kana_text(text: str) -> bool:
+    """整串是否只由假名组成。空串为假。"""
+    return bool(text) and all(is_kana(ch) for ch in text)
+
+
+def derive_phonetic(display: str, *, surface: str | None = None) -> str:
+    """由表记读法推出发音形；**推不出来时返回空串**，由界面提示用户填。
+
+    只做两件**确定**的事：
+
+    1. 规范成片假名；
+    2. 书写形整词就是助词 は/へ/を 时换成实际发音 ワ/エ/オ。
+
+    刻意不做的事：**不猜长音，也不猜「ん」的音位变体**。「おう」在「王」是长音、
+    在「問う」是两拍，纯假名串无法确定性还原（CLAUDE.md §9 第 7 项，要靠
+    `pyopenjtalk.g2p` 才有定论）。发音形是喂强制对齐的，猜错会把整句轴带偏，
+    比留空更糟——留空至少用户看得见"这里还没定"。
+
+    `surface` 是该单元的**书写形**，助词替换只看它：「葉(は)」的读音同样是 は，
+    但它是名词、读 /ha/，只按读音判断会把它错换成 ワ。缺省时表示书写形就是读音
+    本身（纯假名单元）。
+    """
+    src = display.strip()
+    if not is_kana_text(src):
+        # 含汉字/拉丁字母的"读音"不是读音（如未注音的汉字块、`sumika` 这类原文），
+        # 没有任何确定规则能把它变成假名串
+        return ""
+    base = to_katakana((surface if surface is not None else src).strip())
+    return PARTICLE_PHONETIC.get(base, to_katakana(src))
 
 
 @dataclass
 class RubySpan:
-    """一段注音：把行内字符区间 [start, end) 标注为 `text`。
+    """一段注音（**表记读法**）：把行内字符区间 [start, end) 标注为 `text`。
 
     纯假名区间不应出现在这里，否则会渲染出「あ|あ」这种冗余标注。
+
+    这是**要渲染出来的那一份读音**；喂强制对齐的发音形是另一份，见 `PhoneticSpan`。
     """
 
     start: int
@@ -59,6 +152,35 @@ class RubySpan:
     source: ReadingSource = ReadingSource.PROVIDER_KANA
     locked: bool = False
     """用户手工锁定后，自动重算不得覆盖。"""
+
+
+@dataclass
+class PhoneticSpan:
+    """一段**发音形**：行内字符区间 [start, end) 实际唱出来的假名（片假名规范）。
+
+    ## 为什么与 `RubySpan` 分开存，而不是给它加一个字段
+
+    §4.2 要求 `reading_display` 与 `reading_phonetic` 同时存在，但本模型里
+    **没有"词/词素"那一层**：`Token` 是计时单元（一个 `\\k` 块，实测 99% 是单个
+    书写字符），把读音挂上去会立刻撞上 §4.2 说的粒度冲突——「学校」的
+    ガッコウ 无法确定地劈成「学」「校」两半。真正承载读音的是**字符区间**，
+    也就是这里的 span。
+
+    而发音形不能挂在 `RubySpan` 上：契约给的那个例子——助词「は」读作 ワ——
+    正好发生在**没有注音的纯假名字符**上（纯假名区间不允许出现在 `ruby` 里），
+    挂上去就表达不了。反过来把无注音的 span 塞进 `ruby` 也不行：渲染层会把
+    `ruby` 里的每一条都排版出来。
+
+    分成两层还有一个好处：两份读音**各自带 source 与 locked**（§4.4）。
+    用户常常认可歌词源给的注音、只想改发音形，两者共用一个锁就做不到。
+    """
+
+    start: int
+    end: int
+    text: str
+    source: ReadingSource = ReadingSource.DERIVED
+    locked: bool = False
+    """用户手工锁定后，自动重算（推导、将来的 G2P）不得覆盖。"""
 
 
 @dataclass
@@ -99,6 +221,13 @@ class Line:
 
     tokens: list[Token] = field(default_factory=list)
     ruby: list[RubySpan] = field(default_factory=list)
+
+    phonetics: list[PhoneticSpan] = field(default_factory=list)
+    """发音形覆盖层，与 `ruby` 同一套行内字符索引，区间之间不重叠。
+
+    渲染层不消费它（成片上要显示的是 `ruby`），它服务于强制对齐与注音编辑器。
+    老工程文件没有这个字段，`default_factory` 保证照常读取。
+    """
 
     voice_part: str = "main"
     """声部标识。驱动分色；`main` / `duet_a` / `duet_b` / `chorus` / 自定义。

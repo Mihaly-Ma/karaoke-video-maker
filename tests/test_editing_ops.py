@@ -612,6 +612,64 @@ def test_set_voice_part_range_clamped() -> None:
     assert out.warnings
 
 
+# ---- 制作名单标记 ----
+
+
+def test_set_metadata_marks_line_and_locks_it() -> None:
+    """自动判定必然有误判，用户改过之后自动流程不得再回改（§2.5 手工旁路 + §4.4 锁）。"""
+    p = _project()
+
+    out = ops.set_metadata(p, line_id="L1", is_metadata=True)
+
+    assert p.lines[0].is_metadata
+    assert p.lines[0].locked
+    assert out.warnings, "这行从此不作为歌词排版，属于「做了但你该知道」"
+
+
+def test_set_metadata_can_reclaim_a_misjudged_lyric_line() -> None:
+    """反向同样必须能走：真在前奏里唱的歌词被误判成名单，用户要能把它捞回来。
+
+    漏掉这条方向，被误判的那句歌词就在成片里彻底消失，而用户找不到任何开关。
+    """
+    p = _project()
+    p.lines[1].is_metadata = True
+
+    ops.set_metadata(p, line_id="L2", is_metadata=False)
+
+    assert not p.lines[1].is_metadata
+    assert p.lines[1].locked
+
+
+def test_set_metadata_no_change_is_reported() -> None:
+    """状态没变也要有回执，否则用户点了一下什么都没发生，只会以为坏了。"""
+    p = _project()
+
+    out = ops.set_metadata(p, line_id="L1", is_metadata=False)
+
+    assert not p.lines[0].is_metadata
+    assert any("本来就是" in w for w in out.warnings)
+
+
+def test_set_metadata_unknown_line_raises() -> None:
+    p = _project()
+
+    with pytest.raises(ops.EditError):
+        ops.set_metadata(p, line_id="nope", is_metadata=True)
+
+
+def test_set_metadata_is_one_undo_unit(tmp_path: Path) -> None:
+    """这是用户主动做的判断，进撤销栈（后台产物才走 `update_derived`，§8）。"""
+    store = ProjectStore(root=tmp_path)
+    created = store.create()
+    store.mutate(created.id, lambda d: d.lines.extend(_project().lines))
+    depth_before, _ = store.history_depth(created.id)
+
+    store.mutate(created.id, lambda d: ops.set_metadata(d, line_id="L1", is_metadata=True))
+
+    assert store.history_depth(created.id)[0] == depth_before + 1
+    assert store.undo(created.id).lines[0].is_metadata is False
+
+
 # ---- 寻址错误 ----
 
 

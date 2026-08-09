@@ -14,23 +14,30 @@ from __future__ import annotations
 import mimetypes
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
-from starlette.responses import FileResponse
-
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from kvm.api.schemas import (
     DownloadRequest,
     JobStatus,
+    MediaProbeResponse,
+    MediaTrackInfo,
     ProjectDTO,
     ProxyRequest,
     ProxyStatus,
     SeparateModelTier,
     SeparateRequest,
+    WaveformLevelInfo,
+    WaveformMetaDTO,
 )
 from kvm.api.store import ProjectStore
 from kvm.jobs import job_manager
 from kvm.media import download as download_module
+from kvm.media import probe as probe_module
 from kvm.media import proxy as proxy_module
 from kvm.media import separate as separate_module
+from kvm.media import waveform as waveform_module
+from kvm.media.download import _ffprobe_bin, project_media_dir
+from kvm.media.ffmpeg import find_ffmpeg_with_libass
+from starlette.responses import FileResponse
 
 router = APIRouter(prefix="/api/media", tags=["media"])
 
@@ -49,6 +56,12 @@ _MEDIA_FIELDS: dict[str, str] = {
 # 允许**手工导入**的 kind。比 `_MEDIA_FIELDS` 少一个 proxy：代理是本工具从原视频
 # 派生出来的中间产物，不是用户素材——放开导入只会让 proxy 与 video 对不上号。
 _IMPORT_FIELDS: dict[str, str] = {k: v for k, v in _MEDIA_FIELDS.items() if k != "proxy"}
+
+# 允许算波形峰值的 kind：只有纯音频轨（CLAUDE.md §5.10）。video/proxy 是画面轨，
+# 波形调轴用的是分离产物或原始参考音轨，不对着视频容器里的音频流重新算一遍。
+_WAVEFORM_KINDS: dict[str, str] = {
+    k: v for k, v in _MEDIA_FIELDS.items() if k in ("audio", "vocals", "instrumental", "drums")
+}
 
 # Python 的 `mimetypes` 默认不认识这几种常见容器/编码，显式补上，否则
 # `<video>`/`<audio>` 标签可能因为 Content-Type 缺失/错误而拒绝播放。
@@ -253,5 +266,165 @@ def get_media_file(
     return FileResponse(
         str(path),
         media_type=media_type or "application/octet-stream",
+        headers={"Cross-Origin-Resource-Policy": "cross-origin"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# 媒体探测（ffprobe）
+# ---------------------------------------------------------------------------
+
+
+def _track_info(ffprobe_bin: str, media_dir: Path, kind: str, path_str: str) -> MediaTrackInfo:
+    info = probe_module.probe_track_cached(ffprobe_bin, media_dir, Path(path_str))
+    return MediaTrackInfo(
+        kind=kind,
+        path=path_str,
+        exists=info.exists,
+        error=info.error,
+        duration_ms=info.duration_ms,
+        size_bytes=info.size_bytes,
+        sample_rate_hz=info.sample_rate_hz,
+        channels=info.channels,
+        audio_codec=info.audio_codec,
+        width=info.width,
+        height=info.height,
+        fps=info.fps,
+        video_codec=info.video_codec,
+    )
+
+
+@router.get("/probe/{project_id}", response_model=MediaProbeResponse)
+def probe_all_media(
+    project_id: str, store: ProjectStore = Depends(get_store)
+) -> MediaProbeResponse:
+    """一次性探测工程当前拥有的全部媒体轨（时长/采样率/声道/体积，视频/代理
+    另加分辨率/帧率）。用 ffprobe，不在后端手搓任何格式解析。
+
+    只返回工程里**已经有路径**的 kind——素材面板要展示"目前有哪些轨"，
+    不逐一对着还没导入的轨报 404；某条轨路径还在但文件已被移动/清理时，
+    这条记录仍会出现，只是 `exists=False` 带着中文错误说明（CLAUDE.md §2.5：
+    自动环节的错误必须可见，不能终止，不能因为一条轨读失败就搭上整个响应）。
+    """
+    project = _project_or_404(store, project_id)
+    ffmpeg_bin = find_ffmpeg_with_libass()
+    ffprobe_bin = _ffprobe_bin(ffmpeg_bin)
+    media_dir = project_media_dir(project_id)
+
+    tracks: dict[str, MediaTrackInfo] = {}
+    for kind, field in _MEDIA_FIELDS.items():
+        path_str: str | None = getattr(project, field)
+        if not path_str:
+            continue
+        tracks[kind] = _track_info(ffprobe_bin, media_dir, kind, path_str)
+    return MediaProbeResponse(project_id=project_id, tracks=tracks)
+
+
+@router.get("/probe/{project_id}/{kind}", response_model=MediaTrackInfo)
+def probe_one_media(
+    project_id: str, kind: str, store: ProjectStore = Depends(get_store)
+) -> MediaTrackInfo:
+    """探测单条媒体轨。与 `GET /api/media/file/{project_id}/{kind}` 用同一套
+    kind 命名与"kind 不支持/路径未设置"的 404 判据；文件路径已设置但磁盘上
+    不存在时不 404，而是带 `exists=False` 正常返回（见 `probe_all_media`）。
+    """
+    project = _project_or_404(store, project_id)
+    field = _MEDIA_FIELDS.get(kind)
+    if field is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"不支持的媒体类型：{kind}（应为 {'/'.join(_MEDIA_FIELDS)} 之一）",
+        )
+    path_str: str | None = getattr(project, field)
+    if not path_str:
+        raise HTTPException(status_code=404, detail=f"工程 {project_id} 还没有 {kind} 媒体")
+
+    ffmpeg_bin = find_ffmpeg_with_libass()
+    ffprobe_bin = _ffprobe_bin(ffmpeg_bin)
+    media_dir = project_media_dir(project_id)
+    return _track_info(ffprobe_bin, media_dir, kind, path_str)
+
+
+# ---------------------------------------------------------------------------
+# 波形峰值（CLAUDE.md §5.10）
+# ---------------------------------------------------------------------------
+
+
+def _resolve_waveform_source(store: ProjectStore, project_id: str, kind: str) -> Path:
+    """校验 kind 合法、工程有该轨、文件确实在磁盘上，返回其路径；否则抛 404。"""
+    project = _project_or_404(store, project_id)
+    field = _WAVEFORM_KINDS.get(kind)
+    if field is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"不支持的波形轨类型：{kind}（应为 {'/'.join(_WAVEFORM_KINDS)} 之一）",
+        )
+    path_str: str | None = getattr(project, field)
+    if not path_str:
+        raise HTTPException(status_code=404, detail=f"工程 {project_id} 还没有 {kind} 媒体")
+    path = Path(path_str)
+    if not path.is_file():
+        raise HTTPException(
+            status_code=404, detail=f"媒体文件不存在（可能已被移动/清理）：{path}"
+        )
+    return path
+
+
+@router.get("/waveform/{project_id}/{kind}", response_model=WaveformMetaDTO)
+def get_waveform_meta(
+    project_id: str, kind: str, store: ProjectStore = Depends(get_store)
+) -> WaveformMetaDTO:
+    """波形峰值的分级元信息：采样率/声道数/时长 + 每一级 LOD 的 (spp, 点数)。
+
+    前端据此换算"当前 pxPerSec 该请求哪一级"，再拿着 level 序号去下面那个
+    接口要该级的二进制峰值数据。未缓存时会在这次请求里同步完成解码与分级计算
+    （实测耗时见 `kvm.media.waveform` 模块与本次交付报告——5 分钟量级的音频
+    在几百毫秒到一点几秒之间，够快，没有必要为它另起一整套子进程 + 进度协议）。
+    """
+    path = _resolve_waveform_source(store, project_id, kind)
+    ffmpeg_bin = find_ffmpeg_with_libass()
+    ffprobe_bin = _ffprobe_bin(ffmpeg_bin)
+    media_dir = project_media_dir(project_id)
+    try:
+        meta = waveform_module.get_or_compute(ffmpeg_bin, ffprobe_bin, media_dir, kind, path)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return WaveformMetaDTO(
+        project_id=project_id,
+        kind=kind,
+        sample_rate_hz=meta.sample_rate,
+        channels=meta.channels,
+        duration_ms=meta.duration_ms,
+        levels=[WaveformLevelInfo(**lv) for lv in meta.levels],
+        cached=meta.cached,
+        elapsed_s=round(meta.elapsed_s, 3),
+    )
+
+
+@router.get("/waveform/{project_id}/{kind}/{level}")
+def get_waveform_level(
+    project_id: str, kind: str, level: int, store: ProjectStore = Depends(get_store)
+) -> Response:
+    """某一级 LOD 的峰值二进制数据：BBC waveform-data 二进制 v2 格式
+    （版本号、采样率、声道数、samples_per_pixel、点数全部编在头里，
+    前端可直接用 `waveform-data` 这个 npm 包解析，见 `kvm.media.waveform`
+    模块文档）。
+    """
+    path = _resolve_waveform_source(store, project_id, kind)
+    ffmpeg_bin = find_ffmpeg_with_libass()
+    ffprobe_bin = _ffprobe_bin(ffmpeg_bin)
+    media_dir = project_media_dir(project_id)
+    try:
+        # 按内容哈希缓存：未命中才会真正解码。前端一般先调过一次上面的元信息
+        # 接口，这里几乎总是缓存命中（只需读取磁盘上已经算好的 .dat 文件）。
+        meta = waveform_module.get_or_compute(ffmpeg_bin, ffprobe_bin, media_dir, kind, path)
+        data = waveform_module.read_level_bytes(media_dir, kind, meta.source_sha256, level)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return Response(
+        content=data,
+        media_type="application/octet-stream",
         headers={"Cross-Origin-Resource-Policy": "cross-origin"},
     )

@@ -60,18 +60,27 @@ from pathlib import Path
 from typing import Literal
 
 from kvm.api.schemas import (
+    CharSpanDTO,
     LineDTO,
     LockItem,
     OrphanedEdit,
     PaletteDTO,
     PaletteTemplate,
+    PhoneticSpanDTO,
     ProjectDTO,
     RubySpanDTO,
     TimingItem,
     TokenDTO,
 )
 from kvm.api.store import default_root
-from kvm.models.karaoke import ReadingSource, TimingSource
+from kvm.models.karaoke import (
+    ReadingSource,
+    TimingSource,
+    derive_phonetic,
+    is_kana,
+    is_kana_text,
+    to_katakana,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -270,19 +279,28 @@ def _set_trailing_edge(tokens: list[TokenDTO], index: int, value: int) -> tuple[
     return val, touched
 
 
-def _partition_ruby(
-    spans: Sequence[RubySpanDTO], char_bounds: Sequence[int]
-) -> tuple[list[list[RubySpanDTO]], list[RubySpanDTO]]:
-    """按字符切点把注音分桶，并把跨切点的注音单列出来。
+def _intersects(a_start: int, a_end: int, b_start: int, b_end: int) -> bool:
+    """两个左闭右开区间是否相交。首尾相接不算相交。"""
+    return a_start < b_end and a_end > b_start
+
+
+def _partition_spans[S: CharSpanDTO](
+    spans: Sequence[S], char_bounds: Sequence[int]
+) -> tuple[list[list[S]], list[S]]:
+    """按字符切点把读音区间分桶，并把跨切点的单列出来。
+
+    对**表记读法与发音形一视同仁**（两者都是挂在行内字符区间上的读音，
+    迁移规则完全相同），写成泛型是为了不让同一段索引运算存在两份——
+    只改对一份的那天，注音迁对了而发音形挂到别的字上，症状还极难看出来。
 
     `char_bounds` 是升序的字符切点（含首尾），第 j 个桶覆盖
-    `[char_bounds[j], char_bounds[j + 1])`。落入某个桶的注音，索引会减去该桶
-    的起点——`RubySpan` 的 `start`/`end` 是**行内**字符索引，换了行就必须重算。
+    `[char_bounds[j], char_bounds[j + 1])`。落入某个桶的区间，索引会减去该桶
+    的起点——`start`/`end` 是**行内**字符索引，换了行就必须重算。
 
-    跨切点的注音无法在任何一行内表达，只能丢弃，但**必须回报**（§4.4）。
+    跨切点的区间无法在任何一行内表达，只能丢弃，但**必须回报**（§4.4）。
     """
-    buckets: list[list[RubySpanDTO]] = [[] for _ in range(len(char_bounds) - 1)]
-    dropped: list[RubySpanDTO] = []
+    buckets: list[list[S]] = [[] for _ in range(len(char_bounds) - 1)]
+    dropped: list[S] = []
     for sp in spans:
         if sp.start >= sp.end:
             # 空区间本就不该存在，顺手清掉，不算丢失
@@ -290,19 +308,163 @@ def _partition_ruby(
         for j in range(len(buckets)):
             lo, hi = char_bounds[j], char_bounds[j + 1]
             if lo <= sp.start and sp.end <= hi:
-                buckets[j].append(
-                    RubySpanDTO(
-                        start=sp.start - lo,
-                        end=sp.end - lo,
-                        text=sp.text,
-                        source=sp.source,
-                        locked=sp.locked,
-                    )
-                )
+                buckets[j].append(sp.model_copy(update={"start": sp.start - lo, "end": sp.end - lo}))
                 break
         else:
             dropped.append(sp)
     return buckets, dropped
+
+
+# ---- 读音单元与发音形推导 ----
+
+
+@dataclass(frozen=True)
+class _ReadingUnit:
+    """行内的一个"读音单元"：注音区间，或注音之间的一段连续同类字符。
+
+    这是发音形挂载的粒度，也正是注音编辑器里用户点一下选中的那个东西
+    （前端 `RubyModel.buildUnits` 是同一套切分）。**不按 token 切**：
+    token 是计时单元、多数是单个字符，「学校」的 ガッコウ 无法确定地劈成两半。
+    """
+
+    start: int
+    end: int
+    surface: str
+    """书写形。助词替换只认它——「葉(は)」读音也是 は，但它读 /ha/。"""
+
+    display: str
+    """表记读法。纯假名单元就是书写形本身；未注音的汉字块与拉丁词为空串。"""
+
+
+def _bare_units(surface: str, lo: int, hi: int) -> list[_ReadingUnit]:
+    """把没有注音的一段 `[lo, hi)` 切成"假名串"与"非假名串"两类连续块。
+
+    假名块自带读音（书写形即读音），非假名块（未注音的汉字、拉丁词）读音未知，
+    留空让界面提示用户补，**不猜**。
+
+    假名块整块处理而不是逐字处理，是助词规则能否成立的关键：`は` 只有在自成
+    一个单元时（左右都是汉字或注音，日语歌词里助词的典型位置）才当助词换成 ワ；
+    夹在 `はまだ` 里的 は 属于词的一部分，逐字处理会把它错换掉。
+    """
+    out: list[_ReadingUnit] = []
+    i = lo
+    while i < hi:
+        kana = is_kana(surface[i])
+        j = i + 1
+        while j < hi and is_kana(surface[j]) == kana:
+            j += 1
+        text = surface[i:j]
+        out.append(_ReadingUnit(start=i, end=j, surface=text, display=text if kana else ""))
+        i = j
+    return out
+
+
+def _reading_units(line: LineDTO) -> list[_ReadingUnit]:
+    """把一行切成读音单元：注音区间 + 注音之间的裸字符块。
+
+    注音区间之间本不该重叠（§4.2 不变式），真重叠时以靠前的一条为准并跳过后一条：
+    此处只是消费方，不该顺手改数据。
+    """
+    surface = _line_text(line)
+    spans = sorted(
+        (sp for sp in line.ruby if 0 <= sp.start < sp.end <= len(surface)),
+        key=lambda sp: (sp.start, sp.end),
+    )
+    units: list[_ReadingUnit] = []
+    cursor = 0
+    for sp in spans:
+        if sp.start < cursor:
+            continue
+        units.extend(_bare_units(surface, cursor, sp.start))
+        units.append(
+            _ReadingUnit(
+                start=sp.start,
+                end=sp.end,
+                surface=surface[sp.start : sp.end],
+                display=sp.text,
+            )
+        )
+        cursor = sp.end
+    units.extend(_bare_units(surface, cursor, len(surface)))
+    return units
+
+
+@dataclass
+class _DeriveStats:
+    """一次发音形推导的账目，用于给用户一句话回执。"""
+
+    added: int = 0
+    updated: int = 0
+    kept_locked: int = 0
+    """因为落在锁定项上而没碰的单元——§4.4 的硬边界，不是失败。"""
+
+    undetermined: int = 0
+    """推不出来的单元（未注音的汉字、拉丁词），需要用户手工填。"""
+
+    def merge(self, other: _DeriveStats) -> None:
+        self.added += other.added
+        self.updated += other.updated
+        self.kept_locked += other.kept_locked
+        self.undetermined += other.undetermined
+
+
+def _derive_span_range(line: LineDTO, lo: int, hi: int) -> _DeriveStats:
+    """把 `[lo, hi)` 内每个读音单元的发音形重新推导一遍。
+
+    这是 §4.4 意义上的"自动重算"，因此**只覆盖 `locked=False` 的项**：
+    锁定的区间原样保留，与它相交的单元整个跳过（保住"发音形区间互不重叠"
+    这条不变式；宁可少推一段，也不能在用户锁定的读音旁边再叠一段）。
+
+    范围内没有对应单元的非锁定区间会被清掉——那是上一次分行/注音留下的陈迹，
+    留着只会让后续消费方读到一段对不上任何词的读音。
+    """
+    stats = _DeriveStats()
+    locked = [sp for sp in line.phonetics if sp.locked]
+    kept = [
+        sp for sp in line.phonetics if sp.locked or not _intersects(sp.start, sp.end, lo, hi)
+    ]
+    previous = {(sp.start, sp.end): sp.text for sp in line.phonetics if not sp.locked}
+
+    for unit in _reading_units(line):
+        if not _intersects(unit.start, unit.end, lo, hi):
+            continue
+        if any(_intersects(sp.start, sp.end, unit.start, unit.end) for sp in locked):
+            stats.kept_locked += 1
+            continue
+        value = derive_phonetic(unit.display, surface=unit.surface)
+        if not value:
+            stats.undetermined += 1
+            continue
+        prev = previous.get((unit.start, unit.end))
+        if prev is None:
+            stats.added += 1
+        elif prev != value:
+            stats.updated += 1
+        kept.append(
+            PhoneticSpanDTO(
+                start=unit.start,
+                end=unit.end,
+                text=value,
+                source=ReadingSource.DERIVED.value,
+                locked=False,
+            )
+        )
+
+    kept.sort(key=lambda sp: (sp.start, sp.end))
+    line.phonetics = kept
+    return stats
+
+
+def _rederive_phonetics(line: LineDTO, *, materialized: bool) -> _DeriveStats:
+    """结构性编辑（拆行/并行/改注音）之后就地刷新整行的发音形。
+
+    `materialized=False` 时直接返回：发音形层是**按需物化**的，一条都没有说明
+    这首歌还没启用它。拆个行就凭空造出一堆读音，会让工程里半数行有、半数行没有，
+    用户既看不懂也无从判断哪些该复核。
+    """
+    if not materialized:
+        return _DeriveStats()
+    return _derive_span_range(line, 0, len(_line_text(line)))
 
 
 def _record_dropped_ruby(
@@ -341,7 +503,46 @@ def _record_dropped_ruby(
         )
 
 
-def _split_tokens(line: LineDTO, cuts: Sequence[int]) -> tuple[list[LineDTO], list[RubySpanDTO]]:
+def _record_dropped_phonetics(
+    project: ProjectDTO,
+    out: EditOutcome,
+    *,
+    line_id: str,
+    surface: str,
+    spans: Sequence[PhoneticSpanDTO],
+) -> None:
+    """把拆行时无处安放的**发音形**记进失效修正清单——**只记锁定过的那些**。
+
+    与注音不同：没锁的发音形是推导出来的，拆完行重新推导一遍就回来了，
+    把它们塞进清单只会让真正需要用户确认的条目被淹掉（清单只装真的没保住的东西）。
+    """
+    for sp in spans:
+        if not sp.locked:
+            continue
+        base = surface[sp.start : sp.end]
+        _add_orphan(
+            project,
+            out,
+            kind="phonetic",
+            detail=(
+                f"「{base}」上你锁定过的发音形「{sp.text}」在拆行后跨越了分界，"
+                "无法迁移，请重新填写"
+            ),
+            payload={
+                "line_id": line_id,
+                "start": sp.start,
+                "end": sp.end,
+                "text": sp.text,
+                "source": sp.source,
+                "locked": sp.locked,
+                "base": base,
+            },
+        )
+
+
+def _split_tokens(
+    line: LineDTO, cuts: Sequence[int]
+) -> tuple[list[LineDTO], list[RubySpanDTO], list[PhoneticSpanDTO]]:
     """在给定的 token 下标处把一行切成若干行。
 
     第一段**沿用原行 id**，让前端已有的选中态、引用不至于失效；其余段取新 id。
@@ -353,22 +554,24 @@ def _split_tokens(line: LineDTO, cuts: Sequence[int]) -> tuple[list[LineDTO], li
     n = len(line.tokens)
     bounds = [0, *cuts, n]
     char_bounds = [sum(len(t.text) for t in line.tokens[:b]) for b in bounds]
-    buckets, dropped = _partition_ruby(line.ruby, char_bounds)
+    ruby_buckets, dropped_ruby = _partition_spans(line.ruby, char_bounds)
+    ph_buckets, dropped_ph = _partition_spans(line.phonetics, char_bounds)
 
     out: list[LineDTO] = []
     for j in range(len(bounds) - 1):
-        out.append(
-            LineDTO(
-                id=line.id if j == 0 else _new_line_id(),
-                tokens=[t.model_copy(deep=True) for t in line.tokens[bounds[j] : bounds[j + 1]]],
-                ruby=buckets[j],
-                voice_part=line.voice_part,
-                slot=(line.slot + j) % 2,
-                is_metadata=line.is_metadata,
-                locked=True,
-            )
+        part = LineDTO(
+            id=line.id if j == 0 else _new_line_id(),
+            tokens=[t.model_copy(deep=True) for t in line.tokens[bounds[j] : bounds[j + 1]]],
+            ruby=ruby_buckets[j],
+            phonetics=ph_buckets[j],
+            voice_part=line.voice_part,
+            slot=(line.slot + j) % 2,
+            is_metadata=line.is_metadata,
+            locked=True,
         )
-    return out, dropped
+        _rederive_phonetics(part, materialized=bool(line.phonetics))
+        out.append(part)
+    return out, dropped_ruby, dropped_ph
 
 
 # ---- 平移（三级调轴） ----
@@ -552,7 +755,7 @@ def set_timings(project: ProjectDTO, *, items: Sequence[TimingItem]) -> EditOutc
 
 
 def set_locks(project: ProjectDTO, *, items: Sequence[LockItem]) -> EditOutcome:
-    """批量设置/清除锁定：音节的 `locked_timing`、注音的 `locked`。
+    """批量设置/清除锁定：音节的 `locked_timing`、注音的 `locked`、发音形的 `locked`。
 
     §4.4 的 `(value, source, locked)` 只有在用户**能自己动 locked** 时才成立。
     否则锁标记全由自动流程产生，用户看得到锁却钉不住自己的判断，
@@ -571,8 +774,10 @@ def set_locks(project: ProjectDTO, *, items: Sequence[LockItem]) -> EditOutcome:
         _, line = _find_line(project, item.line_id)
         if item.target == "timing":
             _lock_timing(line, item, i)
-        else:
+        elif item.target == "ruby":
             _lock_ruby(line, item, i)
+        else:
+            _lock_phonetic(line, item, i)
     return out
 
 
@@ -611,6 +816,28 @@ def _lock_ruby(line: LineDTO, item: LockItem, i: int) -> None:
     raise EditError(msg)
 
 
+def _lock_phonetic(line: LineDTO, item: LockItem, i: int) -> None:
+    """锁定/解锁一段发音形。区间必须与已有发音形**完全一致**，理由同 `_lock_ruby`。
+
+    锁上之后，`derive_phonetics` 与将来的 G2P 重算都必须绕开它——这是用户
+    "我已经确认过这段读音"的唯一表达方式。
+    """
+    if item.phonetic_range is None:
+        msg = f"批量锁定第 {i} 项：target=phonetic 必须给出 phonetic_range"
+        raise EditError(msg)
+    lo, hi = item.phonetic_range
+    for sp in line.phonetics:
+        if (sp.start, sp.end) == (lo, hi):
+            sp.locked = item.locked
+            return
+    existing = "、".join(f"{sp.start}-{sp.end}" for sp in line.phonetics) or "（无）"
+    msg = (
+        f"批量锁定第 {i} 项：行 {item.line_id} 上没有字符区间 {lo}-{hi} 的发音形，"
+        f"现有区间为 {existing}"
+    )
+    raise EditError(msg)
+
+
 # ---- 注音 ----
 
 
@@ -629,6 +856,7 @@ def set_ruby(
     if not surface:
         msg = f"行 {line_id} 没有文本，无法标注注音"
         raise EditError(msg)
+    materialized = bool(line.phonetics)
 
     lo = min(max(start, 0), len(surface))
     hi = min(max(end, 0), len(surface))
@@ -679,7 +907,191 @@ def set_ruby(
         )
     kept.sort(key=lambda sp: (sp.start, sp.end))
     line.ruby = kept
+
+    # 表记读法一变，由它推出来的发音形立刻过期。不跟着刷新，界面上就会出现
+    # 「注音改成 さだめ、发音形还写着 ウンメイ」这种自相矛盾的状态
+    if materialized:
+        stats = _derive_span_range(line, lo, hi)
+        if stats.kept_locked:
+            out.warnings.append(
+                f"该区间上有 {stats.kept_locked} 段发音形是你锁定过的，未随注音更新；"
+                "要让它跟着走请先解锁"
+            )
     return out
+
+
+# ---- 发音形（喂强制对齐的那一份读音） ----
+
+
+def set_phonetic(
+    project: ProjectDTO, *, line_id: str, start: int, end: int, text: str
+) -> EditOutcome:
+    """设定字符区间 `[start, end)` 的发音形；`text` 为空表示清除手工覆盖。
+
+    §4.2 要求两份读音同时存在：注音行显示「は」，喂强制对齐的必须是 ワ。
+    手填的发音形一律标 `manual` + `locked`——用户填它就是为了纠正自动推导，
+    不锁住的话下一次推导原样把它换回去。
+
+    清除时不是简单删掉，而是**就地重新推导**：用户的意思是"这里交还给自动"，
+    留一个空洞会让界面显示"缺发音形"，看起来像坏了。推不出来才真的留空。
+
+    发音形区间之间不得重叠（与注音同一条不变式），所以新区间会先吃掉与之相交的
+    旧区间；其中锁定过的会进失效修正清单。
+    """
+    out = EditOutcome()
+    _, line = _find_line(project, line_id)
+    surface = _line_text(line)
+    if not surface:
+        msg = f"行 {line_id} 没有文本，无法标注发音形"
+        raise EditError(msg)
+
+    lo = min(max(start, 0), len(surface))
+    hi = min(max(end, 0), len(surface))
+    if lo != start or hi != end:
+        out.warnings.append(
+            f"发音形区间被夹进行内范围：{start}-{end} → {lo}-{hi}（行长 {len(surface)}）"
+        )
+    if lo >= hi:
+        msg = f"发音形区间为空：{lo}-{hi}"
+        raise EditError(msg)
+
+    value = to_katakana(text.strip())
+    if not value:
+        _clear_phonetic(line, lo, hi, surface, out)
+        return out
+
+    kept: list[PhoneticSpanDTO] = []
+    for sp in line.phonetics:
+        if _intersects(sp.start, sp.end, lo, hi):
+            if sp.locked and (sp.start, sp.end) != (lo, hi):
+                _add_orphan(
+                    project,
+                    out,
+                    kind="phonetic",
+                    detail=(
+                        f"「{surface[sp.start : sp.end]}」上你锁定过的发音形「{sp.text}」"
+                        f"被新的发音形「{value}」覆盖（新区间 {lo}-{hi} 与它相交）"
+                    ),
+                    payload={
+                        "line_id": line_id,
+                        "start": sp.start,
+                        "end": sp.end,
+                        "text": sp.text,
+                        "source": sp.source,
+                        "locked": True,
+                        "base": surface[sp.start : sp.end],
+                    },
+                )
+            continue
+        kept.append(sp)
+
+    kept.append(
+        PhoneticSpanDTO(
+            start=lo,
+            end=hi,
+            text=value,
+            source=ReadingSource.MANUAL.value,
+            locked=True,
+        )
+    )
+    kept.sort(key=lambda sp: (sp.start, sp.end))
+    line.phonetics = kept
+
+    if not is_kana_text(value):
+        # 不拒绝——用户可能真有理由这么填（外来语、拟声词的特殊写法）。
+        # 但强制对齐的 vocab 是假名，非假名字符到那一步会被丢掉，得让他现在就知道
+        out.warnings.append(
+            f"发音形「{value}」含非假名字符；强制对齐只认假名，这一段可能对不上"
+        )
+    return out
+
+
+def _clear_phonetic(
+    line: LineDTO, lo: int, hi: int, surface: str, out: EditOutcome
+) -> None:
+    """清除 `[lo, hi)` 上的发音形覆盖，并把这一段交还给自动推导。
+
+    连锁定的一起删：清除是用户对自己那条覆盖的明确撤回，此时还拦着他反而怪。
+    """
+    before = len(line.phonetics)
+    line.phonetics = [
+        sp for sp in line.phonetics if not _intersects(sp.start, sp.end, lo, hi)
+    ]
+    removed = before - len(line.phonetics)
+    stats = _derive_span_range(line, lo, hi)
+    now = [sp.text for sp in line.phonetics if _intersects(sp.start, sp.end, lo, hi)]
+    base = surface[lo:hi]
+    if now:
+        out.warnings.append(f"「{base}」的发音形已回到推导值「{''.join(now)}」")
+    elif removed or stats.undetermined:
+        out.warnings.append(f"「{base}」的发音形已清空；这一段推导不出来，需要手工填")
+
+
+def derive_phonetics(
+    project: ProjectDTO, *, line_ids: Sequence[str] | None = None
+) -> EditOutcome:
+    """由表记读法批量推导发音形。**只覆盖 `locked=False` 的项**（§4.4）。
+
+    这是"发音形层"的物化入口：导入歌词后跑一遍，注音改过之后再跑一遍。
+    推导规则只做确定的部分（片假名规范化 + 整词助词 は/へ/を），长音与「ん」的
+    音位变体一律不猜——那取决于 `pyopenjtalk.g2p` 那项待实测（CLAUDE.md §9 第 7 项），
+    猜错会把整句轴带偏，比留空更糟。见 `models.karaoke.derive_phonetic`。
+    """
+    out = EditOutcome()
+    if line_ids is None:
+        targets = list(project.lines)
+    else:
+        targets = [_find_line(project, lid)[1] for lid in line_ids]
+
+    total = _DeriveStats()
+    for line in targets:
+        total.merge(_derive_span_range(line, 0, len(_line_text(line))))
+
+    if total.kept_locked:
+        out.warnings.append(f"{total.kept_locked} 段发音形已锁定，本次未改动（这是设计如此）")
+    if total.undetermined:
+        out.warnings.append(
+            f"{total.undetermined} 处推导不出发音形（未注音的汉字或拉丁词），需要手工填"
+        )
+    return out
+
+
+# ---- 制作名单标记 ----
+
+
+def set_metadata(project: ProjectDTO, *, line_id: str, is_metadata: bool) -> EditOutcome:
+    """把一行标记/取消标记为制作名单（词/曲/编曲/制作人……）。
+
+    导入时的自动判定是条启发式（时间早于首句人声 **且** 文本形如 `词：xxx`），
+    必然有误判：前奏里真唱的歌词、含 ` - ` 的歌名式歌词会被误伤；歌词源换个写法
+    又会漏判，而漏判的后果是视频开头闪出五行像乱码一样的名单（§6.1）。
+    §2.5 要求每个自动环节都有等价的手工旁路，这就是那条。
+
+    连带把 `line.locked` 置真。本模型的行级锁是**单一标记**，因此这也顺手挡住了
+    自动分行/段落归属——这是有意的保守选择：用户既然亲手判过这行是不是名单，
+    自动分行把它拆开同样违背他的意图。
+    """
+    out = EditOutcome()
+    _, line = _find_line(project, line_id)
+    label = _preview_text(_line_text(line))
+
+    if line.is_metadata == is_metadata:
+        kind = "制作名单" if is_metadata else "正文歌词"
+        out.warnings.append(f"「{label}」本来就是{kind}，本次没有变化")
+        return out
+
+    line.is_metadata = is_metadata
+    line.locked = True
+    if is_metadata:
+        out.warnings.append(f"「{label}」不再作为歌词排版，改为并入制作名单屏")
+    else:
+        out.warnings.append(f"「{label}」将作为正文歌词参与排版与调轴")
+    return out
+
+
+def _preview_text(text: str, limit: int = 12) -> str:
+    """给用户看的行文本摘要。整行贴进提示会把一条警告撑成两行。"""
+    return text if len(text) <= limit else text[:limit] + "…"
 
 
 # ---- 拆行 / 并行 ----
@@ -702,8 +1114,9 @@ def split_line(project: ProjectDTO, *, line_id: str, token_index: int) -> EditOu
         raise EditError(msg)
 
     surface = _line_text(line)
-    parts, dropped = _split_tokens(line, [token_index])
-    _record_dropped_ruby(project, out, line_id=line_id, surface=surface, spans=dropped)
+    parts, dropped_ruby, dropped_ph = _split_tokens(line, [token_index])
+    _record_dropped_ruby(project, out, line_id=line_id, surface=surface, spans=dropped_ruby)
+    _record_dropped_phonetics(project, out, line_id=line_id, surface=surface, spans=dropped_ph)
     project.lines[idx : idx + 1] = parts
     return out
 
@@ -735,18 +1148,20 @@ def merge_line(project: ProjectDTO, *, line_id: str) -> EditOutcome:
                 _mark_timing_manual(tok)
 
     head_chars = len(_line_text(line))
+    materialized = bool(line.phonetics or nxt.phonetics)
     merged_ruby = [sp.model_copy(deep=True) for sp in line.ruby]
     merged_ruby.extend(
-        RubySpanDTO(
-            start=sp.start + head_chars,
-            end=sp.end + head_chars,
-            text=sp.text,
-            source=sp.source,
-            locked=sp.locked,
-        )
+        sp.model_copy(update={"start": sp.start + head_chars, "end": sp.end + head_chars})
         for sp in nxt.ruby
     )
     merged_ruby.sort(key=lambda sp: (sp.start, sp.end))
+
+    merged_ph = [sp.model_copy(deep=True) for sp in line.phonetics]
+    merged_ph.extend(
+        sp.model_copy(update={"start": sp.start + head_chars, "end": sp.end + head_chars})
+        for sp in nxt.phonetics
+    )
+    merged_ph.sort(key=lambda sp: (sp.start, sp.end))
 
     if nxt.voice_part != line.voice_part:
         # 模型已有 token 级声部，被合并行的声部**下沉到它自己的音节上**即可完整保留。
@@ -764,9 +1179,14 @@ def merge_line(project: ProjectDTO, *, line_id: str) -> EditOutcome:
 
     line.tokens.extend(tail)
     line.ruby = merged_ruby
+    line.phonetics = merged_ph
     line.is_metadata = line.is_metadata and nxt.is_metadata
     line.locked = True
     del project.lines[idx + 1]
+
+    # 接缝处的读音单元会重新划分（前一行末尾的假名与后一行开头的假名并成一串，
+    # 独立的助词就不再独立了），所以合并完必须重推一次，锁定的照旧不动
+    _rederive_phonetics(line, materialized=materialized)
     return out
 
 
