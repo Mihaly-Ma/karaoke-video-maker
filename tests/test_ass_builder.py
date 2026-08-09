@@ -1,4 +1,4 @@
-"""ASS 生成器的单元测试，重点是**一行内的多声部分色**。
+"""ASS 生成器的单元测试：**一行内的多声部分色** 与 **出入场时间编排**。
 
 关注点不是"能生成 ASS"，而是三条会直接毁掉成片观感的不变式：
 
@@ -12,6 +12,12 @@
 外加两条既有行为的回归保护：`dur_ms<=0` 的 token 必须跳过（QRC 实测存在零时长块，
 会触发 libass #124），以及每个 token 一个 `\\t`（不能用一个 `\\t` 扫整行，
 那样速度均匀就不是卡拉OK 了）。
+
+时间编排那一组测的是四条同样"错了才看得出来"的约束：每句都淡入淡出且
+一行的各层淡得一模一样；段落头两行同时浮现；引导点与它提示的那句同时出现；
+以及**同槽位的一进一出不许在时间上重叠**——槽位只有两个，隔一行就复用同一位置，
+前一行还在原地淡出、后一行已经在同一位置淡入的话，两句字会互相穿透，
+比硬切还难看。
 """
 
 from __future__ import annotations
@@ -34,7 +40,12 @@ from kvm.models.karaoke import (  # noqa: E402
     Token,
     VoicePalette,
 )
-from kvm.render.ass_builder import AssBuilder, _voice_segments  # noqa: E402
+from kvm.pipeline.beat_detect import BeatGrid  # noqa: E402
+from kvm.render.ass_builder import (  # noqa: E402
+    AssBuilder,
+    _find_credit_window,
+    _voice_segments,
+)
 
 # ---- 夹具 ----
 
@@ -327,3 +338,272 @@ def test_wide_line_split_keeps_token_voice_parts() -> None:
     assert sum("\\1c&H00FF40C0&\\3c&H00401030&" in e for e in events) == 1, (
         "拆行后 duet_b 那一段必须还在——token 级声部不能在拆行时丢掉"
     )
+
+
+# ---- 出入场时间编排 ----
+
+
+def _ms(stamp: str) -> int:
+    """ASS 的 `H:MM:SS.cc` → 毫秒。"""
+    h, m, rest = stamp.split(":")
+    s, cs = rest.split(".")
+    return ((int(h) * 60 + int(m)) * 60 + int(s)) * 1000 + int(cs) * 10
+
+
+_EVENT_RE = re.compile(r"^Dialogue: (\d+),([^,]+),([^,]+),([^,]+),")
+
+
+def _window(event: str) -> tuple[int, int]:
+    """事件的 (Start, End)，毫秒。"""
+    m = _EVENT_RE.match(event)
+    assert m is not None, event
+    return _ms(m.group(2)), _ms(m.group(3))
+
+
+_FAD_RE = re.compile(r"\\fad\((\d+),(\d+)\)")
+
+
+def _fad(event: str) -> tuple[int, int] | None:
+    m = _FAD_RE.search(event)
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def _song(
+    starts_ms: list[int],
+    *,
+    dur_ms: int = 2000,
+    ruby: bool = False,
+    **style_kw: object,
+) -> KaraokeProject:
+    """多行工程：每行 4 个 token 各 `dur_ms/4` 毫秒，行起点由 `starts_ms` 给定。
+
+    行间距由调用方决定，因为被测的正是"间隔多大算间奏""挤不下时怎么让位"。
+    """
+    step = dur_ms // 4
+    lines = []
+    for base in starts_ms:
+        tokens = [
+            Token(text=chr(ord("あ") + i), start_ms=base + i * step, dur_ms=step)
+            for i in range(4)
+        ]
+        ln = Line(tokens=tokens)
+        if ruby:
+            ln.ruby = [RubySpan(start=0, end=1, text="い")]
+        lines.append(ln)
+    style = KaraokeStyle(font_size=40, stagger=False, **style_kw)  # type: ignore[arg-type]
+    return KaraokeProject(
+        lines=lines,
+        style=style,
+        palettes=_palettes(),
+        video_width=1920,
+        video_height=1080,
+    )
+
+
+def _line_windows(ass: str) -> list[tuple[int, int]]:
+    """逐行的 `(开始淡入, 完全消失)`，按行序。
+
+    取 layer 0 的 Main 事件：一行的每个声部段各出一个，本组测试的夹具都是
+    单声部，所以正好一行一个。**不能按 Start 去重**——段落头两行本来就共用
+    同一个 Start，去重会把它们并成一行。
+    """
+    return [
+        _window(e)
+        for e in ass.splitlines()
+        if e.startswith("Dialogue: 0,") and ",Main,," in e
+    ]
+
+
+def test_every_line_fades_in_and_out() -> None:
+    """每句都淡入淡出——不再只给段落首/末行。段内硬切在换句密集处很跳。"""
+    project = _song([2000, 6000, 10000], countdown_dots=0, ruby=True)
+    st = project.style
+
+    events = [
+        e for e in _build(project).splitlines()
+        if e.startswith("Dialogue:") and (",Main,," in e or ",Ruby,," in e)
+    ]
+
+    assert len(events) == 3 * (2 + 2), "每行 = 主行两层 + 注音两层"
+    assert all(_fad(e) == (st.fade_in_ms, st.fade_out_ms) for e in events)
+
+
+def test_all_layers_of_a_line_share_one_fade() -> None:
+    """一行的各层必须淡得一模一样。
+
+    有一层淡得不同步，淡化期间未唱色就会从已唱色底下透出来——
+    双层 clip 方案下两层画的是同一段文本，只是颜色不同。
+    """
+    line = _line([None, "duet_a", "duet_b"])
+    line.ruby = [RubySpan(start=0, end=1, text="い"), RubySpan(start=2, end=3, text="は")]
+    project = _project(line)
+
+    events = [e for e in _build(project).splitlines() if e.startswith("Dialogue:")]
+
+    assert len(events) == 3 * 2 + 2 * 2
+    assert len({(_window(e), _fad(e)) for e in events}) == 1
+
+
+def test_fade_shrinks_to_fit_a_short_window() -> None:
+    """窗口比 fade_in+fade_out 还短时按比例收窄。
+
+    libass 不会自动截断：淡入淡出加起来超过事件时长的话，整行全程挂在
+    半透明的爬升段上，永远淡不完。
+    """
+    project = _song(
+        [10000], countdown_dots=0, dur_ms=200,
+        lead_in_ms=100, lead_out_ms=100, paragraph_lead_ms=100,
+    )
+    project.style.fade_in_ms = 900
+    project.style.fade_out_ms = 300
+
+    under = _dialogues(_build(project), "Main")[0]
+
+    show, hide = _window(under)
+    fi, fo = _fad(under)  # type: ignore[misc]
+    assert (fi, fo) == (300, 100), "按 900:300 的比例收窄到 400ms 的窗口里"
+    assert fi + fo == hide - show
+
+
+def test_first_two_lines_of_a_paragraph_appear_together() -> None:
+    """开头两句、以及每段间奏之后的两句，要一起出现。
+
+    只提前第一句的话第二句要等第一句开唱才浮现，观众看不到"接下来是这两句"。
+    """
+    # 第 0 段：0/1/2 行；间隔 21s 后第 1 段：3/4 行
+    windows = _line_windows(_build(_song([5000, 8000, 11000, 34000, 37000], countdown_dots=0)))
+
+    assert len(windows) == 5
+    assert windows[0][0] == windows[1][0], "开头两句一起出现"
+    assert windows[3][0] == windows[4][0], "间奏后的两句一起出现"
+    assert windows[2][0] > windows[1][0], "段内第三句仍按常规顺次出现，不跟着并进来"
+
+
+def test_paragraph_pair_leads_by_paragraph_lead_ms() -> None:
+    """段落首两行提前 `paragraph_lead_ms` 出现，而不是只提前 `lead_in_ms`。"""
+    project = _song([5000, 8000, 40000, 43000], countdown_dots=0)
+    st = project.style
+
+    windows = _line_windows(_build(project))
+
+    assert windows[2][0] == 40000 - st.paragraph_lead_ms
+    assert windows[3][0] == windows[2][0]
+    # 第二行若走常规路径会晚得多，这里确实是被段落提前量拉早的
+    assert windows[2][0] < 43000 - st.max_lead_ms
+
+
+def test_paragraph_lead_never_overruns_the_previous_line() -> None:
+    """间奏刚够 `paragraph_gap_ms` 时，提前量必须被上一句的收尾顶回来。
+
+    否则新段落的两句会在上一句还没唱完（或还没淡完）时压上来。
+    """
+    st_probe = KaraokeStyle()
+    # 间隔恰好等于间奏阈值：3500 < paragraph_lead_ms(4200)，必然触发夹紧
+    project = _song([5000, 7000 + st_probe.paragraph_gap_ms], countdown_dots=0)
+    st = project.style
+    prev_end = 7000
+
+    second_show = _line_windows(_build(project))[1][0]
+
+    assert second_show >= prev_end + st.fade_out_ms + st.slot_gap_ms
+    assert second_show > 7000 + st.paragraph_gap_ms - st.paragraph_lead_ms
+
+
+def test_countdown_dots_appear_with_their_line() -> None:
+    """三个点与它提示的那句歌词同一时刻浮现，且淡入参数相同。"""
+    project = _song([12000, 15000], countdown_dots=3)
+    st = project.style
+
+    ass = _build(project)
+    dots = _dialogues(ass, "Dot")
+    first_show = _line_windows(ass)[0][0]
+
+    assert len(dots) == 3
+    assert all(_window(d)[0] == first_show for d in dots)
+    assert all(_fad(d) == (st.fade_in_ms, 0) for d in dots), (
+        "淡入与歌词同参数；熄灭要干脆，不淡出——那一下'啪'地消失才是拍点的读数"
+    )
+
+
+def test_countdown_dots_extinguish_on_real_beats() -> None:
+    """点必须踩在真实拍点上熄灭：固定间隔只是'三个会消失的点'，与音乐无关。"""
+    project = _song([12000, 15000], countdown_dots=3)
+    beats = [11000, 11500, 12000 - 60, 20000]
+    project.beat_grid = BeatGrid(bpm=120.0, beats_ms=[*beats])
+
+    dots = _dialogues(_build(project), "Dot")
+
+    # 最左的点最后熄灭（开唱前一拍），最右的先熄灭
+    assert [_window(d)[1] for d in dots] == [11940, 11500, 11000]
+
+
+def test_countdown_falls_back_to_fixed_interval_without_a_beat_grid() -> None:
+    """节拍检测失败不能变成"不显示引导点"（§2.5：失败要降级，不能终止）。"""
+    project = _song([12000, 15000], countdown_dots=3)
+    st = project.style
+
+    dots = _dialogues(_build(project), "Dot")
+
+    assert len(dots) == 3
+    assert [_window(d)[1] for d in dots] == [
+        12000 - st.countdown_beat_ms * i for i in range(3)
+    ]
+
+
+def test_same_slot_lines_never_overlap_in_time() -> None:
+    """同槽位的一进一出不许重叠——两句字在同一位置互相穿透比硬切还难看。
+
+    因为窗口两端都按"完全消失/开始淡入"计量，这条只需比较窗口本身，
+    不必再各自加减淡化时长。
+    """
+    # 密集歌词：行间几乎没有空档，正是同槽位最容易撞车的情形
+    project = _song([2000, 4200, 6400, 8600, 10800, 13000], dur_ms=2000, countdown_dots=0)
+    st = project.style
+
+    windows = _line_windows(_build(project))
+
+    for prev, cur in zip(windows, windows[2:], strict=False):  # 隔一行 = 同槽位
+        assert cur[0] - prev[1] >= st.slot_gap_ms, (
+            f"同槽位重叠：前一行 {prev} 与后一行 {cur}"
+        )
+
+
+def test_fade_out_never_starts_before_the_line_is_sung() -> None:
+    """挤位置时前一行可以早退，但下限是"唱完再加一个淡出"。
+
+    按"唱完"去卡的话，最后一个字会一边唱一边褪色。
+    """
+    project = _song([2000, 4200, 6400, 8600, 10800], dur_ms=2000, countdown_dots=0)
+    st = project.style
+
+    windows = _line_windows(_build(project))
+
+    for (_, hide), base in zip(windows, [2000, 4200, 6400, 8600, 10800], strict=True):
+        assert hide - st.fade_out_ms >= base + 2000, "淡出不得在最后一个字唱完前开始"
+
+
+def test_credit_window_does_not_collide_with_any_line() -> None:
+    """制作名单窗口按**字幕实际出现/消失**算，不是按开唱时间。
+
+    歌词提前量一改，"按开唱时间近似"立刻和实际脱节，名单会和歌词叠在一起。
+    """
+    project = _song([3000, 6000, 40000, 43000], countdown_dots=0)
+    project.title = "赤春花"
+    project.artist = "sumika"
+
+    ass = _build(project)
+    title = _dialogues(ass, "Title")
+    assert len(title) == 1
+    c0, c1 = _window(title[0])
+
+    for show, hide in _line_windows(ass):
+        assert hide <= c0 or show >= c1, f"制作名单 ({c0},{c1}) 撞上歌词 ({show},{hide})"
+
+
+def test_find_credit_window_uses_the_union_of_line_windows() -> None:
+    """行窗口允许互相重叠（同屏两槽位、以及数据结构允许的多声部同唱），
+    所以必须先求并集再找空隙；逐对比较会把被后一行覆盖住的"空隙"误判成可用。
+    """
+    # 第 2 行整个包在第 1 行里：朴素的逐对比较会在 (3000, 20000) 处误报一个大空隙
+    assert _find_credit_window([(0, 3000), (1000, 25000), (20000, 30000)]) is None
+    assert _find_credit_window([(0, 3000), (1000, 12000), (20000, 30000)]) == (12600, 19400)

@@ -33,6 +33,20 @@
 单声部行（绝大多数）只有一段，此时**不输出这个区间 clip**，
 输出与未支持多声部时逐字节一致。
 
+## 淡入淡出与窗口语义
+
+**每一句都淡入淡出**，不只是段落首/末行——段内硬切在换句密集处很跳。
+
+一行会拆成好几个 Dialogue（多声部分段 ×2 层 + 每段注音 ×2 层），
+它们**共用同一个 `(show, hide)` 窗口和同一组 `\\fad` 参数**，
+否则淡化期间几层会各淡各的，未唱色与已唱色互相透出来打架。
+
+窗口的两端都按"肉眼看到的状态"定义：`show` 是开始淡入的时刻（此刻全透明），
+`hide` 是**完全消失**的时刻（Dialogue 的 End）。这样"前一行没了"与
+"后一行开始出现"仍是两个能直接比大小的时间点，同槽位的空档判断
+（`_compute_times`）不必再各自减去淡化时长。代价是不透明区间被两头各吃掉一截，
+所以 `lead_in_ms >= fade_in_ms`、`lead_out_ms >= fade_out_ms` 是硬性要求。
+
 ## 坐标策略
 
 一律用 `\\an7`（左上）+ 显式 `\\pos`，自己算居中，而不是用 `\\an2` 让 libass 居中。
@@ -42,7 +56,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from itertools import pairwise
 
 from kvm.models.karaoke import KaraokeProject, Line, RubySpan, Token
 from kvm.render.text_metrics import FontSpec, LibassMetrics
@@ -129,17 +142,36 @@ class AssBuilder:
 
         singable = [ln for ln in p.lines if not ln.is_metadata and ln.tokens]
         singable = self._split_wide_lines(singable)
-        _assign_slots(singable, st.paragraph_gap_ms)
+        para_starts = _assign_slots(singable, st.paragraph_gap_ms)
         laid = self._layout(singable)
 
-        times = self._compute_times(laid)
+        times = self._compute_times(laid, para_starts)
 
-        events: list[str] = list(self._emit_credits(singable))
+        # 制作名单要放进"屏幕上真的没有歌词"的空档，所以必须拿最终窗口去找，
+        # 不能拿开唱时间近似——歌词提前量一改，近似值立刻和实际脱节。
+        events: list[str] = list(self._emit_credits(times))
         for i, lo in enumerate(laid):
             prev_end = laid[i - 1].line.end_ms if i > 0 else None
-            events.extend(self._emit_countdown(lo, prev_end, ruby_size))
+            events.extend(self._emit_countdown(lo, prev_end, ruby_size, times[i]))
             events.extend(self._emit_line(lo, ruby_size, times[i]))
         return head + "".join(events)
+
+    def _fade_tag(self, window: tuple[int, int]) -> str:
+        """本行的 `\\fad`。所有层共用同一个，淡化才会同步。
+
+        窗口比 `fade_in + fade_out` 还短时按比例收窄：libass 不会自动截断，
+        真塞进去的话整行全程处在半透明的爬升段，永远淡不完。
+        """
+        st = self._p.style
+        dur = max(0, window[1] - window[0])
+        fi = max(0, st.fade_in_ms)
+        fo = max(0, st.fade_out_ms)
+        if fi + fo <= 0:
+            return ""
+        if fi + fo > dur:
+            fi = dur * fi // (fi + fo)
+            fo = dur - fi
+        return f"\\fad({fi},{fo})"
 
     def _split_wide_lines(self, lines: list[Line]) -> list[Line]:
         """把放不下的行拆成两行，而不是水平压扁。
@@ -203,32 +235,74 @@ class AssBuilder:
             queue.insert(0, b)
         return out
 
-    def _compute_times(self, laid: list[_LaidOutLine]) -> list[tuple[int, int]]:
-        """算出每行的显示与消失时刻，并消解同槽位相邻行的重叠。
+    def _compute_times(
+        self, laid: list[_LaidOutLine], para_starts: list[int]
+    ) -> list[tuple[int, int]]:
+        """算出每行的 `(开始淡入, 完全消失)` 窗口，并消解同槽位相邻行的重叠。
 
-        真实卡拉OK 的行为是下一句在当前句还在唱时就已显示，观众能预读。
-        但槽位只有两个（上/下交替），**隔一行就回到同一槽位** ——
-        歌词密集时前一个同槽位的行尚未消失，新行就压上来，字会叠在一起。
+        窗口语义见模块文档字符串的"淡入淡出与窗口语义"一节——
+        `hide` 是完全消失的时刻，不是开始淡出的时刻。
 
-        消解策略：优先让前一行提前消失（但不早于它自己唱完），
-        实在腾不出位置时再把新行推后出现。
+        三条规则叠在一起：
+
+        1. **段落首行连同它的下一行一起提前 `paragraph_lead_ms` 出现。**
+           间奏之后屏幕本来就空着，上下两个槽位一次摆满，演唱者能一眼看到
+           接下来两句；只提前第一句的话第二句要等第一句开唱才冒出来。
+        2. **段内行从上一行开唱起就显示**（上限 `max_lead_ms`），
+           且无论如何至少提前 `lead_in_ms`。
+        3. **同槽位不许叠字。** 槽位只有两个，隔一行就回到同一位置；
+           歌词密集时前一个同槽位的行尚未消失，新行就压上来。
+           消解策略：优先让前一行提前消失，实在腾不出位置时再把新行推后出现。
+
+        前一行"提前消失"的下限是**唱完再加一个淡出时长**，不是唱完就算——
+        `hide` 减去 `fade_out_ms` 才是开始变淡的时刻，按唱完去卡会让最后一个字
+        一边唱一边褪色。
         """
         p = self._p
         st = p.style
         off = p.global_offset_ms
         gap = st.slot_gap_ms
+        fade_out = max(0, st.fade_out_ms)
+        starts = set(para_starts)
 
         times: list[list[int]] = []
         for i, lo in enumerate(laid):
             start = lo.line.start_ms + off
             end = lo.line.end_ms + off
-            if i == 0:
-                show = start - st.lead_in_ms
+            if i in starts:
+                show = start - max(st.paragraph_lead_ms, st.lead_in_ms)
+                if i > 0:
+                    # 间奏只有 paragraph_gap_ms 那么长时，提前 4.2s 会压到
+                    # 上一段最后一句身上：那一句得唱完、淡完，还要留同槽位空档
+                    show = max(show, laid[i - 1].line.end_ms + off + fade_out + gap)
             else:
                 prev_start = laid[i - 1].line.start_ms + off
                 show = max(prev_start, start - st.max_lead_ms)
                 show = min(show, start - st.lead_in_ms)
-            times.append([show, end + st.lead_out_ms])
+            # 负的 show 必须夹到 0：`_ass_time` 会把负时间钳成 0，而 `\t` 的相对
+            # 时间是按 show 算的，两者对不上就会让整行动画整体偏移
+            times.append([max(0, show), end + st.lead_out_ms])
+
+        def sync_paragraph_pairs(*, earliest: bool) -> None:
+            """让段落头两行取相同的出现时刻。
+
+            冲突消解**之前**取两者较早的那个（`earliest=True`）：第二行本来要等
+            第一行开唱才浮现，这里把它拉到与第一行同时。拉早是安全的——
+            第一行的时刻已经按上一段最后一句的收尾做过下限约束，而那一句
+            结束得最晚，两个槽位都够用。
+
+            冲突消解**之后**只能取较晚的那个：此时再往前拉会把刚消解掉的重叠
+            又放回去。这一步通常什么都不做，只是兜住消解过程恰好推后了一对里
+            某一行的情况。
+            """
+            pick = min if earliest else max
+            for k in para_starts:
+                j = k + 1
+                if j < len(times) and j not in starts:
+                    s = pick(times[k][0], times[j][0])
+                    times[k][0] = times[j][0] = s
+
+        sync_paragraph_pairs(earliest=True)
 
         last_in_slot: dict[int, int] = {}
         for i, lo in enumerate(laid):
@@ -236,24 +310,41 @@ class AssBuilder:
             j = last_in_slot.get(slot)
             if j is not None and times[j][1] > times[i][0] - gap:
                 sung_end = laid[j].line.end_ms + off
-                # 先尝试让前一行早点退场
-                times[j][1] = max(sung_end, times[i][0] - gap)
-                # 前一行还没唱完就被顶了 —— 只能让新行晚点进场
+                # 先尝试让前一行早点退场。下限是"唱完 + 一个淡出"，
+                # 再早就会在最后一个字还没唱完时开始褪色
+                times[j][1] = max(sung_end + fade_out, times[i][0] - gap)
+                # 前一行还没让开就被顶了 —— 只能让新行晚点进场
                 if times[j][1] > times[i][0] - gap:
                     times[i][0] = times[j][1] + gap
             last_in_slot[slot] = i
 
+        # 冲突消解可能只推后了一对里的一行，重新对齐一次
+        sync_paragraph_pairs(earliest=False)
+
         return [(t[0], t[1]) for t in times]
 
     def _emit_countdown(
-        self, lo: _LaidOutLine, prev_end_ms: int | None, ruby_size: int
+        self,
+        lo: _LaidOutLine,
+        prev_end_ms: int | None,
+        ruby_size: int,
+        window: tuple[int, int],
     ) -> list[str]:
         """开唱引导点（nicokara 的标志性倒计时指示灯）。
 
-        三点同时亮起，**自右向左**依次熄灭，最左那点消失的瞬间开唱——
+        点与**它所提示的那句歌词同时浮现**（同一个 `show`、同一个淡入时长），
+        然后**自右向左**依次熄灭，最左那点消失的瞬间开唱——
         屏幕上剩几个点就是还剩几拍，这样才读得出倒计时的意思。
         只在**第一句**与**每段间奏之后**出现——句与句之间的正常换行不需要，
         否则满屏都是点，反而干扰。
+
+        点亮起后会先静止一段（歌词提前 `paragraph_lead_ms` 出现，而熄灭只占
+        最后 n 拍），这是刻意的：点先是"这段要开始了"的准备标记，
+        最后几拍才变成倒计时。让点晚于歌词才亮虽然能去掉静止期，
+        但那就不是"同步出现"了，而且两个元素先后冒出来更碎。
+
+        熄灭时刻必须踩在**真实拍点**上：固定间隔只是"三个会消失的点"，
+        与音乐无关，演唱者跟不进（CLAUDE.md §8.5）。没有节拍网格才退回固定间隔。
         """
         p = self._p
         st = p.style
@@ -261,56 +352,60 @@ class AssBuilder:
             return []
 
         start = lo.line.start_ms + p.global_offset_ms
-        if prev_end_ms is None:
-            gap_start = 0
-        else:
+        if prev_end_ms is not None:
             gap_start = prev_end_ms + p.global_offset_ms
             if start - gap_start < st.countdown_min_gap_ms:
                 return []
 
         n = st.countdown_dots
+        t_begin = window[0]
 
         # 优先让点踩在真实拍点上；没有节拍网格时退回固定间隔。
-        # 取开唱前最近的 n 个拍点，最左的点在最早那拍熄灭。
+        # 取开唱前最近的 n 个拍点，最左的点在最晚那拍（即开唱前一拍）熄灭。
         ends: list[int] = []
         if p.beat_grid is not None:
             beats = p.beat_grid.beats_before(start, n)
-            if len(beats) == n and beats[0] > gap_start:
+            if len(beats) == n and beats[0] > t_begin:
                 ends = list(reversed(beats))  # ends[i] 是第 i 个点的熄灭时刻
 
         if not ends:
-            beat = min(st.countdown_beat_ms, max(120, (start - gap_start) // (n + 1)))
+            beat = min(st.countdown_beat_ms, max(120, (start - t_begin) // (n + 1)))
             ends = [start - beat * i for i in range(n)]
 
-        t_begin = max(gap_start, min(ends) - st.countdown_beat_ms)
-
+        fade_in = max(0, st.fade_in_ms)
         dot_w = int(ruby_size * 1.35)
         y = lo.y - int(ruby_size * 2.4)
         out: list[str] = []
         for i in range(n):
             # 自右向左依次熄灭：最右的点先灭，最左的点在开唱瞬间灭掉。
             # 剩余点数即剩余拍数，读起来就是倒计时。
+            if ends[i] <= t_begin:
+                # 空档塞不下这么多点。丢最右边的（先熄灭的那几个），
+                # 剩下的仍然读得出倒计时，比整组不显示好（§2.5 失败要降级）
+                continue
             x = lo.x0 + i * dot_w
+            # 熄灭要干脆，不淡出——那一下"啪"地消失才是拍点的读数。
+            # 淡入则与歌词同参数，两者才像是一起浮现的
+            fi = min(fade_in, ends[i] - t_begin)
             out.append(
                 f"Dialogue: 0,{_ass_time(t_begin)},{_ass_time(ends[i])},Dot,,0,0,0,,"
-                f"{{\\an7\\pos({x},{y})\\fad(180,0)}}●\n"
+                f"{{\\an7\\pos({x},{y})\\fad({fi},0)}}●\n"
             )
         return out
 
-    def _emit_credits(self, singable: list[Line]) -> list[str]:
+    def _emit_credits(self, line_windows: list[tuple[int, int]]) -> list[str]:
         """开头的曲名 / 歌手 / 制作名单字幕。
 
         **不能沿用歌词源给的时间**：QRC 把这些行塞在正文里，实测每行只有
         几十毫秒（0/222/355/518/577ms），照搬根本来不及阅读。
-        这里改为自行排版——从片头持续到首句人声之前，并置于画面上方，
-        避开底部的歌词区。
+        这里改为自行排版——放进第一段屏幕上没有歌词的区间，居画面正中。
         """
         p = self._p
         st = p.style
         if not p.title and not p.artist:
             return []
 
-        window = _find_credit_window(singable, p.global_offset_ms, st)
+        window = _find_credit_window(line_windows)
         if window is None:
             return []
         start_ms, end_ms = window
@@ -412,6 +507,9 @@ class AssBuilder:
         h = p.video_height
 
         sc = f"\\fscx{lo.scale}" if lo.scale != 100 else ""
+        # 一行拆出的所有 Dialogue（各声部段的两层 + 各条注音的两层）共用同一个
+        # `\fad`：只要有一层淡得不一样，淡化期间未唱色与已唱色就会互相透出来
+        fad = self._fade_tag(window)
 
         segments = _voice_segments(ln)
         multi = len(segments) > 1
@@ -433,7 +531,7 @@ class AssBuilder:
 
             # 底层：未唱色整行（按段裁出本段区间）
             base_tags = (
-                f"\\an7\\pos({lo.x0},{lo.y}){sc}"
+                f"\\an7\\pos({lo.x0},{lo.y}){sc}{fad}"
                 f"\\1c{pal.unsung_fill}\\3c{pal.unsung_outline}{seg_clip}"
             )
             events.append(
@@ -445,7 +543,7 @@ class AssBuilder:
             # 推进起点取本段左界、终点最远只到本段右界，所以这一个 clip
             # 同时承担了"扫描进度"与"限制在本段内"两件事，不需要额外的区间 clip。
             clip_tags = [
-                f"\\an7\\pos({lo.x0},{lo.y}){sc}",
+                f"\\an7\\pos({lo.x0},{lo.y}){sc}{fad}",
                 f"\\1c{pal.sung_fill}\\3c{pal.sung_outline}",
                 f"\\clip({seg_x0},0,{seg_x0},{h})",
             ]
@@ -488,7 +586,7 @@ class AssBuilder:
                 # 底层：未唱色
                 events.append(
                     f"Dialogue: 2,{t_show},{t_hide},Ruby,,0,0,0,,"
-                    f"{{\\an7\\pos({rx},{ruby_y})"
+                    f"{{\\an7\\pos({rx},{ruby_y}){fad}"
                     f"\\1c{pal.unsung_fill}\\3c{pal.unsung_outline}}}{rtext}\n"
                 )
                 # 顶层：已唱色 + clip 扫过。注音整体跟随其基字区间的时间，
@@ -503,7 +601,7 @@ class AssBuilder:
                 rel_b = max(rel_a + 1, b_ms + off - show)
                 events.append(
                     f"Dialogue: 3,{t_show},{t_hide},Ruby,,0,0,0,,"
-                    f"{{\\an7\\pos({rx},{ruby_y})"
+                    f"{{\\an7\\pos({rx},{ruby_y}){fad}"
                     f"\\1c{pal.sung_fill}\\3c{pal.sung_outline}"
                     f"\\clip({rx},0,{rx},{h})"
                     f"\\t({rel_a},{rel_b},\\clip({rx},0,{rx + rw},{h}))}}{rtext}\n"
@@ -620,27 +718,31 @@ def _choose_split(line: Line, adv: list[int], avail: int) -> int:
     return best
 
 
-def _assign_slots(lines: list[Line], paragraph_gap_ms: int) -> None:
-    """分配上下槽位；间奏之后重新从上行开始。
+def _assign_slots(lines: list[Line], paragraph_gap_ms: int) -> list[int]:
+    """分配上下槽位；间奏之后重新从上行开始。返回各段落首行的下标。
 
     拆行会改变行数，所以槽位必须在拆行之后重算，不能沿用导入时的结果。
+
+    段落首行的下标要返回出去而不是让调用方回头去猜：槽位是 0/1 交替的，
+    `slot == 0` 每隔一行就出现一次，不能拿它反推段落边界。
     """
+    starts: list[int] = []
     slot = 0
     prev_end: int | None = None
-    for ln in lines:
+    for i, ln in enumerate(lines):
         if not ln.tokens:
             continue
-        if prev_end is not None and ln.start_ms - prev_end >= paragraph_gap_ms:
+        if prev_end is None or ln.start_ms - prev_end >= paragraph_gap_ms:
             slot = 0
+            starts.append(i)
         ln.slot = slot % 2
         slot += 1
         prev_end = ln.end_ms
+    return starts
 
 
 def _find_credit_window(
-    singable: list[Line],
-    offset_ms: int,
-    style,
+    line_windows: list[tuple[int, int]],
     *,
     min_dur_ms: int = 4500,
     pad_ms: int = 600,
@@ -650,22 +752,23 @@ def _find_credit_window(
     不能假设片头一定有前奏——实测赤春花首句在 774ms，开头几乎没有空档，
     所以片头放不下时要顺着找行间的第一个间隙（通常是间奏）。
 
-    关键：边界必须按**字幕实际出现/消失**算，而不是按开唱时间。
-    下一句会提前最多 `max_lead_ms` 显示出来预读，前一句唱完后还会停留
-    `lead_out_ms`；只看开唱时间会让制作名单和歌词叠在一起。
+    输入是每行**最终的 `(开始淡入, 完全消失)` 窗口**，不是开唱时间：
+    行会提前显示出来预读、唱完后还会停留，拿开唱时间近似必然把制作名单
+    和歌词叠在一起。取窗口的并集再找空隙，因为行之间允许时间重叠
+    （同屏两个槽位、以及数据结构上允许的多声部同唱），逐对比较会漏判。
     """
-    if not singable:
+    if not line_windows:
         return None
 
-    head_end = singable[0].start_ms + offset_ms - style.lead_in_ms
-    if head_end >= min_dur_ms + pad_ms:
-        return (0, head_end - pad_ms)
+    ordered = sorted(line_windows)
+    if ordered[0][0] >= min_dur_ms + pad_ms:
+        return (0, ordered[0][0] - pad_ms)
 
-    for a, b in pairwise(singable):
-        g0 = a.end_ms + offset_ms + style.lead_out_ms
-        g1 = b.start_ms + offset_ms - style.max_lead_ms
-        if g1 - g0 >= min_dur_ms + pad_ms * 2:
-            return (g0 + pad_ms, g1 - pad_ms)
+    covered_to = ordered[0][1]
+    for show, hide in ordered[1:]:
+        if show - covered_to >= min_dur_ms + pad_ms * 2:
+            return (covered_to + pad_ms, show - pad_ms)
+        covered_to = max(covered_to, hide)
     return None
 
 
