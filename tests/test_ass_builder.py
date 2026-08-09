@@ -509,20 +509,66 @@ def test_paragraph_lead_never_overruns_the_previous_line() -> None:
     assert second_show > 7000 + st.paragraph_gap_ms - st.paragraph_lead_ms
 
 
-def test_countdown_dots_appear_with_their_line() -> None:
-    """三个点与它提示的那句歌词同一时刻浮现，且淡入参数相同。"""
+def test_countdown_dots_light_up_shortly_before_they_start_ticking() -> None:
+    """点在第一个点熄灭前 `countdown_lead_ms` 才亮，而不是跟着歌词一起浮现。
+
+    跟着歌词浮现的话，段首提前 4.2s 而熄灭只占最后几拍，点会先亮着不动
+    两三秒——读起来只是个静止装饰。
+    """
     project = _song([12000, 15000], countdown_dots=3)
+    project.beat_grid = BeatGrid(bpm=120.0, beats_ms=[10500, 11000, 11500, 11940, 20000])
     st = project.style
 
     ass = _build(project)
     dots = _dialogues(ass, "Dot")
-    first_show = _line_windows(ass)[0][0]
+    line_show = _line_windows(ass)[0][0]
 
     assert len(dots) == 3
-    assert all(_window(d)[0] == first_show for d in dots)
+    first_out = min(_window(d)[1] for d in dots)
+    assert all(_window(d)[0] == first_out - st.countdown_lead_ms for d in dots)
+    assert first_out - st.countdown_lead_ms > line_show, "点要晚于歌词才亮"
     assert all(_fad(d) == (st.fade_in_ms, 0) for d in dots), (
-        "淡入与歌词同参数；熄灭要干脆，不淡出——那一下'啪'地消失才是拍点的读数"
+        "淡入仍然要有，别硬生生跳出来；熄灭则要干脆，不淡出——"
+        "那一下'啪'地消失才是拍点的读数"
     )
+
+
+def test_countdown_dots_never_precede_their_line() -> None:
+    """提前量再大也不许早于歌词：歌词还没浮现就先冒三个点，
+    观众不知道它们指向哪一句。
+    """
+    project = _song([12000, 15000], countdown_dots=3, countdown_lead_ms=100_000)
+
+    ass = _build(project)
+    line_show = _line_windows(ass)[0][0]
+
+    assert all(_window(d)[0] == line_show for d in _dialogues(ass, "Dot"))
+
+
+def test_countdown_drops_dots_that_no_longer_fit() -> None:
+    """空档挤不下时的降级：先压缩提前量，再从**先熄灭的那一端**丢点。
+
+    剩下的点仍然读得出倒计时，比整组不显示好（§2.5 失败要降级，不能终止）。
+    """
+    # 间奏只有 1s：歌词被上一句的收尾顶到 4700ms 才浮现，
+    # 而三个点的熄灭时刻是 4500/4750/5000 —— 最早那个已经在歌词之前
+    project = _song(
+        [2000, 5000], dur_ms=2000, countdown_dots=3,
+        countdown_min_gap_ms=800, paragraph_gap_ms=800,
+        lead_in_ms=300, paragraph_lead_ms=300,
+        fade_in_ms=100, fade_out_ms=100, slot_gap_ms=100,
+    )
+
+    ass = _build(project)
+    dots = _dialogues(ass, "Dot")
+    line_show = _line_windows(ass)[1][0]
+
+    assert line_show == 4700
+    # 首句（2000ms 开唱、提前量只有 300ms）同样挤不下，只剩最左那一个点
+    assert [_window(d) for d in dots] == [(1700, 2000), (4700, 5000), (4700, 4750)], (
+        "起亮被压到歌词的浮现时刻；熄灭时刻落在它之前的点被丢掉"
+    )
+    assert all(show >= line_show for show, _ in [_window(d) for d in dots[1:]])
 
 
 def test_countdown_dots_extinguish_on_real_beats() -> None:

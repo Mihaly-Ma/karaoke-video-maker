@@ -332,16 +332,18 @@ class AssBuilder:
     ) -> list[str]:
         """开唱引导点（nicokara 的标志性倒计时指示灯）。
 
-        点与**它所提示的那句歌词同时浮现**（同一个 `show`、同一个淡入时长），
-        然后**自右向左**依次熄灭，最左那点消失的瞬间开唱——
+        三点亮起后**自右向左**依次熄灭，最左那点消失的瞬间开唱——
         屏幕上剩几个点就是还剩几拍，这样才读得出倒计时的意思。
         只在**第一句**与**每段间奏之后**出现——句与句之间的正常换行不需要，
         否则满屏都是点，反而干扰。
 
-        点亮起后会先静止一段（歌词提前 `paragraph_lead_ms` 出现，而熄灭只占
-        最后 n 拍），这是刻意的：点先是"这段要开始了"的准备标记，
-        最后几拍才变成倒计时。让点晚于歌词才亮虽然能去掉静止期，
-        但那就不是"同步出现"了，而且两个元素先后冒出来更碎。
+        **先算熄灭时刻，再由它反推起亮时刻。** 点是倒计时，锚点在"什么时候数完"，
+        不在"什么时候出现"：跟着歌词一起浮现的话，段落首行提前
+        `paragraph_lead_ms`（4.2s）而熄灭只占最后几拍，点会先亮着不动两三秒，
+        读起来只是个静止装饰。改成在第一个点熄灭前 `countdown_lead_ms` 才亮。
+
+        但**点绝不早于它所提示的那句歌词**——歌词还没浮现就先冒出三个点，
+        观众不知道它们指向哪一句。所以起亮时刻对歌词的 `show` 取下界。
 
         熄灭时刻必须踩在**真实拍点**上：固定间隔只是"三个会消失的点"，
         与音乐无关，演唱者跟不进（CLAUDE.md §8.5）。没有节拍网格才退回固定间隔。
@@ -352,25 +354,29 @@ class AssBuilder:
             return []
 
         start = lo.line.start_ms + p.global_offset_ms
-        if prev_end_ms is not None:
-            gap_start = prev_end_ms + p.global_offset_ms
-            if start - gap_start < st.countdown_min_gap_ms:
-                return []
+        gap_start = 0 if prev_end_ms is None else prev_end_ms + p.global_offset_ms
+        if prev_end_ms is not None and start - gap_start < st.countdown_min_gap_ms:
+            return []
 
         n = st.countdown_dots
-        t_begin = window[0]
 
         # 优先让点踩在真实拍点上；没有节拍网格时退回固定间隔。
         # 取开唱前最近的 n 个拍点，最左的点在最晚那拍（即开唱前一拍）熄灭。
+        # 判据用本段空档的起点而不是起亮时刻：起亮时刻此刻还没算出来，
+        # 而且它本来就该由这里的结果决定，反过来依赖它会成环。
         ends: list[int] = []
         if p.beat_grid is not None:
             beats = p.beat_grid.beats_before(start, n)
-            if len(beats) == n and beats[0] > t_begin:
+            if len(beats) == n and beats[0] > gap_start:
                 ends = list(reversed(beats))  # ends[i] 是第 i 个点的熄灭时刻
 
         if not ends:
-            beat = min(st.countdown_beat_ms, max(120, (start - t_begin) // (n + 1)))
+            # 空档不足时压缩间隔（如首句在 0.836s 就开唱），保证点挤得进这段空档
+            beat = min(st.countdown_beat_ms, max(120, (start - gap_start) // (n + 1)))
             ends = [start - beat * i for i in range(n)]
+
+        # 起亮：第一个点熄灭前 countdown_lead_ms，且不早于歌词浮现
+        t_begin = max(window[0], min(ends) - st.countdown_lead_ms)
 
         fade_in = max(0, st.fade_in_ms)
         dot_w = int(ruby_size * 1.35)
@@ -380,12 +386,14 @@ class AssBuilder:
             # 自右向左依次熄灭：最右的点先灭，最左的点在开唱瞬间灭掉。
             # 剩余点数即剩余拍数，读起来就是倒计时。
             if ends[i] <= t_begin:
-                # 空档塞不下这么多点。丢最右边的（先熄灭的那几个），
-                # 剩下的仍然读得出倒计时，比整组不显示好（§2.5 失败要降级）
+                # 歌词自己都被上一句顶得太晚，点已经没地方摆了。
+                # 降级顺序是：先压缩提前量（上面那个 max 已经做了），
+                # 再丢最右边的点（先熄灭的那几个）——剩下的仍然读得出倒计时，
+                # 比整组不显示好（§2.5 失败要降级，不能终止）
                 continue
             x = lo.x0 + i * dot_w
             # 熄灭要干脆，不淡出——那一下"啪"地消失才是拍点的读数。
-            # 淡入则与歌词同参数，两者才像是一起浮现的
+            # 淡入仍然要有，否则点是硬生生跳出来的
             fi = min(fade_in, ends[i] - t_begin)
             out.append(
                 f"Dialogue: 0,{_ass_time(t_begin)},{_ass_time(ends[i])},Dot,,0,0,0,,"
