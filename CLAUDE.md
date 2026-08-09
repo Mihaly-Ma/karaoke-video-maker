@@ -232,7 +232,7 @@ Windows x64 与 macOS Apple Silicon (arm64) 双端。任何"只有 Linux 有 whe
 | `kana` | 单拍假名（拗音 `きゃ` 合并为一拍） |
 | `phonemes[]` | 音素序列 |
 | `surface_span` | 对应 surface 的字符区间 |
-| `t_start_ms` / `t_end_ms` | 整数毫秒，**边界共享**：`mora[i].t_end_ms === mora[i+1].t_start_ms`（同一个值） |
+| `t_start_ms` / `t_end_ms` | 整数毫秒。**允许 `mora[i].t_end_ms < mora[i+1].t_start_ms`**，中间那段就是句内空隙（换气、词间停顿）——见下方不变式 |
 | `timing_source` | `provider` / `aligned` / `interpolated` / `manual` |
 | `locked_timing` | 用户是否手工拖过这个边界 |
 
@@ -241,8 +241,24 @@ Windows x64 与 macOS Apple Silicon (arm64) 双端。任何"只有 Linux 有 whe
 1. `concat(mora.kana) === token.reading_display`
 2. 每个 mora 的 `surface_span` 落在某个 ruby span 或某个假名字符上
 3. ruby span 与假名字符**无缝、无重叠**地覆盖整个 surface
-4. 同一行内相邻 mora 的边界值严格相等（边界数组语义，不是两个独立的 end/start）
-5. 序列化后 `sum(\k) === 行时长`
+4. 同一行内相邻 mora **单调不重叠**：`mora[i].t_end_ms <= mora[i+1].t_start_ms`。
+   **取等只是常见情况，不是要求**——两者之差就是句内空隙
+
+**句内空隙必须保住（已实测，2026-08-09）**。曾经把不变式写成"边界严格相等 +
+`sum(\k) === 行时长`"，那是错的：真实演唱有换气与词间停顿，而 QRC 的字级时间本来
+就是 `(start, duration)`、天然表达空隙。赤春花实测 633 个 token 里 **53 处相邻字之间
+有正空隙，12 处 ≥100ms，最大 280ms**。
+
+若强行让边界相等（把空隙并进前一个字），扫色就会在没人唱的时候继续往前爬，
+演唱者看着颜色走却无词可唱——这是卡拉OK 字幕最刺眼的一类错误。因此：
+
+- **存储用 `(start_ms, dur_ms)`，`end_ms` 是派生量**。绝不能用"下一个字的 start"
+  反推本字的 end，那等于把空隙信息抹掉（`models/karaoke.py`、`pipeline/qrc_import.py`
+  已按此实现）
+- **渲染给每个 token 发它自己的 `\t(本字start, 本字end, \clip(...))`**，空隙期间没有
+  任何 `\t` 生效，clip 停在原地（`render/ass_builder.py` 已按此实现）。这也是不用
+  `\k` 链式填充的原因之一——`\k` 的语义是首尾相接，表达不了空隙
+- 因此**不存在 `sum(\k) === 行时长` 这条不变式**，本项目根本不用 `\k` 走字
 
 #### 时间轴单位永远是 mora
 
