@@ -47,7 +47,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from kvm.api.store import default_root
-from kvm.render.font_subset import subset_font
+from kvm.render.font_subset import SUBSET_VERSION, subset_font
 
 router = APIRouter(prefix="/api/fonts", tags=["fonts"])
 
@@ -56,6 +56,18 @@ def _cache_dir() -> Path:
     d = default_root().parent / "font-cache"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def _subset_cache_key(family: str, index: int, mtime_ns: int, size: int) -> str:
+    """子集产物的磁盘缓存键。
+
+    带上源文件的 mtime 与大小，字体被系统更新后会自动重新生成；还要带上
+    `SUBSET_VERSION` —— 生成逻辑一改，老用户缓存目录里那份按旧逻辑产出的字体
+    不会自己过期，会一直被当成命中直接下发。族名改写这个 bug 就踩在这上面：
+    只改生成代码而不动缓存键，装过旧版的人永远拿不到修好的字体。
+    """
+    payload = f"v{SUBSET_VERSION}|{family}|{index}|{mtime_ns}|{size}"
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
 def _scan_cache_file() -> Path:
@@ -405,6 +417,11 @@ def get_subset(family: str = Query(...)) -> FileResponse:
     产出必须是 **OTF/TTF**：JASSUB 把字节直接喂给 libass，而 libass 不认 woff2 ——
     用 woff2 会表现为"加载成功但一个字都渲染不出来"且不报错。
 
+    产物的族名被改写成**这里请求的 `family`**（`subset_font(family_name=...)`）：
+    libass 只按 name 表的 nameID 1 匹配，而系统字体的 nameID 1 常带字重后缀
+    （ヒラギノ丸ゴ ProN 是 `Hiragino Maru Gothic ProN W4`），不改写就匹配不上，
+    预览会整块空白且不报错。详见 `kvm.render.font_subset` 的模块文档。
+
     扫描尚未覆盖到该字体时返回 503 + 中文进度说明（见 `_require_font`）。
     """
     match = _require_font(family)
@@ -415,15 +432,12 @@ def get_subset(family: str = Query(...)) -> FileResponse:
     except OSError as exc:
         raise HTTPException(status_code=404, detail=f"字体文件不可读：{src}") from exc
 
-    # 缓存键带上 mtime 与大小，字体被系统更新后会自动重新生成
-    key = hashlib.sha256(
-        f"{match.family}|{match.index}|{st.st_mtime_ns}|{st.st_size}".encode()
-    ).hexdigest()[:16]
+    key = _subset_cache_key(match.family, match.index, st.st_mtime_ns, st.st_size)
     dest = _cache_dir() / f"{key}.otf"
 
     if not dest.exists():
         try:
-            subset_font(src, dest, family_index=match.index, flavor=None)
+            subset_font(src, dest, family_index=match.index, flavor=None, family_name=match.family)
         except Exception as exc:
             raise HTTPException(
                 status_code=500, detail=f"字体子集化失败：{exc}"

@@ -18,6 +18,25 @@ JASSUB 用 `ASS_FONTPROVIDER_NONE` —— 浏览器里**拿不到系统字体**�
 供将来接入"把字体 UUEncode 进 ASS `[Fonts]` 段"时使用 —— 那样预览与导出
 用的是**同一份字节**，从根上消除两端字体分叉（CLAUDE.md §5.12）。
 
+## 产物必须自称调用方要的族名
+
+libass 给内存字体建索引时**只认 name 表里 Windows 平台（platformID=3）的
+nameID 1（Family）**；nameID 16（Typographic Family）、nameID 4（Full name）、
+nameID 6（PostScript 名）以及 Mac 平台（platformID=1）的记录一概匹配不上 ——
+四者都单独构造过"只有这一条等于请求族名"的字体，全部渲不出字
+（chromium + WebKit 双引擎实测，见 `frontend/scripts/verify-font-name.mjs` 的 A 组用例）。
+
+而 macOS 的日文字体普遍把字重写进 nameID 1 —— ヒラギノ丸ゴ ProN 的
+(3,0x409) nameID1 是 `Hiragino Maru Gothic ProN W4`，真族名 `Hiragino Maru Gothic ProN`
+只出现在 nameID 16 里。于是"接口对外通报的族名"在子集产物里一条都匹配不上，
+而 JASSUB 用 `ASS_FONTPROVIDER_NONE`、匹配不上没有任何回退：libass 每帧返回 0 张图，
+**不报错**。ffmpeg 侧走系统 fontconfig 自动探测，同一个工程烧录完全正常，
+所以这类问题只在预览侧出现、看成片发现不了。
+
+因此 `subset_font(..., family_name=...)` 会把请求的族名改写进产物的 name 表：
+**调用方请求什么族名，字体就自称什么族名**，不再指望系统字体的命名习惯
+（CLAUDE.md §5.12"给打包字体使用唯一的 family name 以降低误匹配"）。
+
 ## 依赖
 
 需要 `fonttools`（含 woff2 支持时可直接产出 woff2）。属于 §2.6 的自动获取范畴：
@@ -28,6 +47,17 @@ from __future__ import annotations
 
 import unicodedata
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - 仅供类型标注，运行期不导入
+    from fontTools.ttLib import TTFont
+
+SUBSET_VERSION = 2
+"""子集产物的生成逻辑版本。**改动 `subset_font` 的产物内容时必须 +1。**
+
+调用方（`kvm.api.routes.fonts`）把它算进磁盘缓存键，否则老用户的缓存目录里
+会永远躺着按旧逻辑生成的坏字体——那正是本次族名改写要修的东西。
+"""
 
 # 常见的系统字体位置。TTC 是字体集合，需要按 family 挑出其中一个。
 _FONT_CANDIDATES = [
@@ -90,6 +120,38 @@ def default_charset() -> set[str]:
     return chars
 
 
+def _rewrite_family_name(font: TTFont, family: str) -> None:
+    """把 `family` 写成产物**唯一**的族名。
+
+    三件事，缺一不可：
+
+    - 全部 nameID 1 记录改成 `family` —— 这是 libass 唯一真正拿来匹配的那条；
+    - 全部 nameID 4（Full name）跟着改，让"按全名引用"也指向同一个族
+      （实测 libass 不看 nameID 4，所以这条只是保持 name 表自洽，不是修复项）；
+    - 删掉 nameID 16/17（Typographic Family/Subfamily）与 21/22（WWS）——
+      它们的存在意义就是"与 nameID 1 不同"，留着会让 FreeType 与其它消费方
+      看到与 nameID 1 冲突的族名，而冲突正是本 bug 的来源。
+
+    nameID 2（Subfamily）统一写成 `Regular`：接口对一个 family 只产出**一个**字面
+    （`routes/fonts.py` 的 `_aggregate` 已挑好最接近常规字重的代表），产物里既然
+    只有一个字面，就不该自称 "W4"/"W8" 这类子族名，否则 libass 又要去解析字重后缀。
+    ASS 的 Bold 由 libass 合成粗体处理，与这里无关。
+
+    **不动 nameID 6（PostScript 名）**：PS 名有"不含空格、纯 ASCII"的格式约束，
+    按族名硬凑容易造出非法值；它只是一条额外别名，与族名不一致不影响匹配。
+    """
+    name = font["name"]
+    for record in list(name.names):
+        if record.nameID in (1, 4):
+            name.setName(family, record.nameID, record.platformID, record.platEncID, record.langID)
+        elif record.nameID == 2:
+            name.setName(
+                "Regular", record.nameID, record.platformID, record.platEncID, record.langID
+            )
+    for name_id in (16, 17, 21, 22):
+        name.removeNames(nameID=name_id)
+
+
 def subset_font(
     src: Path,
     dest: Path,
@@ -97,10 +159,15 @@ def subset_font(
     charset: set[str] | None = None,
     family_index: int = 0,
     flavor: str | None = None,
+    family_name: str | None = None,
 ) -> tuple[int, int]:
     """把 `src` 裁成只含 `charset` 的字体写到 `dest`。
 
     返回 (原始字节数, 产出字节数)。`src` 为 TTC 时按 `family_index` 取其中一个族。
+
+    `family_name` 非空时把产物的族名改写成它（见 `_rewrite_family_name` 与模块文档）。
+    给浏览器预览用时**必须传**，否则 libass 按调用方请求的族名找不到这份字体，
+    整块字幕静默消失。
 
     **`flavor` 默认必须是 None（即产出 TTF/OTF），不要图省事改成 woff2。**
     JASSUB 是把字体字节直接喂给 libass 的，而 **libass 只认 TTF/OTF/TTC**；
@@ -140,6 +207,9 @@ def subset_font(
     subsetter = ft_subset.Subsetter(options=options)
     subsetter.populate(text="".join(sorted(chars)))
     subsetter.subset(font)
+
+    if family_name:
+        _rewrite_family_name(font, family_name)
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     if flavor:
