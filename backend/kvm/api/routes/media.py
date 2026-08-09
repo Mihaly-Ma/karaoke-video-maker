@@ -57,6 +57,17 @@ _MEDIA_FIELDS: dict[str, str] = {
 # 派生出来的中间产物，不是用户素材——放开导入只会让 proxy 与 video 对不上号。
 _IMPORT_FIELDS: dict[str, str] = {k: v for k, v in _MEDIA_FIELDS.items() if k != "proxy"}
 
+# project_id → {kind: job_id}，该工程最近一次下载/分离任务。
+#
+# 存在的理由是**「素材还没准备好」和「素材出问题了」在工程 JSON 上长得一模一样**：
+# 正在下载时 `video_path` 是空的，从没下载过时也是空的。消费方（预览区）必须能
+# 分清这两者，否则只能把正常的中间状态报成故障。
+#
+# 记在这里而不是塞进 `JobStatus`：任务表本身与工程无关（导出任务就不属于任何一次
+# 素材准备），而"哪个工程正在准备素材"是路由层才有的知识。代理任务由
+# `kvm.media.proxy` 自己记着（它还会被后端在下载/导入之后自动发起），不重复登记。
+_LATEST_JOBS: dict[str, dict[str, str]] = {}
+
 # 允许算波形峰值的 kind：只有纯音频轨（CLAUDE.md §5.10）。video/proxy 是画面轨，
 # 波形调轴用的是分离产物或原始参考音轨，不对着视频容器里的音频流重新算一遍。
 _WAVEFORM_KINDS: dict[str, str] = {
@@ -85,6 +96,12 @@ def _project_or_404(store: ProjectStore, project_id: str) -> ProjectDTO:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+def _remember_job(project_id: str, job: JobStatus) -> JobStatus:
+    """记下"这个工程正在跑这类素材任务"，见 `_LATEST_JOBS` 的说明。"""
+    _LATEST_JOBS.setdefault(project_id, {})[job.kind] = job.job_id
+    return job
+
+
 @router.post("/download", response_model=JobStatus)
 def start_download(req: DownloadRequest, store: ProjectStore = Depends(get_store)) -> JobStatus:
     """启动下载任务，写入 `req.project_id` 指定的既有工程，立即返回 `JobStatus`
@@ -96,9 +113,12 @@ def start_download(req: DownloadRequest, store: ProjectStore = Depends(get_store
     提前校验工程存在，避免任务排上队才在后台报 404。
     """
     _project_or_404(store, req.project_id)
-    return job_manager.submit(
-        kind="media.download",
-        run=lambda handle: download_module.run_download(handle, store, req),
+    return _remember_job(
+        req.project_id,
+        job_manager.submit(
+            kind="media.download",
+            run=lambda handle: download_module.run_download(handle, store, req),
+        ),
     )
 
 
@@ -163,9 +183,12 @@ def start_separate(req: SeparateRequest, store: ProjectStore = Depends(get_store
         raise HTTPException(
             status_code=400, detail="工程还没有可用音频，请先下载或导入媒体后再分离"
         )
-    return job_manager.submit(
-        kind="media.separate",
-        run=lambda handle: separate_module.run_separate(handle, store, req),
+    return _remember_job(
+        req.project_id,
+        job_manager.submit(
+            kind="media.separate",
+            run=lambda handle: separate_module.run_separate(handle, store, req),
+        ),
     )
 
 
@@ -214,6 +237,39 @@ def get_proxy_status(project_id: str, store: ProjectStore = Depends(get_store)) 
         note = "还没有编辑用代理。Safari 放不了原始 MKV/AV1，生成后即可看到画面"
 
     return ProxyStatus(project_id=project_id, ready=ready, path=path, job=job, note=note)
+
+
+@router.get("/activity/{project_id}", response_model=list[JobStatus])
+def get_media_activity(
+    project_id: str, store: ProjectStore = Depends(get_store)
+) -> list[JobStatus]:
+    """该工程**此刻正在跑**的素材准备任务（下载 / 分离 / 代理），没有就是空数组。
+
+    预览区靠它把"素材还没准备好"和"真的降级了"分开：前者是正常的中间状态，
+    用户什么都不用做，报成警告只会让人以为出了故障。工程 JSON 回答不了这个问题
+    ——正在下载和从没下载过，`video_path` 都是空的。
+
+    与 `GET /jobs/{job_id}` 的分工：那个按 id 查单个任务，要求调用方**已经知道**
+    id；本接口按工程反查，因此**页面刷新后依然有效**，也认得后端在下载/导入之后
+    自动发起的那次代理任务——这两种情况下前端手里都没有 job_id。
+    """
+    _project_or_404(store, project_id)
+
+    active: list[JobStatus] = []
+    for job_id in _LATEST_JOBS.get(project_id, {}).values():
+        try:
+            job = job_manager.get(job_id)
+        except KeyError:
+            # 任务表是内存态，后端重启过就查不到了——当作"没有任务在跑"
+            continue
+        if job.state in ("pending", "running"):
+            active.append(job)
+
+    proxy_job = proxy_module.latest_job(project_id)
+    if proxy_job is not None and proxy_job.state in ("pending", "running"):
+        active.append(proxy_job)
+
+    return active
 
 
 @router.get("/jobs/{job_id}", response_model=JobStatus)

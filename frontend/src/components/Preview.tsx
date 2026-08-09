@@ -48,6 +48,8 @@ import {
   type CSSProperties,
 } from 'react'
 import * as api from '../api/client'
+import type { JobStatus } from '../api/types'
+import { t } from '../i18n'
 import {
   checkPreviewEnvironment,
   describeError,
@@ -85,8 +87,27 @@ type AudioMode = 'original' | 'instrumental'
 
 const AUDIO_LABEL: Record<AudioMode, string> = { original: '原声', instrumental: '伴奏' }
 
-/** loading：音轨还在解码；webaudio：走 Web Audio；fallback：退回视频自带音轨 */
+/**
+ * loading：音轨还在解码；webaudio：走 Web Audio；fallback：Web Audio 没拿到音轨。
+ *
+ * **`fallback` 只说明 Web Audio 空了，不等于"已经退回视频自带音轨"。** 真正退得回去
+ * 还要求画面这条路本身是通的（`videoActive`），而工程刚建、视频正在下载、
+ * 或者这个浏览器压根放不了这个视频时都不通 —— 那些情况下声音无处可退。
+ * 二者曾被当成一回事，于是没有视频时也会弹出「已改用视频自身的声音」。
+ */
 type AudioState = 'loading' | 'webaudio' | 'fallback'
+
+/** 素材准备任务的 kind → 画面区文案键。未知 kind 落到通用的"正在准备素材" */
+const BUSY_LABEL: Record<string, string> = {
+  'media.download': 'media.player.downloading',
+  'media.separate': 'media.player.separating',
+  'media.proxy': 'media.player.buildingProxy',
+}
+
+/** 有任务在跑时的轮询间隔（毫秒）。只为换一行文案，不必追进度条那种精度 */
+const ACTIVITY_POLL_BUSY_MS = 1200
+/** 没有任务在跑时的轮询间隔。素材齐了会整个停掉，见轮询 effect 的说明 */
+const ACTIVITY_POLL_IDLE_MS = 4000
 
 // ---------------------------------------------------------------------------
 // 音频引擎
@@ -316,6 +337,7 @@ export function Preview({ className }: PreviewProps) {
   const setPlayhead = useProject((s) => s.setPlayhead)
   const setPlaying = useProject((s) => s.setPlaying)
   const setAudioMode = useProject((s) => s.setAudioMode)
+  const refreshProject = useProject((s) => s.refresh)
 
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const overlayRef = useRef<SubtitleOverlay | null>(null)
@@ -349,6 +371,8 @@ export function Preview({ className }: PreviewProps) {
   const [audioState, setAudioState] = useState<AudioState>('loading')
   const [instrumentalReady, setInstrumentalReady] = useState(false)
   const [rvfcMissing, setRvfcMissing] = useState(false)
+  /** 当前正在跑的素材准备任务（下载 / 分离 / 代理）。见下方轮询 effect */
+  const [activity, setActivity] = useState<JobStatus[]>([])
   /**
    * 工程里有视频，但这个浏览器放不了它（容器/编码不支持）。
    * 置位后一切与 `<video>` 相关的路径都停掉，只留音频，画面位置改显提示。
@@ -388,6 +412,12 @@ export function Preview({ className }: PreviewProps) {
   const videoActive = hasVideo && !videoUnplayable
 
   /**
+   * 素材已经齐到不会再影响预览：画面有、且放得出来、音轨也有。
+   * 齐了就不必再问后端"有没有任务在跑"（见下方轮询 effect）。
+   */
+  const mediaSettled = videoActive && !!audioPath
+
+  /**
    * `videoUnplayable` 的 ref 镜像。命令式路径（seek / play）要读它，
    * 但它们不该因为这个值变化而重挂 —— 播放中途才发现视频放不了时，
    * 重挂播放 effect 会让音频从头 `start()` 一次，听感上就是"咔"一下。
@@ -408,6 +438,59 @@ export function Preview({ className }: PreviewProps) {
     videoUnplayableRef.current = false
     setVideoUnplayable(false)
   }, [projectId, videoPath, proxyPath])
+
+  /**
+   * 素材准备任务轮询。
+   *
+   * 存在的理由：**「素材还没准备好」与「真的降级了」在工程 JSON 上长得一模一样**
+   * —— 正在下载和从没下载过，`video_path` 都是空的。把前者当成后者报出来，用户会
+   * 以为出了故障，而他其实什么都不用做，等着就行。这个区分只有后端答得了
+   * （`GET /api/media/activity/{id}`）。
+   *
+   * 顺带兑现"完成后自动恢复"：任务从有到无时刷新一次工程。App 里那份 JobProgress
+   * 只认它**自己发起**的任务 —— 页面刷新过、或者代理是后端在下载完成后自动发起的，
+   * 它都不认识，那时没有别人来刷新，画面就一直不出现。
+   *
+   * **素材齐了就整个停掉**：编辑一首歌要几十分钟，没有任何东西会变的时候
+   * 不该一直问后端。
+   */
+  useEffect(() => {
+    if (!projectId || mediaSettled) {
+      setActivity([])
+      return
+    }
+    let alive = true
+    let timer = 0
+    let running = new Set<string>()
+
+    const poll = async (): Promise<void> => {
+      let jobs: JobStatus[]
+      try {
+        jobs = await api.mediaActivity(projectId)
+      } catch {
+        // 后端暂时联系不上就退避重试，不放弃：任务多半还在跑
+        if (alive) timer = window.setTimeout(() => void poll(), ACTIVITY_POLL_IDLE_MS * 2)
+        return
+      }
+      if (!alive) return
+      setActivity(jobs)
+      // 判据是"**有任务从在跑里消失了**"，不是"队列空了"：下载一完成后端会立刻
+      // 接着排代理任务，等队列空掉才刷新，画面会白白晚出现一个代理生成的时长
+      const ids = new Set(jobs.map((j) => j.job_id))
+      if ([...running].some((id) => !ids.has(id))) void refreshProject()
+      running = ids
+      timer = window.setTimeout(
+        () => void poll(),
+        jobs.length > 0 ? ACTIVITY_POLL_BUSY_MS : ACTIVITY_POLL_IDLE_MS,
+      )
+    }
+
+    void poll()
+    return () => {
+      alive = false
+      window.clearTimeout(timer)
+    }
+  }, [projectId, mediaSettled, refreshProject])
 
   /**
    * 取当前真正能用的 `<video>`。没有视频的工程根本不渲染这个元素，所以 ref 为空
@@ -731,8 +814,26 @@ export function Preview({ className }: PreviewProps) {
     )
   }
 
+  /*
+   * 素材状态与降级状态必须分开算，这是本组件最容易搞错的一处。
+   *
+   * - **素材没准备好**（工程刚建 / 视频正在下载）是正常的中间状态，用户什么都
+   *   不用做。它的归宿是画面区那行中性说明，**不进警告列表**。
+   * - **降级**是"本该做到的事没做到，已经用次优方案顶着"，前提是**真的有东西可退**。
+   *   没有视频时说"已改用视频自身的声音"就是无中生有 —— 那正是这次要修的 bug。
+   */
+  const busyJob = activity[0] ?? null
+  const downloading = activity.some((j) => j.kind === 'media.download')
+  const proxyBuilding = activity.some((j) => j.kind === 'media.proxy')
+  /** 声音真的退回了 `<video>` 自带音轨。画面这条路不通时退无可退，不算降级 */
+  const usingVideoAudio = videoActive && audioState === 'fallback'
+  /** 画面放不了、又没有独立音轨：此刻预览既没画面也没声音，必须说出来 */
+  const silent = videoUnplayable && !audioPath && audioState === 'fallback'
+
   const issues: PreviewIssue[] = [
-    ...envIssues,
+    // 跨源隔离那条只关系到 libass 的渲染线程数，字幕层还没挂起来时提它没有意义，
+    // 只会让"素材还没到"的空预览凭空多一条黄字
+    ...(videoActive ? envIssues : envIssues.filter((i) => i.level === 'fatal')),
     ...overlayWarnings,
     ...audioWarnings,
     ...(rvfcMissing
@@ -744,14 +845,21 @@ export function Preview({ className }: PreviewProps) {
           },
         ]
       : []),
-    ...(audioState === 'fallback'
+    ...(usingVideoAudio
       ? [
           {
             level: 'warn' as const,
-            title: '正在使用视频自带音轨',
-            detail:
-              'Web Audio 没拿到可用音轨，已临时改用视频自身的声音，此时无法切换伴奏。' +
-              '音频抽取或人声分离完成后会自动切回 Web Audio。',
+            title: t('media.player.warn.fallbackTitle'),
+            detail: t('media.player.warn.fallbackDetail'),
+          },
+        ]
+      : []),
+    ...(silent
+      ? [
+          {
+            level: 'warn' as const,
+            title: t('media.player.audioMissing'),
+            detail: t('media.player.audioMissingHint'),
           },
         ]
       : []),
@@ -759,18 +867,49 @@ export function Preview({ className }: PreviewProps) {
       ? [
           {
             level: 'warn' as const,
-            title: '这个浏览器放不了当前视频，已降级为纯音频预览',
+            title: t('media.player.warn.unplayableTitle'),
             detail:
-              '声音、播放头、打轴、导出都不受影响，只是看不到画面和叠在画面上的字幕。' +
-              '常见原因是视频用的容器/编码本浏览器不支持 —— 例如 yt-dlp 下载得到的 .mkv 在 Safari' +
-              '（WebKit）上没有解复用器，AV1 在 M1/M2 上也没有解码支持。' +
-              (proxyPath
-                ? '当前放的已经是编辑用代理，仍然放不了的话请在「素材」步骤重新生成一次代理。'
-                : '请到「素材」步骤生成编辑用代理视频（H.264/MP4），生成完这里会自动恢复画面。'),
+              t('media.player.warn.unplayableDetail') +
+              // 代理正在生成时不该催用户去生成代理——他已经在等了
+              (proxyBuilding
+                ? t('media.player.warn.unplayableBuilding')
+                : proxyPath
+                  ? t('media.player.warn.unplayableRetry')
+                  : t('media.player.warn.unplayableNeedProxy')),
           },
         ]
       : []),
   ]
+
+  /**
+   * 画面区当前该说什么：主行说"是什么状态"，副行说"接下来会怎样 / 该做什么"。
+   * 没有副行就不显示，不硬凑。
+   */
+  const stageNote = ((): { title: string; hint?: string } | null => {
+    if (videoActive) return null
+    if (videoUnplayable) {
+      return {
+        title: t('media.player.unplayable'),
+        hint: proxyBuilding
+          ? t('media.player.busyHint')
+          : proxyPath
+            ? undefined
+            : t('media.player.unplayableProxyHint'),
+      }
+    }
+    // 下载优先于"只有音轨"：下载中的工程随时会长出画面，说"只有音轨"是错的
+    if (downloading) {
+      return { title: t('media.player.downloading'), hint: t('media.player.busyHint') }
+    }
+    if (audioPath) return { title: t('media.player.audioOnly') }
+    if (busyJob) {
+      return {
+        title: t(BUSY_LABEL[busyJob.kind] ?? 'media.player.preparing'),
+        hint: t('media.player.busyHint'),
+      }
+    }
+    return { title: t('media.player.noAssets'), hint: t('media.player.noAssetsHint') }
+  })()
 
   return (
     <div className={className} style={styles.root}>
@@ -793,13 +932,10 @@ export function Preview({ className }: PreviewProps) {
             style={styles.video}
           />
         )}
-        {!videoActive && (
+        {stageNote && (
           <div style={styles.noVideo}>
-            {hasVideo
-              ? proxyPath
-                ? '这个浏览器放不了当前视频，已降级为纯音频预览。'
-                : '这个浏览器放不了原始视频，请在「素材」步骤生成编辑用代理后重试。'
-              : '还没有视频。下载或选择本地文件后即可预览。'}
+            <span style={styles.noVideoTitle}>{stageNote.title}</span>
+            {stageNote.hint && <span style={styles.noVideoHint}>{stageNote.hint}</span>}
           </div>
         )}
         {overlayLoading && videoActive && <div style={styles.badge}>字幕渲染器加载中…</div>}
@@ -913,11 +1049,17 @@ const styles = {
     position: 'absolute',
     inset: 0,
     display: 'flex',
+    flexDirection: 'column',
     alignItems: 'center',
     justifyContent: 'center',
-    color: '#777',
-    fontSize: 13,
+    gap: 4,
+    padding: '0 16px',
+    textAlign: 'center',
   },
+  // 主行比副行亮：一眼先读到"现在是什么状态"，再读"接下来会怎样"。
+  // 两行同色会糊成一段说明文字，正是要避免的观感
+  noVideoTitle: { color: '#aab', fontSize: 14 },
+  noVideoHint: { color: '#777', fontSize: 12 },
   badge: {
     position: 'absolute',
     left: 8,

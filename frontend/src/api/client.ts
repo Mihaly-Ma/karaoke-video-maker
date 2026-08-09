@@ -164,6 +164,17 @@ export const jobStatus = async (jobId: string): Promise<JobStatus> => {
 export const cancelJob = (jobId: string) => post<JobStatus>(`/media/jobs/${jobId}/cancel`, {})
 
 /**
+ * 该工程此刻正在跑的素材准备任务（下载 / 分离 / 代理），没有就是空数组。
+ *
+ * 用来区分「素材还没准备好」与「真的降级了」——这两种情况下工程 JSON 长得一样
+ * （`video_path` 都是空），只有后端答得了。**按工程反查**是关键：`jobStatus`
+ * 要求调用方手里已经有 id，而页面刷新后那个 id 就没了，后端自动发起的代理任务
+ * 更是从头到尾都没给过前端。
+ */
+export const mediaActivity = (projectId: string) =>
+  req<JobStatus[]>(`/media/activity/${projectId}`)
+
+/**
  * 导入本地视频/音频文件——下载失败时的手工旁路（CLAUDE.md §2.5：视频获取的
  * 手工旁路是"选本地文件"）。
  *
@@ -310,14 +321,15 @@ export const fontSubsetUrl = (family: string) => `${BASE}/fonts/subset?family=${
 /**
  * 检查字体能否覆盖给定文本的全部字形（缺字必须在渲染前拦截，见 CLAUDE.md §2.6）。
  *
- * 后端把 `family` / `text` 声明成了 **query 参数**而不是请求体，发 JSON body
- * 只会拿到 422（`loc: ["query", "family"]`）。歌词整首扔进 `text` 时 URL 会很长，
- * 但 POST 的 query 串不受 GET 那套长度惯例约束。
+ * **参数走请求体，不要改回 query**：`text` 装的是整首歌的字符集，
+ * percent-encode 后每个汉字占 9 字节，几百个不重复字符就逼近 uvicorn 对
+ * 请求行 + 头部的 16 KB 上限，超限时连接被直接掐断、连可读的 4xx 都没有。
+ *
+ * 调用方应先送**去重后的字符集**而不是原文（见 `lib/fontCoverage.ts`），
+ * 两层保险各自独立：去重是为了缓存命中率，请求体是为了没有长度天花板。
  */
-export const checkFontCoverage = (family: string, text: string) => {
-  const qs = new URLSearchParams({ family, text })
-  return req<FontCoverageResult>(`/fonts/coverage?${qs.toString()}`, { method: 'POST' })
-}
+export const checkFontCoverage = (family: string, text: string) =>
+  post<FontCoverageResult>('/fonts/coverage', { family, text })
 
 // ---- 渲染 ----
 

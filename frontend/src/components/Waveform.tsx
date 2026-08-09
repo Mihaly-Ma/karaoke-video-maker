@@ -36,7 +36,7 @@
  * 一并关掉：它们只会停在 0 秒处误导人。
  */
 
-import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react'
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef } from 'react'
 import WaveSurfer from 'wavesurfer.js'
 
 export type WaveformStatus =
@@ -71,16 +71,66 @@ export const Waveform = forwardRef<WaveformHandle, WaveformProps>(function Wavef
   const containerRef = useRef<HTMLDivElement | null>(null)
   const wsRef = useRef<WaveSurfer | null>(null)
   const readyRef = useRef(false)
-  /** 当前用的是 sources 里的第几个 */
-  const srcIndexRef = useRef(0)
   /** 组件已卸载：wavesurfer 的异步回调必须靠它自我了断 */
   const deadRef = useRef(false)
+  /**
+   * 加载世代号，每发起一次 `load()` 就 +1。
+   *
+   * 它解决的是一类**会被误读成"音源坏了"的假失败**：`WaveSurfer.load()` 一进来就
+   * `abortController.abort()` 掉上一次还在下载的 fetch，被中断的那次于是抛
+   * AbortError（Chromium 报 "signal is aborted without reason"，WebKit 报
+   * "Fetch is aborted"）。这条中断是**我们自己换音源造成的**，不代表那个 URL 有问题。
+   *
+   * 而换音源恰恰发生在每次进入编辑步骤的头几十毫秒：时间轴挂载后会把音源默认切到
+   * 伴奏（`Timeline.tsx` 的"有伴奏就默认切过去"），此时第一条候选还在下载。
+   * 早先把这次中断当成真失败，就会一路退候选、把整条候选链走穿，最后弹出
+   * 「音频加载失败：signal is aborted without reason」—— 而用户随手换一次音源
+   * 又"好了"（重新 load 一次，这回没有东西可中断），于是看起来像玄学。
+   *
+   * 用世代号而不是去认错误消息：中断的原因与措辞都属于实现细节，
+   * "有没有更新的一次加载"才是判据。
+   */
+  const loadGenRef = useRef(0)
 
   // 回调每次渲染都可能是新函数。存进 ref，避免为了拿到最新回调而反复重建 wavesurfer
   const cbRef = useRef(props)
   cbRef.current = props
 
   const srcKey = props.sources.join('|')
+
+  /**
+   * 加载第 `index` 条候选，失败则顺延到下一条，全部失败才报错。
+   *
+   * 走 `load()` 返回的 promise 而不是 wavesurfer 的 `error` 事件：只有 promise
+   * 能和"是哪一次加载"对上号（事件不带任何身份），而这个对应关系正是区分
+   * "真失败"与"被自己中断"的唯一依据。`load()` 内部会先 emit `error` 再原样
+   * 抛出，所以这条路径不会漏掉任何真实错误。
+   */
+  // 显式标注类型：函数体里递归引用了自己，不标注会让 TS 陷入循环推断
+  const startLoad: (index: number) => void = useCallback((index: number): void => {
+    const ws = wsRef.current
+    const list = cbRef.current.sources
+    const url = list[index]
+    if (!ws || url === undefined) return
+    const gen = ++loadGenRef.current
+    cbRef.current.onStatus({ kind: 'loading', percent: 0 })
+    void ws.load(url).catch((err: unknown) => {
+      // 组件没了，或者这次加载已经被更新的一次取代——后者的"失败"就是新的 load()
+      // 中断出来的，丢掉（见 loadGenRef 的说明）
+      if (deadRef.current || gen !== loadGenRef.current) return
+      readyRef.current = false
+      if (index + 1 < list.length) {
+        // 伴奏还没分离出来是常态，静默退到下一个候选，不打扰用户
+        startLoad(index + 1)
+        return
+      }
+      const message = err instanceof Error && err.message ? err.message : ''
+      cbRef.current.onStatus({
+        kind: 'error',
+        message: message ? `音频加载失败：${message}` : '音频加载失败',
+      })
+    })
+  }, [])
 
   useImperativeHandle(
     ref,
@@ -151,26 +201,11 @@ export const Waveform = forwardRef<WaveformHandle, WaveformProps>(function Wavef
       }),
     )
 
-    // 不订阅 timeupdate / play / pause / finish：那是"第二个时钟"的来源
-
-    offs.push(
-      ws.on('error', (err: Error) => {
-        if (deadRef.current) return
-        readyRef.current = false
-        const list = cbRef.current.sources
-        const next = srcIndexRef.current + 1
-        if (next < list.length) {
-          // 伴奏还没分离出来是常态，静默退到下一个候选，不打扰用户
-          srcIndexRef.current = next
-          void ws.load(list[next]).catch(() => undefined)
-          return
-        }
-        cbRef.current.onStatus({
-          kind: 'error',
-          message: err?.message ? `音频加载失败：${err.message}` : '音频加载失败',
-        })
-      }),
-    )
+    // 不订阅 timeupdate / play / pause / finish：那是"第二个时钟"的来源。
+    //
+    // **也不订阅 error**：那个事件不带"属于哪一次加载"的身份，无法区分真失败与
+    // 换音源造成的中断（见 loadGenRef）。加载失败一律由 `startLoad` 里 `load()`
+    // 的 promise 处理——`load()` 是先 emit error 再原样抛出，两者信息量相同。
 
     return () => {
       deadRef.current = true
@@ -191,17 +226,16 @@ export const Waveform = forwardRef<WaveformHandle, WaveformProps>(function Wavef
     const ws = wsRef.current
     if (!ws) return
     readyRef.current = false
-    srcIndexRef.current = 0
-    const list = props.sources
-    if (!list.length) {
+    if (!props.sources.length) {
+      // 空列表也要推进世代号：上一次加载若还在跑，它的失败已经与界面无关了
+      loadGenRef.current++
       ws.empty()
       cbRef.current.onStatus({ kind: 'idle' })
       return
     }
-    cbRef.current.onStatus({ kind: 'loading', percent: 0 })
-    void ws.load(list[0]).catch(() => undefined)
+    startLoad(0)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [srcKey])
+  }, [srcKey, startLoad])
 
   useEffect(() => {
     const ws = wsRef.current
