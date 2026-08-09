@@ -60,10 +60,12 @@ def default_private_deps_dir() -> Path:
 
     实验脚本原本落在仓库内的 `.kvm/`，那个位置在打好包的应用里根本不存在；
     生产改用与工程 JSON 同一个应用数据根目录下的 `deps/`，卸载即删目录。
-    """
-    from kvm.api.store import default_root
 
-    return default_root().parent / "deps"
+    实现在 `kvm.paths`——应用私有目录的规则只允许有一份。
+    """
+    from kvm import paths
+
+    return paths.private_deps_dir()
 
 
 # ===========================================================================

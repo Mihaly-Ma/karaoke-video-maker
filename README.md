@@ -15,30 +15,40 @@ the countdown dots sit on beats detected from the separated drum stem.*
 
 ## Requirements
 
-- **ffmpeg built with libass.** Mainline Homebrew `ffmpeg` does **not** have it — use
-  `ffmpeg-full` on macOS, or a "full" / gyan.dev build on Windows. Verify by capability, never by
-  version: `ffmpeg -h filter=ass` must print the filter's options, not `Unknown filter 'ass'`.
-- **Python 3.12** via [`uv`](https://docs.astral.sh/uv/), and **Node.js 18+** (verified on 22).
+Install three things by hand — [`uv`](https://docs.astral.sh/uv/), **Node.js 18+** (verified on
+22), and **ffmpeg built with libass**. The setup script installs everything else.
+
+- **ffmpeg must have libass.** Mainline Homebrew `ffmpeg` does **not** — use `ffmpeg-full` on
+  macOS, or a "full" / gyan.dev build on Windows. The check is by capability, never by version:
+  the `ass` filter has to be registered, and the script fails loudly with the command to run if
+  it is not.
 - **macOS on Apple Silicon, or Windows x64.** Intel Macs are unsupported: PyTorch dropped
   Intel-macOS after 2.2 and separation needs it. Windows has never been run here.
 - **Model weights download on first use** — 84–640 MB for separation, 2–89 MB for the pitch model.
+  Never silently: the self-check reports what is missing and downloads nothing.
 - **No cloud AI, by design.** Fetching video and lyric text is fine; sending audio or lyrics to a
   remote model is out of scope (`CLAUDE.md` §2.1).
 
 ## Install and run
 
 ```bash
-uv python install 3.12
-uv sync --extra api --extra fonts --extra audio --extra separate --extra download --extra lyrics
-cd frontend && npm install && cd ..
-uv run uvicorn --app-dir backend kvm.api.app:app --host 127.0.0.1 --port 8000 --reload  # term 1
-cd frontend && npm run dev                                              # term 2 → :5173
+python3 scripts/setup.py   # self-check, then install Python 3.12, the venv, and npm packages
+python3 scripts/dev.py     # self-check again, then start backend + frontend together
 ```
 
-Extras are optional: a bare `uv sync` renders from prepared inputs without pulling in `torch`.
-`--app-dir backend` is required — the package is `backend/kvm/`, not top-level `kvm/`. Both servers
-set the COOP/COEP headers JASSUB needs for `SharedArrayBuffer`. A background font scan at startup
-keeps the Style step on "scanning…" for its first 30–40 s.
+Open `http://localhost:5173`; Ctrl-C stops both servers cleanly. Both scripts are stdlib-only
+Python that runs on any 3.9+ interpreter — installing 3.12 is one of their jobs, so they cannot
+require it. A blocking problem (no libass, Intel Mac, port already taken) stops the launch and
+prints a copy-pasteable fix; a missing optional extra only warns, and names the feature you lose.
+
+`setup.py --check-only` inspects without installing, `--minimal` skips `torch`, `--json` is
+machine-readable; `dev.py --backend-port/--frontend-port` move the servers. For the environment
+report on its own: `PYTHONPATH=backend uv run python -m kvm.doctor --copy`.
+
+Driving it yourself instead: `uv sync --all-extras`, then
+`uv run uvicorn --app-dir backend kvm.api.app:app` and `npm --prefix frontend run dev`.
+Both servers set the COOP/COEP headers JASSUB needs for `SharedArrayBuffer`. A background font
+scan at startup keeps the Style step on "scanning…" for its first 30–40 s.
 
 > The editor UI is **Chinese only** today. Strings already route through `t()` in
 > `frontend/src/i18n/`, but the English and Japanese tables are not written yet.
@@ -124,7 +134,8 @@ Verified against the code. Full breakdown, including what *does* work: [`docs/st
 - **Lyric providers other than QQ Music.** Kugou, NetEase, LRCLIB, UtaTen, YouTube captions — all
   researched, none wired in.
 - **Voice-part diarization**, and the lead/backing split — so no コーラス入り mix yet.
-- **Dependency auto-install and `backend.doctor`.** ffmpeg is located if present, never downloaded.
+- **Downloading dependencies for you.** `python -m kvm.doctor` checks the environment and
+  `scripts/setup.py` installs the Python and npm side, but ffmpeg is only *located*, never fetched.
 - **Bundled fonts.** You pick from system fonts; glyph coverage *is* checked before you render.
 - **Japanese and English UI**, and **Windows** has never been run.
 

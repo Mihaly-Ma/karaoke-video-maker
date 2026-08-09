@@ -15,29 +15,40 @@ YouTube のリンクを渡すと、一文字ずつ色が変わるカラオケ字
 
 ## 必須の前提条件
 
+手動で入れるのは 3 つだけ——[`uv`](https://docs.astral.sh/uv/)、**Node.js 18以上**（22 で確認）、
+そして **libass 入りの ffmpeg**。残りはセットアップスクリプトが面倒を見ます。
+
 - **ffmpeg は libass 入りであること。** Homebrew の主流 `ffmpeg` には libass が**含まれていません**
   ——macOS は `ffmpeg-full`、Windows は `--enable-libass` 付きの "full" / gyan.dev 系ビルドを。
-  判定はバージョンではなく機能で: `ffmpeg -h filter=ass` が `Unknown filter 'ass'` なら使えません。
-- **Python 3.12**（[`uv`](https://docs.astral.sh/uv/) で管理）と **Node.js 18以上**（22 で確認）。
+  判定はバージョンではなく機能で行い、`ass` フィルターが登録されていなければそこで止まり、
+  実行すべきコマンドを表示します。
 - **macOS は Apple Silicon、または Windows x64。** Intel Mac は非対応（PyTorch が 2.2 以降
   Intel macOS を切っており、ボーカル分離がそれに依存）。Windows での実行実績はまだありません。
 - **モデルの重みは初回利用時にダウンロード**されます（分離 84MB〜640MB、音高モデル 2〜89MB）。
+  ただし黙って落とすことはありません。自己診断は不足を報告するだけで、一切ダウンロードしません。
 - **設計上クラウド AI は使いません。** 動画や歌詞テキストの取得は問題ありませんが、音声や歌詞を
   外部モデルへ送って推論させることは対象外です（`CLAUDE.md` §2.1）。
 
 ## セットアップと起動
 
 ```bash
-uv python install 3.12
-uv sync --extra api --extra fonts --extra audio --extra separate --extra download --extra lyrics
-cd frontend && npm install && cd ..
-uv run uvicorn --app-dir backend kvm.api.app:app --host 127.0.0.1 --port 8000 --reload  # 端末 1
-cd frontend && npm run dev                                              # 端末 2 → :5173
+python3 scripts/setup.py   # 自己診断のうえ Python 3.12・仮想環境・npm パッケージを導入
+python3 scripts/dev.py     # もう一度診断し、問題がなければバックエンドとフロントを同時起動
 ```
 
-`--extra` は任意で、付けない `uv sync` でも用意済み素材からのレンダリングは動きます（`torch` は
-入りません）。`--app-dir backend` は必須——パッケージが `backend/kvm/` にあるためです。どちらの
-サーバーも JASSUB が `SharedArrayBuffer` を使うのに必要な COOP/COEP ヘッダーを設定します。
+`http://localhost:5173` を開いてください。Ctrl-C で両方とも綺麗に止まり、孤児プロセスは残りません。
+どちらのスクリプトも標準ライブラリだけで書かれており、3.9 以上の任意の Python で動きます——
+3.12 を導入すること自体が仕事なので、3.12 を前提にはできないからです。致命的な問題
+（libass 無し・Intel Mac・ポート使用中）があれば**起動せず**、そのまま貼り付けられる対処
+コマンドを表示します。任意の extra が欠けているだけなら警告のみで、失われる機能を明示します。
+
+`setup.py --check-only` は導入せず診断だけ、`--minimal` は `torch` を入れない、`--json` は
+機械可読。`dev.py --backend-port/--frontend-port` でポート変更。診断結果だけ欲しいときは
+`PYTHONPATH=backend uv run python -m kvm.doctor --copy`（クリップボードにもコピー）。
+
+手動で動かす場合は `uv sync --all-extras` の後、
+`uv run uvicorn --app-dir backend kvm.api.app:app` と `npm --prefix frontend run dev`。
+どちらのサーバーも JASSUB が `SharedArrayBuffer` を使うのに必要な COOP/COEP ヘッダーを設定します。
 起動時のフォントスキャンのため、「様式」は最初の30〜40秒「スキャン中…」と出ます。
 
 > 編集画面の表示言語は**現時点では中国語のみ**です。文言はすべて `frontend/src/i18n/` の
@@ -124,7 +135,8 @@ flowchart TD
 - **QQ音楽以外の歌詞ソース**——酷狗、網易雲音楽、LRCLIB、UtaTen、YouTube 公式字幕はいずれも
   調査済みですが、本番にはまだ1つも組み込まれていません。
 - **パートの自動判別**と、メイン/コーラスに分ける2段目の分離——**コーラス入りはまだ作れません**。
-- **依存関係の自動取得と `backend.doctor`**——ffmpeg は検出のみで、自動導入はしません。
+- **依存関係を代わりに落としてくること**——`python -m kvm.doctor` による診断と
+  `scripts/setup.py` による Python・npm 側の導入はありますが、ffmpeg は検出のみで自動導入はしません。
 - **フォントの同梱**——OS 導入済みのフォントから選ぶだけです（字形カバレッジの検査はあります）。
 - **日本語/英語のUI**、および **Windows** での実行実績。
 

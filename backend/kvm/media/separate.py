@@ -111,10 +111,13 @@ def _model_cache_dir() -> Path:
     """模型权重缓存目录。**不用 audio-separator 默认的 `/tmp`**（CLAUDE.md
     §5.14：macOS 会被系统定期清理、Windows 语义完全不对），显式指到应用私有
     缓存目录，与工程媒体目录共享同一个应用数据根。
-    """
-    from kvm.media.download import app_data_root
 
-    return app_data_root() / "models" / "audio-separator"
+    路径规则在 `kvm.paths` 单点定义（自检要报告同一个目录下有没有权重，
+    两处各算各的迟早会指到不同地方）。
+    """
+    from kvm import paths
+
+    return paths.models_dir() / "audio-separator"
 
 
 def _sha256_file(path: Path) -> str:

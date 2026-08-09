@@ -14,30 +14,39 @@
 
 ## 硬性前提
 
+需要你自己装的只有三样：[`uv`](https://docs.astral.sh/uv/)、**Node.js 18+**（本机用 22 验证）、
+**带 libass 的 ffmpeg**。其余一律由安装脚本搞定。
+
 - **ffmpeg 必须带 libass。** Homebrew 主线 `ffmpeg` 配方**不含** libass，macOS 要装
   `ffmpeg-full`，Windows 要用带 `--enable-libass` 的 "full" / gyan.dev 构建。
-  判据是能力不是版本号：`ffmpeg -h filter=ass` 必须打印出滤镜参数，而不是 `Unknown filter 'ass'`。
-- **Python 3.12**（由 [`uv`](https://docs.astral.sh/uv/) 管理）与 **Node.js 18+**（本机用 22 验证）。
+  判据是能力不是版本号：脚本查的是 `ass` 滤镜有没有注册，没有就直接报错并给出该敲的命令。
 - **macOS 仅支持 Apple Silicon，或 Windows x64。** 不支持 Intel Mac：PyTorch 2.2 之后停止
   支持 Intel macOS，而人声分离依赖它。Windows 至今没人实跑过。
 - **模型权重是首次用到时才下载的**：分离模型 84MB～640MB，引导声的音高模型 2～89MB。
+  但绝不静默下载：自检只报告缺什么，自己一个字节也不下。
 - **设计上禁止云端 AI。** 下载视频、抓歌词文本可以；把音频或歌词发给远程模型做推理不行
   （见 `CLAUDE.md` §2.1）。
 
 ## 安装与启动
 
 ```bash
-uv python install 3.12
-uv sync --extra api --extra fonts --extra audio --extra separate --extra download --extra lyrics
-cd frontend && npm install && cd ..
-uv run uvicorn --app-dir backend kvm.api.app:app --host 127.0.0.1 --port 8000 --reload  # 终端 1
-cd frontend && npm run dev                                              # 终端 2 → :5173
+python3 scripts/setup.py   # 自检，然后装 Python 3.12、虚拟环境与前端依赖
+python3 scripts/dev.py     # 再自检一遍，通过后同时拉起前后端
 ```
 
-`--extra` 是可选的：不带任何 extra 的 `uv sync` 已经能在备好的素材上跑渲染，不会装 `torch`。
-`--app-dir backend` 必须加——可导入的包是 `backend/kvm/`，不是顶层 `kvm/`。两个服务都会设置
-JASSUB 用 `SharedArrayBuffer` 所需的 COOP/COEP 响应头。后端启动时在后台扫系统字体，
-所以"样式"步骤最初 30～40 秒会显示"正在扫描…"。
+打开 `http://localhost:5173`；Ctrl-C 会把两个服务一起干净收掉，不留孤儿进程。
+两个脚本都是只用标准库的 Python，任意 3.9+ 解释器都能跑起来——把 3.12 装出来本就是它们的活儿，
+不能反过来要求 3.12。遇到硬前提不满足（ffmpeg 不带 libass、Intel Mac、端口被占）会**停在那里
+不启动**，并给出可直接复制粘贴的命令；只是缺个可选 extra 则仅警告，并说清你会失去哪块功能。
+
+`setup.py --check-only` 只检不装，`--minimal` 不拉 `torch`，`--json` 供脚本消费；
+`dev.py --backend-port/--frontend-port` 可换端口。只想要一份环境报告：
+`PYTHONPATH=backend uv run python -m kvm.doctor --copy`（顺带复制到剪贴板）。
+
+想自己手动来：`uv sync --all-extras`，然后
+`uv run uvicorn --app-dir backend kvm.api.app:app` 与 `npm --prefix frontend run dev`。
+两个服务都会设置 JASSUB 用 `SharedArrayBuffer` 所需的 COOP/COEP 响应头。后端启动时在后台扫
+系统字体，所以"样式"步骤最初 30～40 秒会显示"正在扫描…"。
 
 > 编辑器界面目前**只有中文**。文案已经全部走 `frontend/src/i18n/` 的 `t()` 取值，
 > 但英文与日文的文案表还没写。
@@ -121,7 +130,8 @@ flowchart TD
 - **QQ 音乐以外的歌词源**——酷狗、网易云、LRCLIB、UtaTen、YouTube 官方字幕都调研过，
   一个都还没接进生产链路。
 - **声部自动归属**，以及把人声再拆成主唱与和声的第二段分离——所以还出不了 コーラス入り。
-- **依赖自动获取与 `backend.doctor`**——ffmpeg 只做查找，不会自动下载安装。
+- **替你把依赖下下来**——`python -m kvm.doctor` 会自检，`scripts/setup.py` 会装好 Python 与
+  前端依赖，但 ffmpeg 只做查找，不会自动下载。
 - **随应用打包字体**——只能从系统已装字体里选；字形覆盖**在渲染前会检查**。
 - **日语 / 英语界面**；**Windows** 至今没人实跑过。
 

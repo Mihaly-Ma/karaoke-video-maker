@@ -109,16 +109,25 @@ Windows x64 与 macOS Apple Silicon (arm64) 双端。任何"只有 Linux 有 whe
 
 三段式，缺一不可：
 
-| 阶段 | 职责 |
-|---|---|
-| **查找** | 探测系统已有的可用件。判据是**实际能力而非存在性**——ffmpeg 要看 `ass` 滤镜是否注册（`experiments/ffmpeg_locate.py` 是其原型），字体要看 cmap 是否覆盖本曲全部字符与注音假名，而不是看名字对不对 |
-| **获取** | 缺失时自动下载：ffmpeg 静态构建、模型权重、字体。带进度、SHA256 校验、断点续传，并支持离线导入 |
-| **安装** | 一律装进**应用私有目录**，绝不污染用户系统，也绝不要求 sudo。卸载即删目录 |
+| 阶段 | 职责 | 现状 |
+|---|---|---|
+| **查找** | 探测系统已有的可用件。判据是**实际能力而非存在性**——ffmpeg 要看 `ass` 滤镜是否注册（`experiments/ffmpeg_locate.py` 是其原型），字体要看 cmap 是否覆盖本曲全部字符与注音假名，而不是看名字对不对 | 已实测（`kvm.doctor`） |
+| **获取** | 缺失时自动下载：ffmpeg 静态构建、模型权重、字体。带进度、SHA256 校验、断点续传，并支持离线导入 | **待实现**，见 §9 |
+| **安装** | 一律装进**应用私有目录**，绝不污染用户系统，也绝不要求 sudo。卸载即删目录 | 已实测（Python 依赖与前端依赖），外部二进制随"获取"一并待实现 |
+
+"获取"阶段缺位期间的**过渡规则**：探测不到的外部二进制（ffmpeg / Node / uv 自身）
+一律**给出可直接复制粘贴的安装命令**，绝不写成"请安装 X"。这条不是权宜之计的免责声明——
+即便将来补上自动下载，也仍需要它兜住"下载失败/离线/用户拒绝"这几种情况。
 
 配套硬性规则：
 
-- **所有外部可执行文件的路径必须经由统一的解析层获取**，禁止在代码里散落 `"ffmpeg"` 字面量。解析顺序：应用私有目录 → 用户显式配置 → 系统 PATH 探测 → 触发自动获取。
-- **启动自检必须先于任何长任务**（对应 §11 的 `backend.doctor`）。宁可开机多花两秒，也不要让用户等 20 分钟分离完才发现 ffmpeg 不能烧字幕。
+- **所有外部可执行文件的路径必须经由统一的解析层获取**，禁止在代码里散落 `"ffmpeg"` 字面量。解析顺序：应用私有目录 → 用户显式配置（环境变量 `KVM_FFMPEG`）→ 系统 PATH 探测 → 触发自动获取。
+- **用户显式配置在它那一步是权威的：设了但探测不通过就直接失败，不许回退到别的候选。** 用户指定了一个 ffmpeg 却被静默换成另一个去渲染，等于预览与导出可能落在不同的 libass 上（§5.12），而这类分叉要到成片里才暴露。**静默换人比直接报错糟得多。**
+- **应用私有目录的路径规则只允许有一份实现**（`kvm.paths`）。工程目录、媒体、模型权重、私有依赖、私有二进制都从它派生——散在各模块里各算各的，`KVM_DATA_DIR` 的语义就要靠读三处代码才拼得出来。
+- **启动自检必须先于任何长任务**（`kvm.doctor`，§11）。宁可开机多花两秒，也不要让用户等 20 分钟分离完才发现 ffmpeg 不能烧字幕。
+- **自检模块必须 stdlib-only**：它要在依赖尚未装好的环境里跑——那正是最需要它的时刻。第三方包一律**探测而不导入**；torch 必须在子进程里问（§5.13 禁止后端进程直接拉起 torch，且装坏的 torch 会段错误连自检一起带走）。
+- **自检不下载任何东西。** 模型权重只报告有没有（§5.14：静默拉 1.3 GB 会被当成程序卡死），下载必须是显式动作。
+- **每条检查都要自带"是不是启动的硬前提"。** 硬前提不满足就不启动；其余一律降级放行，并说清用户正在放弃哪些功能（§2.5 失败要降级不能终止）。判据只允许有一处定义，启动脚本不得另立一套。
 - **字体缺字必须在渲染前拦截**。预览（JASSUB）与导出（ffmpeg）若 fallback 到不同字体，WYSIWYG 直接失效，而这类问题往往到成片里才暴露。
   **警惕这一条退化成死代码**：后端端点与前端客户端函数曾经都写好了、注释还引用着本节，却没有任何调用点——检查存在与检查生效是两回事，加接口时要连调用点一起验。
 - 自检报告要能一键复制，便于排查环境问题。
@@ -1311,8 +1320,12 @@ README 属于 `.claude/rules/doc-style.md` 里明确豁免"不许贴代码"的�
 
 ### 分发前必须解决
 
-9. **环境自检**（`backend.doctor`，尚未实现）：ffmpeg 是否带 libass、libass 版本、
-   torch 设备、模型是否已下载、字体是否齐、磁盘余量。桌面工具必须有这个。
+9. **依赖的"获取"阶段**（§2.6 三段式里唯一还空着的一段，**待实现**）：ffmpeg 静态构建、
+   模型权重、字体的自动下载——带进度、SHA256 校验、断点续传、可离线导入，装进
+   `kvm.paths.private_bin_dir()`。目前探测不到就只给安装命令，用户仍需自己按一次回车。
+   **动手前必须先想清楚信任模型**：这等于让应用下载并执行一个外部二进制，
+   下载源与校验和从哪儿来、怎么固定版本（§5.12 要求 libass 与 JASSUB 同源），
+   都得先有答案，不能"先下下来跑通再说"。
 
 10. **自建 ffmpeg 的实际工程量**：为 win-x64 与 mac-arm64 双平台自建含指定 libass
     commit 的 ffmpeg。**要么专门评估一次，要么明确接受"先用 Homebrew `ffmpeg-full`
@@ -1343,27 +1356,51 @@ README 属于 `.claude/rules/doc-style.md` 里明确豁免"不许贴代码"的�
 
 **命名约定：新增脚本按此命名。** 动手前先确认目标脚本是否已存在。
 
-### 环境准备（一次性，待补齐）
+### 环境准备与启动（主路径就是这两个脚本）
 
 ```bash
-# ffmpeg —— 必须带 libass。Homebrew 主线 ffmpeg 不带！
-brew install ffmpeg-full                      # macOS，开发期临时方案
-# 分发前需自建 vendor 指定 libass commit 的 ffmpeg（见 §5.12）
-ffmpeg -h filter=ass                          # 验证：返回 "Unknown filter" 说明没编 libass
-
-# Python —— 系统是 3.14，项目要 3.12
-uv python install 3.12
-uv sync
-
-# Node（前端）
-npm install
+python3 scripts/setup.py     # 自检 + 装依赖（Python 3.12、全部 extras、前端 npm 包）
+python3 scripts/dev.py       # 一键启动：先跑 setup.py，通过后同时拉起前后端
 ```
 
-### 开发（待实现）
+两个脚本都是 **stdlib-only 的 Python**，能被系统自带的任意 Python 3.9+ 直接跑起来
+（它们的职责之一就是把 3.12 装出来，不能反过来要求 3.12 才能启动）。
+**不要改成 `.sh` + `.ps1` 一对**：同一套逻辑写两遍，而只有一端会被实测，必然漂移。
+
+`setup.py` 能自动装的：Python 3.12、`.venv` 与全部 extras、`frontend/node_modules`。
+**不自动装** ffmpeg / Node.js / uv 自身——它们都要"下载并执行一个外部二进制"，
+属于 §2.6 里仍待实现的"获取"阶段，目前只探测 + 给可复制的命令。
+
+常用开关：`--check-only`（只检不装）、`--minimal`（只装 api+fonts，不拉 torch）、
+`--json`（供界面/脚本消费）；`dev.py` 另有 `--backend-port` / `--frontend-port` /
+`--skip-setup` / `--backend-only`。
+
+### 环境自检
 
 ```bash
-uv run uvicorn backend.app.main:app --reload   # 后端，需自行确认最终模块路径
-npm run dev                                    # 前端（Vite，须配 COOP/COEP headers）
+PYTHONPATH=backend uv run python -m kvm.doctor          # 人读的报告
+PYTHONPATH=backend uv run python -m kvm.doctor --copy   # 顺便复制到剪贴板
+PYTHONPATH=backend uv run python -m kvm.doctor --json   # 结构化，每项带稳定 key
+```
+
+**模块路径是 `kvm.doctor`，不是 `backend.doctor`**：`backend/` 只是 app-dir，
+不是包（后端启动也靠 `--app-dir backend` / `PYTHONPATH=backend`）。
+
+覆盖：平台矩阵、Python 版本、uv / Node / npm、前端依赖是否与锁文件对得上、
+**ffmpeg 是否注册了 `ass` 滤镜**、ffprobe、libass 版本、六组 Python extras、
+torch 设备（显式打印 `cuda.is_available()`）、模型权重是否已下载、系统字体、
+应用数据目录可写性、磁盘余量、端口占用。
+
+**改自检时必须同时验"坏环境下真的会报错"**，只验通过路径等于没验
+（`tests/test_doctor.py` 用不带 libass 的 ffmpeg 替身守这条）。
+
+### 手工开发命令（脚本内部就是跑这些，单独调试时用）
+
+```bash
+uv run uvicorn --app-dir backend kvm.api.app:app --host 127.0.0.1 --port 8000 --reload
+cd frontend && npm run dev                     # Vite，COOP/COEP 头已在 vite.config.ts 配好
+brew install ffmpeg-full                       # macOS：主线 ffmpeg 不带 libass！
+ffmpeg -h filter=ass                           # 验证：返回 "Unknown filter" 说明没编 libass
 ```
 
 ### 代码质量
@@ -1422,13 +1459,14 @@ uv run python -m experiments.furigana_local          # 注音链路
 uv run python -m experiments.separation_check        # 分离后端
 ```
 
-### 环境自检（待实现）
+### 自检里**尚未**覆盖的两项（都是"要另建机制"，不是漏写）
 
-```bash
-uv run python -m backend.doctor
-# 应检查：ffmpeg 是否带 libass、libass 版本是否与 JASSUB 同 commit、
-#         torch 设备（cuda/mps/cpu）、模型权重是否已下载、字体覆盖、磁盘余量
-```
+- **libass 是否与 JASSUB 同 commit**（§5.12）：自检只报告 ffmpeg 链接的 libass
+  版本，不做判定——版本号证明不了两端同源，要靠像素回归（§9 第 11 条）。
+  而且除 macOS 外根本读不出 libass 版本，别为了填满这一栏去猜。
+- **字体缺字**（§2.6）：那是"本曲全部字符 + 注音假名"对某个具体字体的 cmap 覆盖判定，
+  只有在选定字体与歌词之后才有意义；而全量扫系统字体要 30–40 秒，
+  放进每次启动的自检里就是纯粹的等待。判定留在样式步骤，自检只查扫描能力是否具备。
 
 ---
 

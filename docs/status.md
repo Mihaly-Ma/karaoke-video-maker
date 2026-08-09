@@ -37,8 +37,16 @@ language which major features do not exist yet.
   quantization, band-limited harmonic synthesis, mixed into the instrumental. Beat detection runs
   off the separated drum stem.
 - ffmpeg detection by capability (is the `ass` filter registered), not by version number, across
-  the known install locations.
-- `uv run pytest -q` was last measured at 350 passing, 1 skipped.
+  the known install locations, plus a `KVM_FFMPEG` override that fails loudly rather than
+  silently substituting a different build.
+- An environment self-check, `python -m kvm.doctor`: platform matrix, Python version, uv, Node
+  and npm, whether `node_modules` matches the lockfile, ffmpeg/ffprobe/libass, each of the six
+  optional dependency groups, the torch device (`cuda.is_available()` printed explicitly),
+  downloaded model weights, system fonts, a writable data directory, free disk, and port
+  availability on both loopback families. Copy-pasteable report, JSON mode, downloads nothing.
+- One-key scripts on top of it: `scripts/setup.py` (check and install) and `scripts/dev.py`
+  (check, then run both servers, with clean group shutdown on Ctrl-C).
+- `uv run pytest -q` was last measured at 421 passing, 1 skipped.
 
 ### Editor
 
@@ -94,9 +102,12 @@ running pipeline.
 - **Voice-part diarization.** Voice parts are assigned by hand in the editor. There is no
   automatic lead/backing detection and no second separation pass splitting a lead vocal from its
   harmonies, so there is no コーラス入り variant yet.
-- **Dependency auto-acquisition and the environment self-check.** ffmpeg is *located* if it is
-  already installed, never downloaded into an app-private directory, and `backend.doctor` does
-  not exist. Separation and `yt-dlp` are the exceptions: both install and update themselves into
+- **Dependency auto-*acquisition*.** The self-check (`python -m kvm.doctor`) and the install side
+  (`scripts/setup.py`, which handles Python 3.12, the venv, every extra, and `npm install`) are
+  both in place, but the middle stage of `CLAUDE.md` §2.6 is not: nothing downloads an external
+  binary. ffmpeg, Node and uv are *located* and, if missing, reported with a copy-pasteable
+  install command — never fetched into an app-private directory. Separation and `yt-dlp` are the
+  exceptions, and only because they are Python packages: both install and update themselves into
   an app-private environment on demand.
 - **Bundled fonts.** The Style step picks from fonts already installed on your machine; the
   project ships and fetches none. One caveat the coverage check reports separately: the in-app

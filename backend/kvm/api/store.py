@@ -23,7 +23,6 @@ do/undo 配对的复杂度与出错风险。命令模式真正的价值在于内
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import tempfile
 import threading
@@ -33,6 +32,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from kvm import paths
 from kvm.api.schemas import ProjectDTO, ProjectSummary
 
 _MAX_HISTORY = 200
@@ -55,12 +55,10 @@ stem 路径虽然通常由分离作业写入，但用户也能通过 `POST /api/
 def default_root() -> Path:
     """工程存放目录。
 
-    放在用户数据目录而非仓库内——工程是用户资产，不该随代码走。
+    实现在 `kvm.paths`——应用私有目录的规则只允许有一份（见该模块的模块文档）。
+    这里保留函数是为了不改动既有调用点。
     """
-    env = os.environ.get("KVM_DATA_DIR")
-    if env:
-        return Path(env)
-    return Path.home() / ".karaoke-video-maker" / "projects"
+    return paths.projects_dir()
 
 
 @dataclass

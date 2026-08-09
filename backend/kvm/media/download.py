@@ -47,10 +47,11 @@ import uuid
 from pathlib import Path
 from typing import IO, Any
 
+from kvm import paths
 from kvm.api.schemas import DownloadRequest, ProjectDTO
-from kvm.api.store import ProjectStore, default_root
+from kvm.api.store import ProjectStore
 from kvm.jobs import JobCancelled, JobHandle, run_cancelable
-from kvm.media.ffmpeg import find_ffmpeg_with_libass
+from kvm.media.ffmpeg import ffprobe_for, find_ffmpeg_with_libass
 from kvm.media.providers import (
     SelectionPolicy,
     StreamSelector,
@@ -68,8 +69,10 @@ _CANCEL_SENTINEL = "已失效：用户已取消下载"
 def app_data_root() -> Path:
     """应用数据根目录，与 `kvm.api.store` 的工程 JSON 共用同一个父目录
     （`~/.karaoke-video-maker/`），媒体文件另放一个子目录，不与工程 JSON 混放。
+
+    实现在 `kvm.paths`——应用私有目录的规则只允许有一份。
     """
-    return default_root().parent
+    return paths.app_data_root()
 
 
 def project_media_dir(project_id: str) -> Path:
@@ -78,8 +81,8 @@ def project_media_dir(project_id: str) -> Path:
 
 
 def _ffprobe_bin(ffmpeg_bin: str) -> str:
-    candidate = Path(ffmpeg_bin).with_name("ffprobe")
-    return str(candidate) if candidate.is_file() else "ffprobe"
+    """实现在 `kvm.media.ffmpeg.ffprobe_for`；这里保留旧名不改动既有调用点。"""
+    return ffprobe_for(ffmpeg_bin)
 
 
 def _ffprobe_json(ffprobe_bin: str, path: Path) -> dict[str, Any]:
