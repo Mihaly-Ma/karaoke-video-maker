@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 
 # ---- 工程 ----
@@ -119,6 +119,60 @@ class OrphanedEdit(BaseModel):
     """原始数据，供用户选择重新应用。"""
 
 
+class ExportArtifactDTO(BaseModel):
+    """一条已导出的成片记录。
+
+    工程此前完全不知道"导出过什么"：导出步骤的完成状态只活在前端本次会话的内存里，
+    刷新一次页面就退回"未完成"，历史产物也列不出来。一次 4K 全片烧录要几分钟，
+    这种状态不该随刷新蒸发。
+
+    **不要直接拿 `ProjectDTO.exports` 当"产物可用"的依据**——用户随时会把成片
+    挪走或删掉。走 `GET /api/render/exports/{project_id}`，那里会核对文件是否还在
+    （与 `ProxyStatus.ready` 同一判据：以文件实际存在为准，不以字段有没有值为准）。
+    """
+
+    id: str
+    """产物 id，取自生成它的那次导出任务的 job_id，便于把记录与任务日志对上。"""
+
+    path: str
+    """成片的绝对路径。"""
+
+    created_at: float
+    """生成时刻的 Unix 时间戳（秒）。"""
+
+    size_bytes: int = 0
+    duration_ms: int = 0
+    """成片实际时长（ffprobe 实测）。探测失败时回退到请求/工程时长。"""
+
+    with_guide: bool = False
+    """混入了引导声（ガイドメロディ）。"""
+
+    use_instrumental: bool = False
+    """True = OFF VOCAL（伴奏轨），False = ON VOCAL（含人声的原音轨）。"""
+
+    is_excerpt: bool = False
+    """片段试渲染（导出时给了 start/duration），不是整首成片。
+
+    单独标出来是因为它与整片在文件上无从分辨，用户一周后回来看到两个 mp4
+    没办法知道哪个是能发出去的那份。
+    """
+
+    @computed_field
+    @property
+    def variant_label(self) -> str:
+        """给界面直接显示的中文变体名，如「OFF VOCAL + 引导声」。
+
+        由上面三个布尔位派生而不是另存一个字段：存文案会和布尔位漂移，
+        改文案还得迁移老工程。
+        """
+        parts = ["OFF VOCAL" if self.use_instrumental else "ON VOCAL"]
+        if self.with_guide:
+            parts.append("引导声")
+        if self.is_excerpt:
+            parts.append("片段")
+        return " + ".join(parts)
+
+
 class ProjectDTO(BaseModel):
     """完整工程。前端的唯一真源，编辑器所有操作都作用于它。"""
 
@@ -161,6 +215,16 @@ class ProjectDTO(BaseModel):
 
     orphans: list[OrphanedEdit] = Field(default_factory=list)
     """重绑失败的手工修改，等待用户确认。见 `OrphanedEdit`。"""
+
+    exports: list[ExportArtifactDTO] = Field(default_factory=list)
+    """已导出的成片记录，按生成先后追加（新的在末尾）。见 `ExportArtifactDTO`。
+
+    老工程 JSON 里没有这个字段，`default_factory` 保证它们照常读取（与本模型
+    其余字段一致的兼容做法，不需要迁移函数）。
+
+    由导出作业经 `ProjectStore.update_derived()` 写入，**不占撤销格**：
+    成片是后台产物，不是用户的一次编辑意图（CLAUDE.md §8）。
+    """
 
 
 class ProjectSummary(BaseModel):

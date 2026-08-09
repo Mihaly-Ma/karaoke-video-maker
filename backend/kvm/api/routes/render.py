@@ -1,8 +1,10 @@
 """渲染路由：工程 → ASS 文本（预览）/ 烧录成片（导出）。
 
 CLAUDE.md §4.1：唯一真源是工程文件，ASS 只是渲染目标，从工程文件序列化产生，
-永远不被反向解析回来。本文件是这条规则在 HTTP 层的落地：三个接口全部只读
-工程（`ProjectStore.get`），从不调用 `store.mutate`。
+永远不被反向解析回来。本文件是这条规则在 HTTP 层的落地：渲染路径只读工程
+（`ProjectStore.get`），**从不调用 `store.mutate`** ——本模块唯一的写入是把
+导出成片登记进 `ProjectDTO.exports`，走的是不进撤销栈的 `store.update_derived`
+（CLAUDE.md §8「后台产物不进撤销栈」）。
 
 ## `/ass` 为什么必须快，以及怎么做到
 
@@ -25,16 +27,28 @@ CLAUDE.md §5.13 定义的通用长任务编排（独立子进程 + JSON-lines �
 
 from __future__ import annotations
 
+import contextlib
+import json
+import subprocess
 import threading
+import time
 import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import PlainTextResponse
-from kvm.api.schemas import AssResponse, JobStatus, ProjectDTO, RenderRequest
+from kvm.api.schemas import (
+    AssResponse,
+    ExportArtifactDTO,
+    JobStatus,
+    ProjectDTO,
+    RenderRequest,
+)
 from kvm.api.store import ProjectStore, default_root
+from kvm.media.download import _ffprobe_bin, _probe_duration
 from kvm.media.ffmpeg import find_ffmpeg_with_libass
 from kvm.models.karaoke import (
+    ExportArtifact,
     KaraokeProject,
     KaraokeStyle,
     Line,
@@ -98,11 +112,12 @@ def project_dto_to_domain(dto: ProjectDTO) -> KaraokeProject:
 
     渲染只需要这一个方向——ASS 是终点产物，不回写工程（CLAUDE.md §4.1）。
     两套类型的字段基本一一对应（`StyleDTO`/`PaletteDTO` 与 `KaraokeStyle`/
-    `VoicePalette` 字段名完全相同，可以直接 `**model_dump()` 展开），例外三处：
+    `VoicePalette` 字段名完全相同，可以直接 `**model_dump()` 展开），例外四处：
 
     - `LineDTO.id` 领域层不需要（渲染不关心编辑器用的稳定身份键）
     - `Token`/`RubySpan` 的 `source` 字段 API 层是裸字符串，领域层是枚举，需转换
     - `beat_grid` 不在 API 契约里，由调用方按需另行加载（见 `_load_beat_grid`）
+    - `ExportArtifactDTO.variant_label` 是计算字段，转换时要排除掉
 
     `TokenDTO.voice_part` **必须往下传**：一行内的声部交替全靠它，
     只传行级声部的话用户标好的对唱分色在成片里看不出任何效果。
@@ -146,6 +161,11 @@ def project_dto_to_domain(dto: ProjectDTO) -> KaraokeProject:
         video_width=dto.video_width,
         video_height=dto.video_height,
         global_offset_ms=dto.global_offset_ms,
+        # `variant_label` 是 DTO 侧的计算字段，领域层照三个布尔位自己派生，
+        # 直接 `**model_dump()` 会把它当成构造参数传进去而报错。
+        exports=[
+            ExportArtifact(**item.model_dump(exclude={"variant_label"})) for item in dto.exports
+        ],
     )
 
 
@@ -259,7 +279,49 @@ def preview_ass(project_id: str, request: Request) -> PlainTextResponse:
     return PlainTextResponse(content=ass_text, media_type="text/plain; charset=utf-8")
 
 
-# ---- POST /export、GET /export/{job_id} ----
+# ---- 导出产物登记 ----
+
+
+def record_export(store: ProjectStore, project_id: str, artifact: ExportArtifactDTO) -> None:
+    """把一件成片登记进工程——**走 `update_derived`，不占撤销格**。
+
+    成片是后台作业的产物，不是用户的一次编辑意图（CLAUDE.md §8「后台产物不进
+    撤销栈」）。烧录一条 4K 全片要跑几分钟，期间用户还在改轴；若这条登记压进
+    撤销栈，用户按 Cmd+Z 想撤掉自己刚才那次改动，撤掉的会是"已导出"这件事。
+
+    `update_derived` 就地只往 `exports` 追加一条，不整体替换工程状态，
+    所以并发进行的编辑不会被这次写回卷掉。
+    """
+
+    def _apply(project: ProjectDTO) -> None:
+        # 同一路径只保留一条：重复导出到同一个文件时该更新那条记录，
+        # 而不是列出两条指向同一份成片、只有一条说得对的记录。
+        project.exports = [item for item in project.exports if item.path != artifact.path]
+        project.exports.append(artifact)
+
+    store.update_derived(project_id, _apply, label="登记导出产物")
+
+
+def list_exports(store: ProjectStore, project_id: str) -> list[ExportArtifactDTO]:
+    """列出**仍然存在于磁盘上**的导出产物，最新的在前；顺带剔除已消失的记录。
+
+    用户随时会把成片挪到别处或直接删掉。留着一条指向不存在文件的记录，点开只会
+    报错——判据与 `ProxyStatus.ready` 一致：以文件实际存在为准，不以字段有没有值
+    为准。剔除本身也走不入历史的写入路径，它是派生登记的维护，不该占用户一格撤销。
+    """
+    project = store.get(project_id)
+    alive = [item for item in project.exports if Path(item.path).is_file()]
+    if len(alive) != len(project.exports):
+        alive_paths = {item.path for item in alive}
+
+        def _prune(draft: ProjectDTO) -> None:
+            draft.exports = [item for item in draft.exports if item.path in alive_paths]
+
+        store.update_derived(project_id, _prune, label="清理已消失的导出产物")
+    return list(reversed(alive))
+
+
+# ---- POST /export、GET /export/{job_id}、GET /exports/{project_id} ----
 
 _jobs: dict[str, JobStatus] = {}
 _jobs_lock = threading.Lock()
@@ -306,8 +368,12 @@ def export_video(body: RenderRequest, request: Request) -> JobStatus:
 
     # 传给后台线程的是深拷贝快照：导出可能要跑几分钟，期间用户仍可能在编辑器里
     # 继续改动同一个工程（`store` 的 `get()` 返回的是内存里的活对象，不是副本）。
+    # `store` 本身仍要传下去：烧完要往工程里登记产物，而那次写回必须落在**当前**
+    # 工程状态上，绝不能拿这份几分钟前的快照整体覆盖回去。
     snapshot = dto.model_copy(deep=True)
-    thread = threading.Thread(target=_run_export, args=(job_id, snapshot, body), daemon=True)
+    thread = threading.Thread(
+        target=_run_export, args=(job_id, _store(request), snapshot, body), daemon=True
+    )
     thread.start()
     return job
 
@@ -326,7 +392,44 @@ def export_status(job_id: str) -> JobStatus:
     return job
 
 
-def _run_export(job_id: str, dto: ProjectDTO, req: RenderRequest) -> None:
+@router.get("/exports/{project_id}", response_model=list[ExportArtifactDTO])
+def export_artifacts(project_id: str, request: Request) -> list[ExportArtifactDTO]:
+    """列出该工程已导出、且文件仍在磁盘上的成片，最新的在前。
+
+    单独开一个接口而不是让前端读 `ProjectDTO.exports`，理由与
+    `GET /api/media/proxy/{project_id}` 完全相同：判断产物**现在能不能用**需要
+    一次文件系统核对，而 `GET /api/projects/{id}` 是编辑器每次打开工程都要调的
+    热路径，不该顺带去 stat 一串成片；反过来，工程 DTO 里若留着一条指向已删除
+    文件的记录，前端照单渲染就会给用户一个点开必然报错的入口。
+    """
+    try:
+        return list_exports(_store(request), project_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=exc.args[0]) from exc
+
+
+def _export_duration_ms(ffmpeg: str, out_path: Path, dto: ProjectDTO, req: RenderRequest) -> int:
+    """成片实际时长。
+
+    优先 ffprobe 实测：请求里的 `duration_s` 只是"要求截多长"，与实际产出可能差
+    一帧到几百毫秒，截取范围超过片尾时更是差一大截。探测失败不该让一次成功的
+    烧录变成失败，因此层层回退到请求值、再回退到工程时长。
+    """
+    try:
+        return round(_probe_duration(_ffprobe_bin(ffmpeg), out_path) * 1000)
+    except (
+        subprocess.SubprocessError,
+        OSError,
+        json.JSONDecodeError,
+        KeyError,
+        ValueError,
+    ):
+        if req.duration_s is not None:
+            return round(req.duration_s * 1000)
+        return dto.duration_ms
+
+
+def _run_export(job_id: str, store: ProjectStore, dto: ProjectDTO, req: RenderRequest) -> None:
     """后台线程实际执行的烧录流程，复用 `pipeline.make_video` 的烧录逻辑
     （`burn` / `_extract_audio` / `_mix_audio`），不重新实现一遍 ffmpeg 调用。
 
@@ -389,6 +492,26 @@ def _run_export(job_id: str, dto: ProjectDTO, req: RenderRequest) -> None:
             start_s=req.start_s,
             duration_s=req.duration_s,
         )
+
+        _set_job(job_id, message="登记成片…", progress=0.98)
+        artifact = ExportArtifactDTO(
+            id=job_id,
+            path=str(out_path),
+            created_at=time.time(),
+            size_bytes=out_path.stat().st_size if out_path.is_file() else 0,
+            duration_ms=_export_duration_ms(ffmpeg, out_path, dto, req),
+            with_guide=req.with_guide,
+            use_instrumental=req.use_instrumental,
+            # 给了起点或时长就是片段试渲染。成片与试渲染在文件上无从分辨，
+            # 不标出来用户过几天回看这一串 mp4 会分不清哪个能发出去。
+            is_excerpt=req.start_s is not None or req.duration_s is not None,
+        )
+        # 登记必须在把任务标成 done **之前**：前端一看到 done 就会去拉产物列表，
+        # 反过来的话那一拉必然是空的，用户会以为导出没产出东西。
+        # KeyError = 工程在几分钟的烧录期间被删了：文件确实已经烧好，只是没有工程
+        # 可登记，这次导出本身是成功的，不该翻成失败。
+        with contextlib.suppress(KeyError):
+            record_export(store, dto.id, artifact)
 
         _set_job(
             job_id,

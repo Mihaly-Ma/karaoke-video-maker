@@ -482,10 +482,21 @@ def _save_cache_entry(media_dir: Path, key: str, proxy_path: str) -> None:
 
 
 def _write_back(store: ProjectStore, project_id: str, proxy_path: str) -> None:
-    def _mutate(p: ProjectDTO) -> None:
+    """登记代理路径。**走 `update_derived`，不占撤销格。**
+
+    代理是后台作业的派生产物，不是用户的一次编辑意图（CLAUDE.md §8「后台产物
+    不进撤销栈」）。转码常常正好在用户改完一处时间轴之后完成——若这条登记压进
+    撤销栈，用户按 Cmd+Z 撤掉的会是"代理已就绪"，而不是他自己那次修改。
+
+    `update_derived` 另有一层意义：它就地只改这一个字段，不像 `mutate` 那样
+    "深拷贝 draft → 整体替换"。代理转码要十几秒到几分钟，期间用户很可能一直在
+    编辑，整体替换会把这段时间里的编辑一起吞掉。
+    """
+
+    def _apply(p: ProjectDTO) -> None:
         p.proxy_video_path = proxy_path
 
-    store.mutate(project_id, _mutate, label="生成编辑用代理视频")
+    store.update_derived(project_id, _apply, label="登记编辑用代理视频")
 
 
 def run_proxy(handle: JobHandle, store: ProjectStore, req: ProxyRequest) -> dict[str, Any]:

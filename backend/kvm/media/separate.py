@@ -179,12 +179,22 @@ def _backend_dir() -> Path:
 
 
 def _write_back(store: ProjectStore, project_id: str, paths: dict[str, str]) -> None:
-    def _mutate(p: ProjectDTO) -> None:
+    """登记分离出的 stem 路径。**走 `update_derived`，不占撤销格。**
+
+    stem 是后台作业的派生产物，不是用户的一次编辑意图（CLAUDE.md §8「后台产物
+    不进撤销栈」）。分离要跑几分钟，完成时刻与用户手上的编辑毫无关系——若压进
+    撤销栈，用户按 Cmd+Z 撤掉的会是"分离已完成"这条登记。
+
+    同样重要的是 `update_derived` 就地只改这三个字段：`mutate` 那套"深拷贝
+    draft → 整体替换"会把分离期间用户在编辑器里做的改动整个吞掉。
+    """
+
+    def _apply(p: ProjectDTO) -> None:
         for field in ("vocals_path", "instrumental_path", "drums_path"):
             if field in paths:
                 setattr(p, field, paths[field])
 
-    store.mutate(project_id, _mutate, label="人声分离")
+    store.update_derived(project_id, _apply, label="登记分离出的声部轨")
 
 
 def _finalize_outputs(
