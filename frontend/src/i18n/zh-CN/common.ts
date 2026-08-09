@@ -1,5 +1,6 @@
 /** 跨舞台通用文案。新增前先确认它真的会被多处使用。 */
 export const common: Record<string, string> = {
+  'topbar.lineCount': '{n} 行',
   'common.play': '播放',
   'common.pause': '暂停',
   'common.cancel': '取消',

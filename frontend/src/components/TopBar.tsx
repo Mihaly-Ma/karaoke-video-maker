@@ -127,15 +127,20 @@ export default function TopBar({ step, status, onStep, onHome }: TopBarProps) {
         })}
       </nav>
 
+      {/*
+        这里**不放"导出"按钮**。它曾经存在，onClick 就是 onStep('export')，
+        与步骤条里的「导出」是同一个目的地——纯重复，且步骤条那个还多带完成状态。
+        与"两个播放按钮"是同一类问题：同一个动作只应在一处出现（docs/ui-redesign.md §五）。
+
+        若将来要在顶栏放一个终极动作，它必须是**真的开始导出**（带当前设置直接起任务），
+        而不是又一个跳转入口；否则不要加。
+      */}
       <div className="topbar__side topbar__side--end">
         {project && (
           <span className="topbar__meta num">
-            {project.lines.length} 行 · {formatDuration(project.duration_ms)}
+            {t('topbar.lineCount', { n: project.lines.length })} · {formatDuration(project.duration_ms)}
           </span>
         )}
-        <button type="button" className="primary" disabled={!project} onClick={() => onStep('export')}>
-          <ExportOutlined /> 导出
-        </button>
       </div>
 
       {error && (
