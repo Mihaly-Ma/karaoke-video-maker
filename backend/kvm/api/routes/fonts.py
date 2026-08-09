@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import platform
 import subprocess
 import threading
@@ -44,16 +45,19 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
+from kvm import paths
+from kvm.render import font_cache
+from kvm.render.font_subset import SUBSET_VERSION, subset_font
 from pydantic import BaseModel
 
-from kvm.api.store import default_root
-from kvm.render.font_subset import SUBSET_VERSION, subset_font
+_log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/fonts", tags=["fonts"])
 
 
 def _cache_dir() -> Path:
-    d = default_root().parent / "font-cache"
+    """缓存目录。路径规则的单一真源在 `kvm.paths`，这里只负责按需建目录。"""
+    d = paths.font_cache_dir()
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -227,6 +231,15 @@ def _run_scan() -> None:
     """
     global _scan_total_files
     try:
+        # 顺手清掉旧版本的子集产物。**只删旧版本**（`stale_only`）：那些永远不会
+        # 再被命中，删它没有竞态；当前版本的产物可能正在被 FileResponse 下发，
+        # Windows 上删一个打开着的文件会直接报错，所以留给生成之后那一步去管。
+        # 挂在这个已有的后台线程里，不额外起线程、也不拖慢 lifespan。
+        try:
+            font_cache.prune_font_cache(_cache_dir(), stale_only=True)
+        except OSError as exc:  # pragma: no cover - 清理失败不该连累字体扫描
+            _log.warning("字体缓存清理未完成：%s", exc)
+
         dirs = _FONT_DIRS_BY_OS.get(platform.system(), [])
         files = _candidate_font_files(dirs)
         with _state_lock:
@@ -242,7 +255,11 @@ def _run_scan() -> None:
         try:
             from fontTools.ttLib import TTCollection, TTFont
         except ImportError:
-            _finish([], from_cache=False, error="未安装 fontTools，无法扫描系统字体，请运行 `uv sync --extra fonts`")
+            _finish(
+                [],
+                from_cache=False,
+                error="未安装 fontTools，无法扫描系统字体，请运行 `uv sync --extra fonts`",
+            )
             return
 
         # family -> [(usWeightClass, subfamily, path, index, is_cjk), ...]
@@ -339,8 +356,10 @@ def _status_snapshot() -> FontScanStatus:
         state = _scan_state
         count = len(_fonts)
         done, total = _scan_done_files, _scan_total_files
-        elapsed = _scan_elapsed_s if state in ("ready", "failed") else (
-            time.monotonic() - _scan_started_at if _scan_started_at else 0.0
+        elapsed = (
+            _scan_elapsed_s
+            if state in ("ready", "failed")
+            else (time.monotonic() - _scan_started_at if _scan_started_at else 0.0)
         )
         from_cache, error = _scan_from_cache, _scan_error
 
@@ -410,6 +429,62 @@ def list_fonts(cjk_only: bool = Query(default=False)) -> list[FontInfo]:
     return fonts
 
 
+_subset_lock = threading.Lock()
+_subset_jobs: dict[Path, threading.Thread] = {}
+"""正在后台裁剪的产物路径 → 线程。同一份产物只裁一次，重复请求共用同一个作业。"""
+
+_subset_errors: dict[Path, str] = {}
+"""裁剪失败的原因。**必须留着**：否则前端会一直收到 503 重试到超时，
+而真正的原因（比如族名对不上）没有任何人看得到——那正是 §2.5 说的
+"自动环节的错误必须可见"。"""
+
+
+def _subset_failure(dest: Path) -> str | None:
+    with _subset_lock:
+        return _subset_errors.pop(dest, None)
+
+
+def _run_subset_job(match: FontInfo, src: Path, dest: Path) -> None:
+    """后台裁剪一份子集。
+
+    **写临时文件再 rename**，不直接写 `dest`：`get_subset` 判断"有没有裁好"
+    靠的就是 `dest.exists()`，直接写的话，文件一创建就会被认为已就绪，
+    而此时里面还只有半截字节——下发出去就是一份坏字体，libass 画不出任何东西
+    且不报错。rename 在同一文件系统内是原子的，要么没有、要么完整。
+    """
+    tmp = dest.with_name(dest.name + ".part")
+    try:
+        subset_font(src, tmp, family_index=match.index, flavor=None, family_name=match.family)
+        tmp.replace(dest)
+        # 刚裁完，正是做容量清理的时机（用户本来就在等下一次轮询）。
+        # `protect` 保住刚生成的这份，否则会出现"裁完就被自己删掉、下次再裁"的抖动
+        font_cache.prune_font_cache(_cache_dir(), protect=dest)
+    except Exception as exc:  # 线程里任何异常都要留痕，不能静默死掉
+        _log.warning("字体子集化失败：%s（%s）", match.family, exc)
+        with _subset_lock:
+            _subset_errors[dest] = str(exc)
+        tmp.unlink(missing_ok=True)
+    finally:
+        with _subset_lock:
+            _subset_jobs.pop(dest, None)
+
+
+def _ensure_subset_job(match: FontInfo, src: Path, dest: Path) -> None:
+    """确保该产物正在后台裁剪。已经在裁就什么都不做——重复请求不该重复开工。"""
+    with _subset_lock:
+        job = _subset_jobs.get(dest)
+        if job is not None and job.is_alive():
+            return
+        thread = threading.Thread(
+            target=_run_subset_job,
+            args=(match, src, dest),
+            name=f"kvm-font-subset-{match.family}",
+            daemon=True,
+        )
+        _subset_jobs[dest] = thread
+    thread.start()
+
+
 @router.get("/subset")
 def get_subset(family: str = Query(...)) -> FileResponse:
     """按族名产出可供 JASSUB 使用的子集字体。
@@ -423,6 +498,21 @@ def get_subset(family: str = Query(...)) -> FileResponse:
     预览会整块空白且不报错。详见 `kvm.render.font_subset` 的模块文档。
 
     扫描尚未覆盖到该字体时返回 503 + 中文进度说明（见 `_require_font`）。
+
+    ## 冷生成不阻塞请求（实测 9.4–10.9 秒）
+
+    本机实测：冷生成一份子集要 **9.4 秒（Noto Sans CJK JP）到 10.9 秒
+    （ヒラギノ明朝 ProN）**，而命中缓存只要 **12–17 毫秒**，差了约 700 倍。
+
+    这一段以前是**同步**做的，于是整整十秒里请求就那么挂着。后果不是"慢一点"：
+    用户在样式面板点一个没裁过的字体，预览是空白的；他多半会以为这个字体坏了，
+    再点下一个——而每点一次都会重建一次字幕层、发起一次新的十秒请求，
+    上一次的还在占着线程池。**表现出来就是"只有某几个字体能用"**，
+    而"能用"的恰好是缓存里已经有的那几个。
+
+    所以改成：**后台线程裁，请求立刻返回 503 + `Retry-After`**。
+    前端 `lib/jassub.ts` 的 `fetchFontData` 本来就认这个协议（最长等 60 秒），
+    不需要新增任何前端机制；用户看到的是"字体准备中"，而不是一块空白。
     """
     match = _require_font(family)
 
@@ -433,15 +523,18 @@ def get_subset(family: str = Query(...)) -> FileResponse:
         raise HTTPException(status_code=404, detail=f"字体文件不可读：{src}") from exc
 
     key = _subset_cache_key(match.family, match.index, st.st_mtime_ns, st.st_size)
-    dest = _cache_dir() / f"{key}.otf"
+    dest = _cache_dir() / font_cache.artifact_name(key)
 
     if not dest.exists():
-        try:
-            subset_font(src, dest, family_index=match.index, flavor=None, family_name=match.family)
-        except Exception as exc:
-            raise HTTPException(
-                status_code=500, detail=f"字体子集化失败：{exc}"
-            ) from exc
+        _ensure_subset_job(match, src, dest)
+        failure = _subset_failure(dest)
+        if failure is not None:
+            raise HTTPException(status_code=500, detail=f"字体子集化失败：{failure}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"正在为「{family}」裁剪预览字体（首次约 10 秒），请稍候。",
+            headers={"Retry-After": "2"},
+        )
 
     return FileResponse(
         dest,

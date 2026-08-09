@@ -63,6 +63,16 @@ def private_bin_dir() -> Path:
     return app_data_root() / "bin"
 
 
+def font_cache_dir() -> Path:
+    """预览字体子集产物的缓存目录。
+
+    产物是**可再生的派生物**：删掉只是下次要重裁几秒，不是用户资产。
+    所以它可以被清理，而 `projects/` 不行——两者放在同一层，语义却完全不同，
+    清理逻辑必须只认这个目录（见 `kvm.render.font_cache`）。
+    """
+    return app_data_root() / "font-cache"
+
+
 def models_dir() -> Path:
     """模型权重缓存根目录。
 

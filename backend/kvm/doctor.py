@@ -698,7 +698,44 @@ def check_workspace() -> list[CheckResult]:
         )
     else:
         results.append(CheckResult("disk", "磁盘余量", "ok", detail))
+
+    results.append(_check_font_cache())
     return results
+
+
+_FONT_CACHE_WARN_MB = 512.0
+"""字体缓存超过这个数就提醒。
+
+清理是自动的（`kvm.render.font_cache`：启动时删旧版本、生成后按预算裁剪），
+所以正常情况下到不了这里。真到了就说明自动清理没跑或没跑动，**用户有权知道
+这几百 MB 是什么、以及怎么一键清掉**——这个目录曾经长到 106 MB 而无人过问，
+用户最后是自己 `rm` 掉的，那正是 §2.6 要排除的事。
+"""
+
+
+def _check_font_cache() -> CheckResult:
+    """预览字体子集缓存占了多少。**产物是可再生的派生物，删掉只是下次重裁几秒。**"""
+    from kvm.render import font_cache  # 局部导入：自检要能在依赖没装全时也跑起来
+
+    try:
+        count, total, stale = font_cache.cache_stats()
+    except OSError as exc:  # pragma: no cover
+        return CheckResult("font_cache", "字体缓存", "warn", f"读不到：{exc}")
+
+    mb = total / 1024**2
+    detail = f"{count} 份 / {mb:.0f} MB（{paths.font_cache_dir()}）"
+    if stale:
+        detail += f"，其中 {stale} 份属于旧版本，下次启动会自动清掉"
+    if mb >= _FONT_CACHE_WARN_MB:
+        return CheckResult(
+            "font_cache",
+            "字体缓存",
+            "warn",
+            detail,
+            fix="uv run python -m kvm.doctor --prune-font-cache",
+            affects="只占磁盘，不影响功能；产物可再生，删掉后下次预览会重裁几秒",
+        )
+    return CheckResult("font_cache", "字体缓存", "ok", detail)
 
 
 def _nearest_existing(path: Path) -> Path:
@@ -888,6 +925,11 @@ def main(argv: list[str] | None = None) -> int:
         description="环境自检：ffmpeg 是否带 libass、依赖是否齐、torch 用什么设备、磁盘还剩多少。不下载任何东西。",
     )
     parser.add_argument("--json", action="store_true", help="输出 JSON，供脚本/界面消费")
+    parser.add_argument(
+        "--prune-font-cache",
+        action="store_true",
+        help="清理预览字体子集缓存（产物可再生，删掉只是下次预览重裁几秒）",
+    )
     parser.add_argument("--copy", action="store_true", help="把报告复制到剪贴板")
     parser.add_argument("--skip-torch", action="store_true", help="跳过 torch 探测（省几秒）")
     parser.add_argument(
@@ -899,6 +941,20 @@ def main(argv: list[str] | None = None) -> int:
         help="额外检查某个端口是否可用",
     )
     args = parser.parse_args(argv)
+
+    if args.prune_font_cache:
+        # 手动入口。自动清理已经挂在启动与生成之后两处，这里是给"自检报告说它太大了"
+        # 之后的那一步——§2.6 要求给出可直接粘贴执行的命令，而不是只说"太大了"
+        from kvm.render import font_cache
+
+        result = font_cache.prune_font_cache()
+        print(
+            f"字体缓存已清理：删除 {result.removed_files} 份"
+            f"（旧版本 {result.removed_stale} / 超预算 {result.removed_overflow}），"
+            f"释放 {result.freed_bytes / 1024**2:.1f} MB；"
+            f"剩余 {result.kept_files} 份 {result.kept_bytes / 1024**2:.1f} MB"
+        )
+        return 0
 
     report = run_checks(
         skip_torch=args.skip_torch,
