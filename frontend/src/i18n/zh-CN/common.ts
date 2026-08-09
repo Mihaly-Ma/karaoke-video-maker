@@ -1,0 +1,27 @@
+/** 跨舞台通用文案。新增前先确认它真的会被多处使用。 */
+export const common: Record<string, string> = {
+  'common.play': '播放',
+  'common.pause': '暂停',
+  'common.cancel': '取消',
+  'common.delete': '删除',
+  'common.use': '使用',
+  'common.save': '保存',
+  'common.retry': '重试',
+  'common.undo': '撤销',
+  'common.redo': '重做',
+  'common.loading': '加载中',
+  'common.ready': '已就绪',
+  'common.failed': '失败',
+  'common.selectProjectFirst': '请先选择工程',
+  // 来源徽章：CLAUDE.md §7.4 要求这四种来源在界面上可见地区分
+  'source.provider': '歌词源',
+  'source.aligned': '对齐',
+  'source.interpolated': '插值',
+  'source.manual': '手工',
+  'step.media': '素材',
+  'step.lyrics': '歌词',
+  'step.align': '对轴',
+  'step.ruby': '注音',
+  'step.style': '样式',
+  'step.export': '导出',
+}
