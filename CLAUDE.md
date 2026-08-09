@@ -296,7 +296,12 @@ surface 字符块的 `\k` 值 = 其所属 mora 时长之和。这样「学校」
 - 次要模糊重绑：行内字符偏移
 - **重绑失败的锁定项不要静默丢弃**，收进「失效修正」列表让用户确认。静默丢弃 = 用户调了 40 分钟的轴莫名其妙消失
 
-### 4.5 读音的四/五层优先级模型
+### 4.5 读音的四/五层优先级模型（**待实现**）
+
+**现状：生产代码里只有歌词源自带的 `[kana:]` 这一层（L1.5）。**
+形态素分析（L0）、通用词典（L1）、用户词典（L2）都不存在，`backend/kvm/` 里没有 fugashi / SudachiPy / pyopenjtalk 的任何引用。
+另外 **`reading_phonetic` 字段在工程模型里还没有**——§4.2 要求两份读音必须同时
+存在，目前只有一份，注音编辑器的发音形是前端本地暂存的过渡措施。
 
 自动读音按优先级合并求值（高层覆盖低层）：
 
@@ -346,7 +351,8 @@ Resolver 打分维度：粒度（word ≫ line ≫ plain）× 时长差（`|dur 
 
 **铁律：粒度可以被提升，不能被伪造。** 提升产生的时间轴 `timing_source` 必须标 `aligned` 而非 `provider`，UI 上必须有来源徽章。
 
-Provider 清单（**优先级未最终裁决，见 §9**）：
+Provider 清单（**优先级未最终裁决，见 §9**）。
+**现状：只有 QQ 音乐接入了生产链路**（`backend/kvm/lyrics/`），其余各源仍停留在 `experiments/` 下的实验脚本，尚未进 `kvm.lyrics` 包：
 
 | Provider | 粒度 | 端点/方式 | 状态 |
 |---|---|---|---|
@@ -428,7 +434,10 @@ audio-separator 的命名空间，换模型不该逼前端跟着改。档位表�
 - `mel_band_roformer_karaoke_*` 系列分的是**主唱 vs 和声**，不是人声 vs 伴奏。名字极具误导性
 - `demucs --two-stems=vocals` **不省时间**（仍跑完整 4 源前向再求和）
 
-### 5.5 强制对齐
+### 5.5 强制对齐（**待实现**）
+
+**现状：生产代码里完全没有强制对齐。** 时间轴全部来自歌词源的逐字轴，`backend/kvm/` 里没有 torchaudio / forced_align 的任何引用。
+本节是选型与设计，动手前不要假设它已经存在。
 
 **`torchaudio.functional.forced_align`** + 纯平假名 CTC 声学模型 **`vumichien/wav2vec2-large-xlsr-japanese-hiragana`**（86 个 token，其中 83 个假名 + `|` + `[UNK]` + `[PAD]`，apache-2.0，1.26 GB）。
 
@@ -589,7 +598,10 @@ libass 扩展可以放心用（链路两端都是 libass）：`BorderStyle=4`（
 
 **`wavesurfer.js@7.x`** + `regions` 插件（不是 peaks.js）。理由：`media` 选项能直接挂到同一个 `<video>`；`peaks` + `duration` 能吃后端预算好的峰值跳过解码；v7 renderer 已有基于 scrollLeft 的懒渲染分块。
 
-峰值数据由 **Python 后端预计算**（ffmpeg 解码 → numpy min/max，多级 LOD），输出 BBC waveform-data 格式。**不要打包 `audiowaveform` 二进制**——为一个 min/max 循环多背一个原生依赖不划算。
+峰值数据应由 **Python 后端预计算**（ffmpeg 解码 → numpy min/max，多级 LOD），输出 BBC waveform-data 格式。**不要打包 `audiowaveform` 二进制**——为一个 min/max 循环多背一个原生依赖不划算。
+
+**待实现。** 目前前端自己整段解码 PCM 来画波形，因此素材舞台不得不把多条轨的波形挂载排成队列（一次只解一条），否则内存与主线程会被顶爆。
+同时**缺一个媒体探测接口**（每条轨的时长/采样率/声道/体积）：前端现在靠 Range 请求 + 手写 RIFF chunk 遍历凑出来，只对当前的 WAV 管线有效。这两个接口补上后，前端那两处权宜实现都可以删掉。
 
 **交互形态（按实际效率排序）**：
 
