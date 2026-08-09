@@ -1,141 +1,142 @@
 /**
- * 手工导入歌词——不是"搜索失败后的惩罚性回退"，是与搜索并列的一等入口
- * （CLAUDE.md §2.5：每个自动环节都必须有等价的手工旁路，且随时可用）。
+ * 手工导入歌词（左侧窄列的另一个一等入口）。
  *
- * 支持三种格式：
- * - 纯文本：一行一句，无时间轴，导入后靠 tap-to-time 手工打轴
- * - LRC：行级时间轴（`[mm:ss.xx]文本`）
- * - QRC：逐字轴 + 可选 `[kana:]` 假名注音轨（QQ音乐/酷狗风格）
+ * CLAUDE.md §2.5：手工旁路不是"搜索失败后的惩罚性回退"，要能随时主动使用——
+ * 所以它与搜索是同一组切换里等宽的两个选项，而不是藏在角落的小链接。
+ * 冷门曲、同人曲、翻唱在任何歌词库都可能查不到，这条路必须始终可用。
  *
- * 支持粘贴、拖拽文件、文件选择器；导入前用一个**简化的前端启发式解析**
- * 给出行数与内容预览——真正的解析仍在后端完成，这里只是"心里有数"，
- * 不是权威结果，预览区已明确标注。
+ * 三种格式：
+ * - text：一行一句，无时间轴，导入后靠 tap-to-time 打轴
+ * - lrc：`[mm:ss.xx]` 行级时间轴
+ * - qrc：逐字轴 + 可选 `[kana:]` 假名轨
+ *
+ * 本组件只管**采集内容**；粘贴进来的东西同样走中间那块成片样式的大预览，
+ * 与搜索候选看到的是同一个渲染器。导入动作在底部元信息栏，与"使用候选"同一个位置。
+ *
+ * 草稿解析是**前端启发式**，只用来立刻看到行数与内容；`[kana:]` 的注音挂载
+ * 有一串已知陷阱（CLAUDE.md §6.1：覆盖数按单个数字解析、credits 行也参与消费
+ * kana 序列），错位的注音比没有注音更难发现，所以草稿一律不画注音，
+ * 由后端解析后再显示。
  */
 
-import { useMemo, useRef, useState } from 'react'
+import { FileTextOutlined, FolderOpenOutlined, SnippetsOutlined } from '@ant-design/icons'
+import { useRef, useState } from 'react'
 import type { ChangeEvent, DragEvent } from 'react'
-import { history as fetchProjectHistory, importLyrics } from '../api/client'
-import { useProject } from '../state/projectStore'
 
-type ImportKind = 'text' | 'lrc' | 'qrc'
+import { t } from '../i18n'
+import type { ScriptLine } from './LyricScript'
 
-const KIND_LABELS: Record<ImportKind, string> = {
-  text: '纯文本',
-  lrc: 'LRC（行级时间轴）',
-  qrc: 'QRC（逐字轴 + 假名）',
-}
+export type ImportKind = 'text' | 'lrc' | 'qrc'
 
-const KIND_HINTS: Record<ImportKind, string> = {
-  text: '一行一句，不含任何时间信息；导入后需要用 tap-to-time 从零手工打轴。',
-  lrc: '形如 [00:12.34]歌词 的行级时间标签；导入后每行有整句时间，单词/音节仍需手工细化。',
-  qrc: 'QQ音乐/酷狗风格逐字轴，形如 [起始,时长]字(起始,时长)…；若含 [kana:] 行还会带假名注音。',
-}
+export const IMPORT_KINDS: { key: ImportKind; label: string; title: string }[] = [
+  { key: 'text', label: 'lyrics.kindText', title: 'lyrics.kindTextTitle' },
+  { key: 'lrc', label: 'lyrics.kindLrc', title: 'lyrics.kindLrcTitle' },
+  { key: 'qrc', label: 'lyrics.kindQrc', title: 'lyrics.kindQrcTitle' },
+]
 
-interface PreviewEntry {
-  time: string | null
-  text: string
-}
-
-interface ImportPreviewResult {
-  lineCount: number
-  warningCount: number
-  sample: PreviewEntry[]
+export interface ImportDraft {
+  lines: ScriptLine[]
+  /** 有内容但对不上格式的行数——多半是选错了格式 */
+  unrecognized: number
   hasKanaTrack: boolean
 }
 
-const SAMPLE_LIMIT = 8
+const EMPTY_DRAFT: ImportDraft = { lines: [], unrecognized: 0, hasKanaTrack: false }
 
-function parseTextPreview(content: string): ImportPreviewResult {
-  const lines = content
+// LRC/QRC 共用的元数据标签行（曲名/歌手/整体偏移等），不是歌词
+const META_TAG_RE = /^\[(ti|ar|al|by|offset|length|re|ve):/i
+const LRC_TIME_TAG_RE = /^\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]/
+const QRC_LINE_RE = /^\[(\d+),(\d+)\](.*)$/
+// QRC 的字块是「文本(起始,时长)」，文本在标记之前
+const QRC_TOKEN_RE = /(.*?)\((\d+),(\d+)\)/g
+// LyricContent 必须按原文取：XML 属性值规范化会把行分隔符 0x0A 换成空格
+const QRC_CONTENT_RE = /LyricContent="([\s\S]*)"\s*\/>/
+
+const draftLine = (id: string, tokens: string[], timingSource: string | null): ScriptLine => ({
+  id,
+  tokens,
+  ruby: [],
+  isMetadata: false,
+  voicePart: 'main',
+  timingSource,
+})
+
+function nonEmptyLines(content: string): string[] {
+  return content
     .split(/\r?\n/)
     .map((l) => l.trim())
     .filter(Boolean)
+}
+
+function parseTextDraft(content: string): ImportDraft {
   return {
-    lineCount: lines.length,
-    warningCount: 0,
-    sample: lines.slice(0, SAMPLE_LIMIT).map((text) => ({ time: null, text })),
+    lines: nonEmptyLines(content).map((text, i) => draftLine(`d${i}`, [text], null)),
+    unrecognized: 0,
     hasKanaTrack: false,
   }
 }
 
-// LRC/QRC 共用的元数据标签行（曲名/歌手/专辑/上传者/整体偏移等），预览时忽略不计
-const META_TAG_RE = /^\[(ti|ar|al|by|offset|length|re|ve):/i
-const LRC_TIME_TAG_RE = /^\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]/
-
-function parseLrcPreview(content: string): ImportPreviewResult {
-  const rawLines = content
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean)
-  const sample: PreviewEntry[] = []
-  let lineCount = 0
-  let warningCount = 0
-
-  for (const raw of rawLines) {
+function parseLrcDraft(content: string): ImportDraft {
+  const lines: ScriptLine[] = []
+  let unrecognized = 0
+  for (const raw of nonEmptyLines(content)) {
     if (META_TAG_RE.test(raw)) continue
     let rest = raw
-    const times: string[] = []
+    let stamps = 0
     let m = LRC_TIME_TAG_RE.exec(rest)
     while (m) {
-      times.push(`${m[1]}:${m[2]}`)
+      stamps += 1
       rest = rest.slice(m[0].length)
       m = LRC_TIME_TAG_RE.exec(rest)
     }
-    if (times.length === 0) {
-      warningCount += 1
+    if (stamps === 0) {
+      unrecognized += 1
       continue
     }
-    lineCount += times.length
-    if (sample.length < SAMPLE_LIMIT) sample.push({ time: times[0], text: rest.trim() || '（空行）' })
+    // 一行挂多个时间戳（重复副歌）时它会在成片里出现多次，草稿也照实展开
+    for (let k = 0; k < stamps; k++) lines.push(draftLine(`d${lines.length}`, [rest.trim()], 'provider'))
   }
-  return { lineCount, warningCount, sample, hasKanaTrack: false }
+  return { lines, unrecognized, hasKanaTrack: false }
 }
 
-// QRC 行形如 [起始ms,时长ms]字(起始ms,时长ms)字(起始ms,时长ms)…
-const QRC_LINE_RE = /^\[(\d+),(\d+)\](.*)$/
-const QRC_CHAR_TAG_RE = /\(\d+,\d+\)/g
+function parseQrcDraft(content: string): ImportDraft {
+  const inner = QRC_CONTENT_RE.exec(content)
+  const body = inner
+    ? inner[1].replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&')
+    : content
 
-function parseQrcPreview(content: string): ImportPreviewResult {
-  const rawLines = content
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean)
-  const sample: PreviewEntry[] = []
-  let lineCount = 0
-  let warningCount = 0
+  const lines: ScriptLine[] = []
+  let unrecognized = 0
   let hasKanaTrack = false
 
-  for (const raw of rawLines) {
-    if (META_TAG_RE.test(raw)) continue
+  for (const raw of nonEmptyLines(body)) {
     if (/^\[kana:/i.test(raw)) {
       hasKanaTrack = true
       continue
     }
+    if (META_TAG_RE.test(raw)) continue
     const m = QRC_LINE_RE.exec(raw)
     if (!m) {
-      warningCount += 1
+      unrecognized += 1
       continue
     }
-    const [, startMs, , rest] = m
-    const text = rest.replace(QRC_CHAR_TAG_RE, '').trim()
-    lineCount += 1
-    if (sample.length < SAMPLE_LIMIT) {
-      sample.push({ time: formatMsAsMinSec(Number(startMs)), text: text || '（空行）' })
+    const tokens: string[] = []
+    QRC_TOKEN_RE.lastIndex = 0
+    let tk = QRC_TOKEN_RE.exec(m[3])
+    while (tk) {
+      if (tk[1]) tokens.push(tk[1])
+      tk = QRC_TOKEN_RE.exec(m[3])
     }
+    lines.push(draftLine(`d${lines.length}`, tokens.length ? tokens : [m[3]], 'provider'))
   }
-  return { lineCount, warningCount, sample, hasKanaTrack }
+  return { lines, unrecognized, hasKanaTrack }
 }
 
-function formatMsAsMinSec(ms: number): string {
-  const totalSec = Math.round(ms / 1000)
-  return `${Math.floor(totalSec / 60)}:${String(totalSec % 60).padStart(2, '0')}`
-}
-
-function parsePreview(kind: ImportKind, content: string): ImportPreviewResult | null {
-  if (!content.trim()) return null
-  if (kind === 'text') return parseTextPreview(content)
-  if (kind === 'lrc') return parseLrcPreview(content)
-  return parseQrcPreview(content)
+export function parseImportDraft(kind: ImportKind, content: string): ImportDraft {
+  if (!content.trim()) return EMPTY_DRAFT
+  if (kind === 'text') return parseTextDraft(content)
+  if (kind === 'lrc') return parseLrcDraft(content)
+  return parseQrcDraft(content)
 }
 
 function detectKindFromFilename(name: string): ImportKind | null {
@@ -146,34 +147,41 @@ function detectKindFromFilename(name: string): ImportKind | null {
   return null
 }
 
-export default function LyricImport() {
-  const project = useProject((s) => s.project)
+export interface LyricImportProps {
+  kind: ImportKind
+  onKind: (kind: ImportKind) => void
+  content: string
+  onContent: (content: string) => void
+  /** 替换现有歌词还是追加 */
+  replace: boolean
+  onReplace: (replace: boolean) => void
+  disabled?: boolean
+}
 
-  const [kind, setKind] = useState<ImportKind>('text')
-  const [content, setContent] = useState('')
-  const [replace, setReplace] = useState(true)
+export default function LyricImport({
+  kind,
+  onKind,
+  content,
+  onContent,
+  replace,
+  onReplace,
+  disabled = false,
+}: LyricImportProps) {
   const [fileName, setFileName] = useState<string | null>(null)
   const [fileError, setFileError] = useState<string | null>(null)
   const [dragActive, setDragActive] = useState(false)
-
-  const [importing, setImporting] = useState(false)
-  const [importError, setImportError] = useState<string | null>(null)
-  const [importedSummary, setImportedSummary] = useState<string | null>(null)
-
   const fileInputRef = useRef<HTMLInputElement>(null)
-
-  const preview = useMemo(() => parsePreview(kind, content), [kind, content])
 
   function loadFile(file: File) {
     setFileError(null)
     const detected = detectKindFromFilename(file.name)
     const reader = new FileReader()
     reader.onload = () => {
-      setContent(typeof reader.result === 'string' ? reader.result : '')
+      onContent(typeof reader.result === 'string' ? reader.result : '')
       setFileName(file.name)
-      if (detected) setKind(detected)
+      if (detected) onKind(detected)
     }
-    reader.onerror = () => setFileError('文件读取失败，请重试，或直接把内容粘贴进文本框')
+    reader.onerror = () => setFileError(t('lyrics.fileFailed'))
     reader.readAsText(file)
   }
 
@@ -190,65 +198,41 @@ export default function LyricImport() {
     e.target.value = ''
   }
 
-  async function handlePasteFromClipboard() {
+  async function handlePaste() {
     try {
       const text = await navigator.clipboard.readText()
       if (text) {
-        setContent(text)
+        onContent(text)
         setFileName(null)
       }
     } catch {
-      setFileError('无法读取剪贴板（浏览器权限限制），请在文本框内直接 Ctrl+V 粘贴')
-    }
-  }
-
-  async function handleImport() {
-    if (!project) return
-    if (!content.trim()) return
-    setImporting(true)
-    setImportError(null)
-    setImportedSummary(null)
-    try {
-      const updated = await importLyrics(project.id, kind, content, replace)
-      useProject.setState({ project: updated, error: null })
-      try {
-        const h = await fetchProjectHistory(updated.id)
-        useProject.setState({ canUndo: h.undo > 0, canRedo: h.redo > 0 })
-      } catch {
-        /* 历史状态刷新失败不影响已完成的导入操作 */
-      }
-      setImportedSummary(`导入成功，工程当前共 ${updated.lines.length} 行歌词。`)
-    } catch (e) {
-      setImportError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setImporting(false)
+      setFileError(t('lyrics.clipboardDenied'))
     }
   }
 
   return (
-    <div className="kvm-lyric-import">
-      {!project && (
-        <div className="kvm-lyric-hint">尚未加载工程——可以先粘贴/拖入歌词试看解析预览，创建或打开工程后才能正式导入。</div>
-      )}
-
-      <div className="kvm-lyric-radio-group" role="radiogroup" aria-label="导入格式">
-        {(Object.keys(KIND_LABELS) as ImportKind[]).map((k) => (
-          <label key={k} className={`kvm-lyric-radio ${kind === k ? 'kvm-lyric-radio--active' : ''}`}>
+    <div className="lyr-form">
+      <div className="lyr-seg" role="radiogroup" aria-label={t('lyrics.tabImport')}>
+        {IMPORT_KINDS.map((k) => (
+          <label
+            key={k.key}
+            className={`lyr-seg__item${kind === k.key ? ' lyr-seg__item--active' : ''}`}
+            title={t(k.title)}
+          >
             <input
               type="radio"
-              name="kvm-lyric-import-kind"
-              value={k}
-              checked={kind === k}
-              onChange={() => setKind(k)}
+              name="lyr-import-kind"
+              checked={kind === k.key}
+              disabled={disabled}
+              onChange={() => onKind(k.key)}
             />
-            {KIND_LABELS[k]}
+            {t(k.label)}
           </label>
         ))}
       </div>
-      <p className="kvm-lyric-hint">{KIND_HINTS[kind]}</p>
 
       <div
-        className={`kvm-lyric-dropzone ${dragActive ? 'kvm-lyric-dropzone--active' : ''}`}
+        className={`lyr-drop${dragActive ? ' lyr-drop--active' : ''}`}
         onDragOver={(e) => {
           e.preventDefault()
           setDragActive(true)
@@ -257,36 +241,40 @@ export default function LyricImport() {
         onDrop={handleDrop}
       >
         <textarea
-          className="kvm-lyric-textarea"
           value={content}
+          disabled={disabled}
+          placeholder={t('lyrics.contentPlaceholder')}
           onChange={(e) => {
-            setContent(e.target.value)
+            onContent(e.target.value)
             setFileName(null)
           }}
-          placeholder="把歌词文件拖拽到此处，或直接粘贴文本内容……"
-          rows={10}
         />
-        <div className="kvm-lyric-dropzone-actions">
-          <button type="button" className="kvm-lyric-btn kvm-lyric-btn--ghost" onClick={() => fileInputRef.current?.click()}>
-            选择文件…
+        <div className="lyr-row">
+          <button type="button" className="small ghost" disabled={disabled} onClick={() => fileInputRef.current?.click()}>
+            <FolderOpenOutlined /> {t('lyrics.chooseFile')}
           </button>
-          <button type="button" className="kvm-lyric-btn kvm-lyric-btn--ghost" onClick={() => void handlePasteFromClipboard()}>
-            从剪贴板粘贴
+          <button type="button" className="small ghost" disabled={disabled} onClick={() => void handlePaste()}>
+            <SnippetsOutlined /> {t('lyrics.pasteClipboard')}
           </button>
           {content && (
             <button
               type="button"
-              className="kvm-lyric-btn kvm-lyric-btn--ghost"
+              className="small ghost"
+              disabled={disabled}
               onClick={() => {
-                setContent('')
+                onContent('')
                 setFileName(null)
               }}
             >
-              清空
+              {t('lyrics.clear')}
             </button>
           )}
-          {fileName && <span className="kvm-lyric-filename">已加载：{fileName}</span>}
         </div>
+        {fileName && (
+          <span className="hint">
+            <FileTextOutlined /> {t('lyrics.loadedFile', { name: fileName })}
+          </span>
+        )}
         <input
           ref={fileInputRef}
           type="file"
@@ -295,59 +283,19 @@ export default function LyricImport() {
           onChange={handleFileInputChange}
         />
       </div>
-      {fileError && <div className="kvm-lyric-error">{fileError}</div>}
 
-      {preview && (
-        <div className="kvm-lyric-import-preview">
-          <div className="kvm-lyric-meta-row">
-            <strong>解析预览</strong>
-            <span>识别到 {preview.lineCount} 行</span>
-            {preview.warningCount > 0 && (
-              <span className="kvm-lyric-badge kvm-lyric-badge--warn">{preview.warningCount} 行无法识别</span>
-            )}
-            {preview.hasKanaTrack && <span className="kvm-lyric-badge kvm-lyric-badge--info">检测到 [kana:] 注音轨</span>}
-          </div>
-          <ol className="kvm-lyric-preview-lines">
-            {preview.sample.map((s, i) => (
-              <li key={i} className="kvm-lyric-preview-line">
-                {s.time && <span className="kvm-lyric-preview-time">{s.time}</span>}
-                <span className="kvm-lyric-preview-text">{s.text}</span>
-              </li>
-            ))}
-          </ol>
-          {preview.lineCount > preview.sample.length && (
-            <p className="kvm-lyric-hint">
-              仅预览前 {preview.sample.length} 行。此预览为前端简化解析，仅供参考行数与大致内容，正式导入以后端解析结果为准。
-            </p>
-          )}
-        </div>
-      )}
+      {fileError && <div className="error">{fileError}</div>}
 
-      <div className="kvm-lyric-radio-group" role="radiogroup" aria-label="导入方式">
-        <label className={`kvm-lyric-radio ${replace ? 'kvm-lyric-radio--active' : ''}`}>
-          <input type="radio" name="kvm-lyric-import-mode" checked={replace} onChange={() => setReplace(true)} />
-          替换现有歌词
+      <div className="lyr-seg" role="radiogroup" aria-label={t('lyrics.modeReplace')}>
+        <label className={`lyr-seg__item${replace ? ' lyr-seg__item--active' : ''}`}>
+          <input type="radio" name="lyr-import-mode" checked={replace} disabled={disabled} onChange={() => onReplace(true)} />
+          {t('lyrics.modeReplace')}
         </label>
-        <label className={`kvm-lyric-radio ${!replace ? 'kvm-lyric-radio--active' : ''}`}>
-          <input type="radio" name="kvm-lyric-import-mode" checked={!replace} onChange={() => setReplace(false)} />
-          追加到现有歌词
+        <label className={`lyr-seg__item${!replace ? ' lyr-seg__item--active' : ''}`}>
+          <input type="radio" name="lyr-import-mode" checked={!replace} disabled={disabled} onChange={() => onReplace(false)} />
+          {t('lyrics.modeAppend')}
         </label>
       </div>
-
-      <div className="kvm-lyric-actions">
-        <button
-          type="button"
-          className="kvm-lyric-btn kvm-lyric-btn--primary"
-          disabled={!project || !content.trim() || importing}
-          title={!project ? '尚未加载工程' : undefined}
-          onClick={() => void handleImport()}
-        >
-          {importing ? '导入中…' : '导入歌词'}
-        </button>
-      </div>
-
-      {importError && <div className="kvm-lyric-error">导入失败：{importError}</div>}
-      {importedSummary && <div className="kvm-lyric-success">{importedSummary}</div>}
     </div>
   )
 }

@@ -135,29 +135,33 @@ export default function App() {
     }
   }
 
-  /** 舞台形态由步骤全权决定：分几栏、要不要播放器、要不要波形，都在这里分派 */
+  /**
+   * 舞台形态由步骤全权决定：分几栏、要不要播放器、要不要波形，都在这里分派。
+   *
+   * **舞台一律铺满宽度，不要再套 `stage__center` 那类限宽容器。**
+   * 这次重排的核心原则就是"中间舞台拿到全部横向空间"，而每个舞台内部都是
+   * 左操作 + 右大预览/列表的两栏结构——限宽 960px 会直接压死右侧那块大预览，
+   * 逼得各舞台自己在组件 CSS 里用 `:has()` 把限宽解除，等于绕开外壳打补丁。
+   * 需要限宽的是**单栏长文**，本应用没有这样的舞台。
+   */
   const renderStage = () => {
     switch (step) {
       case 'media':
         return (
           <main className="stage stage--scroll">
-            <div className="stage__center">
-              {/* 下载与分离合并为"素材"一步：二者都是把素材准备好，且分离依赖已有音频 */}
-              <MediaPanel
-                downloadJobId={downloadJobId}
-                onDownloadStart={setDownloadJobId}
-                separateJobId={separateJobId}
-                onSeparateStart={setSeparateJobId}
-              />
-            </div>
+            {/* 下载与分离合并为"素材"一步：二者都是把素材准备好，且分离依赖已有音频 */}
+            <MediaPanel
+              downloadJobId={downloadJobId}
+              onDownloadStart={setDownloadJobId}
+              separateJobId={separateJobId}
+              onSeparateStart={setSeparateJobId}
+            />
           </main>
         )
       case 'lyrics':
         return (
           <main className="stage stage--scroll">
-            <div className="stage__center">
-              <LyricPanel />
-            </div>
+            <LyricPanel />
           </main>
         )
       // 只有这一步挂 Preview——"预览 + 时间轴"是对轴的舞台形态，不是全局外壳
@@ -178,17 +182,13 @@ export default function App() {
       case 'style':
         return (
           <main className="stage stage--scroll">
-            <div className="stage__center">
-              <StylePanel />
-            </div>
+            <StylePanel />
           </main>
         )
       case 'export':
         return (
           <main className="stage stage--scroll">
-            <div className="stage__center">
-              <ExportPanel exportJobId={exportJobId} onExportStart={setExportJobId} exportResult={exportResult} />
-            </div>
+            <ExportPanel exportJobId={exportJobId} onExportStart={setExportJobId} exportResult={exportResult} />
           </main>
         )
     }

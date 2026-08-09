@@ -1,16 +1,18 @@
 /**
- * 歌词搜索候选列表。
+ * 歌词候选列表（左侧窄列）。
  *
- * 只负责展示与交互回调，不直接调用 API——预览/应用的网络请求与状态
- * 都由 LyricPanel 统一持有，方便切换搜索关键词时整体清空过期状态。
+ * 只负责"快速扫视 + 选中"：每条给出来源、粒度、注音、时长、歌手，够用来排除
+ * 明显不对的版本；真正判断内容对不对靠中间那块成片样式的大预览。
+ * 因此这里**不再有逐条的预览/应用按钮**——选中即预览，使用在底部元信息栏，
+ * 同一个动作只在一处出现。
  *
- * 展示重点见 CLAUDE.md §5.2 / §2.5：granularity（决定还要不要手工打轴）、
- * has_ruby（日语曲的关键指标）、duration_ms（识别错配版本）、
- * provider / 歌手 / 专辑（区分原唱与翻唱）都必须显眼可见，
- * 且"系统只排序、不替用户裁决"——始终把候选摆出来，不自动选中。
+ * CLAUDE.md §5.2：Resolver 只排序、不裁决。列表严格按后端给的顺序展示，
+ * 前端不做二次排序，也不标"推荐"——排序本身已经表达了打分结果，再加一个
+ * 徽章就变成系统替用户下结论。
  */
 
-import type { LyricCandidate, LyricPreview } from '../api/types'
+import type { LyricCandidate } from '../api/types'
+import { t } from '../i18n'
 
 /** 候选项的稳定 key：不同 provider 的 song_id 可能重复，必须带 provider 前缀。 */
 export function candidateKey(candidate: LyricCandidate): string {
@@ -20,216 +22,110 @@ export function candidateKey(candidate: LyricCandidate): string {
 const PROVIDER_LABELS: Record<string, string> = {
   qq: 'QQ音乐',
   qqmusic: 'QQ音乐',
-  kugou: '酷狗音乐',
-  krc: '酷狗音乐',
-  netease: '网易云音乐',
-  ncm: '网易云音乐',
-  youtube: 'YouTube官方字幕',
-  yt: 'YouTube官方字幕',
+  kugou: '酷狗',
+  krc: '酷狗',
+  netease: '网易云',
+  ncm: '网易云',
+  youtube: 'YouTube 字幕',
+  yt: 'YouTube 字幕',
   lrclib: 'LRCLIB',
   utaten: 'UtaTen',
-  manual: '手工粘贴',
+  manual: '手工',
 }
 
 export function providerLabel(provider: string): string {
   return PROVIDER_LABELS[provider.toLowerCase()] ?? provider
 }
 
-const GRANULARITY_META: Record<LyricCandidate['granularity'], { label: string; tone: string; hint: string }> = {
-  word: { label: '逐字', tone: 'good', hint: '已有逐字时间轴，套用后基本不用再手工打轴' },
-  line: { label: '句级', tone: 'mid', hint: '只有整句时间，单词/音节仍需手工细化' },
-  plain: { label: '纯文本', tone: 'bad', hint: '完全没有时间轴，需要从零 tap-to-time 打轴' },
+/**
+ * 粒度徽章。颜色沿用来源语义色（CLAUDE.md §7.4）：逐字轴是歌词源实测的时间，
+ * 句级轴导入后行内只能靠插值，纯文本干脆没有时间。
+ */
+export const GRANULARITY_TAG: Record<LyricCandidate['granularity'], { key: string; tone: string }> = {
+  word: { key: 'lyrics.granWord', tone: 'provider' },
+  line: { key: 'lyrics.granLine', tone: 'interp' },
+  plain: { key: 'lyrics.granPlain', tone: 'none' },
 }
 
-/** 与视频时长比对超过这个阈值就提示"可能是错配版本"，与后端 Resolver 打分阈值保持一致（CLAUDE.md §5.2）。 */
+/**
+ * 预览接口的 `granularity` 是自由字符串（后端枚举的值），来源不受前端类型约束。
+ * 认不出来时返回 null 而不是硬转类型——错的徽章比没有徽章更容易误导。
+ */
+export function normalizeGranularity(g: string): LyricCandidate['granularity'] | null {
+  return g === 'word' || g === 'line' || g === 'plain' ? g : null
+}
+
+/** 与视频时长差超过这个值就提示可能是错配版本，与后端 Resolver 的阈值一致（CLAUDE.md §5.2）。 */
 const DURATION_MISMATCH_THRESHOLD_MS = 3000
 
 export function formatDuration(ms: number): string {
   if (!ms || ms <= 0) return '--:--'
   const totalSec = Math.round(ms / 1000)
-  const m = Math.floor(totalSec / 60)
-  const s = totalSec % 60
-  return `${m}:${String(s).padStart(2, '0')}`
+  return `${Math.floor(totalSec / 60)}:${String(totalSec % 60).padStart(2, '0')}`
 }
 
-function lineTimeRange(line: LyricPreview['lines'][number]): string {
-  if (!line.tokens.length) return ''
-  const first = line.tokens[0]
-  const last = line.tokens[line.tokens.length - 1]
-  return `${formatDuration(first.start_ms)}–${formatDuration(last.start_ms + last.dur_ms)}`
+/** 候选时长与视频时长之差（毫秒）。任一方未知时返回 null，而不是误报不符。 */
+export function durationDiffMs(candidateMs: number, videoMs: number): number | null {
+  if (videoMs <= 0 || candidateMs <= 0) return null
+  return candidateMs - videoMs
 }
+
+export const isDurationMismatch = (diffMs: number | null): boolean =>
+  diffMs !== null && Math.abs(diffMs) > DURATION_MISMATCH_THRESHOLD_MS
 
 export interface LyricCandidateListProps {
   candidates: LyricCandidate[]
-  /** 视频时长（毫秒）。0 或缺失表示未知，跳过时长比对而不是误报不符。 */
+  /** 视频时长（毫秒）。0 表示未知，跳过时长比对 */
   videoDurationMs: number
-  /** 是否已加载工程——没有工程时只能预览，不能应用。 */
-  canApply: boolean
-  expandedKey: string | null
-  previewLoadingKey: string | null
-  previewErrors: Record<string, string>
-  previews: Record<string, LyricPreview>
-  applyingKey: string | null
-  appliedKey: string | null
-  applyErrors: Record<string, string>
-  onTogglePreview: (candidate: LyricCandidate) => void
-  onApply: (candidate: LyricCandidate) => void
+  selectedKey: string | null
+  onSelect: (candidate: LyricCandidate) => void
 }
 
-const PREVIEW_LINE_LIMIT = 30
-
-export default function LyricCandidateList(props: LyricCandidateListProps) {
-  const {
-    candidates,
-    videoDurationMs,
-    canApply,
-    expandedKey,
-    previewLoadingKey,
-    previewErrors,
-    previews,
-    applyingKey,
-    appliedKey,
-    applyErrors,
-    onTogglePreview,
-    onApply,
-  } = props
-
+export default function LyricCandidateList({
+  candidates,
+  videoDurationMs,
+  selectedKey,
+  onSelect,
+}: LyricCandidateListProps) {
   if (candidates.length === 0) {
-    return (
-      <div className="kvm-lyric-empty">
-        没有找到候选结果。冷门曲、同人曲在任何歌词库都可能查不到——
-        换个写法（日文原名 / 罗马字 / 中文译名）再搜，或切到“手工导入”标签直接粘贴歌词继续下一步。
-      </div>
-    )
+    return <div className="lyr-note">{t('lyrics.noCandidates')}</div>
   }
 
   return (
-    <ul className="kvm-lyric-list">
-      {candidates.map((candidate, index) => {
-        const key = candidateKey(candidate)
-        const gran = GRANULARITY_META[candidate.granularity]
-        const expanded = expandedKey === key
-        const previewLoading = previewLoadingKey === key
-        const previewErr = previewErrors[key]
-        const preview = previews[key]
-        const applying = applyingKey === key
-        const applied = appliedKey === key
-        const applyErr = applyErrors[key]
-        const hasPreviewed = Boolean(preview)
-
-        const durDiffMs =
-          videoDurationMs > 0 && candidate.duration_ms > 0 ? candidate.duration_ms - videoDurationMs : null
-        const durMismatch = durDiffMs !== null && Math.abs(durDiffMs) > DURATION_MISMATCH_THRESHOLD_MS
-
-        let applyTitle: string | undefined
-        if (!canApply) applyTitle = '尚未加载工程，无法应用'
-        else if (!hasPreviewed) applyTitle = '请先预览确认内容再应用'
-
+    <div className="lyr-cands">
+      {candidates.map((c) => {
+        const key = candidateKey(c)
+        const gran = GRANULARITY_TAG[c.granularity]
+        const diff = durationDiffMs(c.duration_ms, videoDurationMs)
+        const mismatch = isDurationMismatch(diff)
         return (
-          <li key={key} className="kvm-lyric-candidate">
-            <div className="kvm-lyric-candidate-header">
-              {index === 0 && <span className="kvm-lyric-rank-pill">推荐</span>}
-              <span className={`kvm-lyric-badge kvm-lyric-badge--${gran.tone}`} title={gran.hint}>
-                {gran.label}
-              </span>
-              {candidate.has_ruby && (
-                <span
-                  className="kvm-lyric-badge kvm-lyric-badge--info"
-                  title="自带假名读音轨（[kana:] 等），注音编辑能省不少事"
-                >
-                  含假名注音
+          <button
+            key={key}
+            type="button"
+            className={`lyr-cand${selectedKey === key ? ' lyr-cand--active' : ''}`}
+            aria-pressed={selectedKey === key}
+            onClick={() => onSelect(c)}
+          >
+            <span className="lyr-cand__top">
+              <span className="lyr-cand__title">{c.title || providerLabel(c.provider)}</span>
+              <span className="lyr-cand__dur num">{formatDuration(c.duration_ms)}</span>
+            </span>
+            <span className="lyr-cand__sub">
+              {[providerLabel(c.provider), c.artist, c.album].filter(Boolean).join(' · ')}
+            </span>
+            <span className="lyr-cand__tags">
+              <span className={`badge lyr-tag--${gran.tone}`}>{t(gran.key)}</span>
+              {c.has_ruby && <span className="badge lyr-tag--provider">{t('lyrics.hasRuby')}</span>}
+              {c.has_translation && <span className="badge">{t('lyrics.hasTranslation')}</span>}
+              {mismatch && diff !== null && (
+                <span className="badge lyr-tag--warn" title={t('lyrics.durationDiffTitle')}>
+                  {t('lyrics.durationDiff', { n: `${diff > 0 ? '+' : ''}${Math.round(diff / 1000)}` })}
                 </span>
               )}
-              {candidate.has_translation && <span className="kvm-lyric-badge kvm-lyric-badge--muted">含译文</span>}
-              <span className="kvm-lyric-duration">
-                {formatDuration(candidate.duration_ms)}
-                {durMismatch && durDiffMs !== null && (
-                  <span
-                    className="kvm-lyric-badge kvm-lyric-badge--warn"
-                    title="与视频时长差异较大，可能是 live / remix 等错配版本"
-                  >
-                    {durDiffMs > 0 ? '+' : ''}
-                    {Math.round(durDiffMs / 1000)}s 与视频不符
-                  </span>
-                )}
-              </span>
-            </div>
-
-            <div className="kvm-lyric-candidate-main">
-              <div className="kvm-lyric-title-line">
-                <strong>{candidate.title || '（无标题）'}</strong>
-                <span className="kvm-lyric-provider">{providerLabel(candidate.provider)}</span>
-              </div>
-              <div className="kvm-lyric-meta-row">
-                {candidate.artist && <span>歌手：{candidate.artist}</span>}
-                {candidate.album && <span>专辑：{candidate.album}</span>}
-              </div>
-              {candidate.note && <div className="kvm-lyric-note">{candidate.note}</div>}
-            </div>
-
-            <div className="kvm-lyric-actions">
-              <button type="button" className="kvm-lyric-btn kvm-lyric-btn--ghost" onClick={() => onTogglePreview(candidate)}>
-                {expanded ? '收起预览' : '预览内容'}
-              </button>
-              <button
-                type="button"
-                className="kvm-lyric-btn kvm-lyric-btn--primary"
-                disabled={!hasPreviewed || applying || !canApply}
-                title={applyTitle}
-                onClick={() => onApply(candidate)}
-              >
-                {applying ? '应用中…' : applied ? '已应用 ✓' : '应用到工程'}
-              </button>
-            </div>
-            {applyErr && <div className="kvm-lyric-error">应用失败：{applyErr}</div>}
-
-            {expanded && (
-              <div className="kvm-lyric-preview-panel">
-                {previewLoading && <div className="kvm-lyric-loading">加载预览中…</div>}
-                {previewErr && <div className="kvm-lyric-error">预览失败：{previewErr}</div>}
-                {preview && (
-                  <>
-                    <div className="kvm-lyric-meta-row">
-                      <span>粒度：{preview.granularity}</span>
-                      <span>{preview.has_ruby ? '含假名注音轨' : '无假名注音轨'}</span>
-                      <span>共 {preview.lines.length} 行</span>
-                    </div>
-                    <ol className="kvm-lyric-preview-lines">
-                      {preview.lines.slice(0, PREVIEW_LINE_LIMIT).map((line) => (
-                        <li key={line.id} className="kvm-lyric-preview-line">
-                          <span className="kvm-lyric-preview-time">{lineTimeRange(line) || '--:--'}</span>
-                          {line.is_metadata && (
-                            <span
-                              className="kvm-lyric-badge kvm-lyric-badge--muted"
-                              title="疑似制作名单（词/曲/编曲等），源站常把这几行塞进正文"
-                            >
-                              名单?
-                            </span>
-                          )}
-                          <span className="kvm-lyric-preview-text">
-                            {line.tokens.map((t) => t.text).join('') || '（空行）'}
-                          </span>
-                        </li>
-                      ))}
-                      {preview.lines.length > PREVIEW_LINE_LIMIT && (
-                        <li className="kvm-lyric-preview-line kvm-lyric-preview-more">
-                          ……共 {preview.lines.length} 行，仅预览前 {PREVIEW_LINE_LIMIT} 行
-                        </li>
-                      )}
-                    </ol>
-                    {preview.raw_excerpt && (
-                      <details className="kvm-lyric-raw">
-                        <summary>查看源站原始文本片段</summary>
-                        <pre>{preview.raw_excerpt}</pre>
-                      </details>
-                    )}
-                  </>
-                )}
-              </div>
-            )}
-          </li>
+            </span>
+          </button>
         )
       })}
-    </ul>
+    </div>
   )
 }
