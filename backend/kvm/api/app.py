@@ -10,6 +10,12 @@
 
 后端提供的媒体资源要带 `Cross-Origin-Resource-Policy: cross-origin`，
 否则在隔离页面里会被拒绝加载。
+
+COEP 用标准值 `require-corp`（契约 §5.9 表格里写的就是它），不用 Chromium 私有的
+`credentialless`：WebKit 不实现后者，Safari 上会导致 `crossOriginIsolated` 恒为
+false、SharedArrayBuffer 不可用，JASSUB 被迫退回单线程。本服务的每个响应都由下面
+的中间件补上 CORP，前端又只经 Vite 代理同源访问，因此 require-corp 的严格性不带来
+额外代价。
 """
 
 from __future__ import annotations
@@ -57,7 +63,7 @@ async def cross_origin_isolation(
     """让 JASSUB 能用 SharedArrayBuffer，同时允许跨源加载媒体资源。"""
     resp = await call_next(request)
     resp.headers["Cross-Origin-Opener-Policy"] = "same-origin"
-    resp.headers["Cross-Origin-Embedder-Policy"] = "credentialless"
+    resp.headers["Cross-Origin-Embedder-Policy"] = "require-corp"
     resp.headers.setdefault("Cross-Origin-Resource-Policy", "cross-origin")
     return resp
 

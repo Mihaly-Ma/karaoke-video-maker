@@ -20,6 +20,22 @@
  *
  * 曾经波形层自带一份 wavesurfer 时钟并把 `timeupdate` 写回 store，
  * 于是两个时钟互相追时间 —— 表现为播放头抖动和大量多余 seek。**不要再开第二个时钟。**
+ *
+ * ## 视频轨是可选的从动方，不是播放的前提
+ *
+ * 声音、播放头、字幕时间全部来自 AudioContext 主时钟，`<video>` 只贡献画面。
+ * 因此**没有视频、或视频这个浏览器解不了，都不该让播放失败**：
+ *
+ * - 工程只导入了音轨（"先只有音轨、边听边打轴"是本工具最常见的起点，§2.5）时，
+ *   根本不渲染 `<video>`，播放头改由 rAF 直读音频引擎推进；
+ * - 视频存在但浏览器放不了时同样降级为纯音频。实测：yt-dlp 下下来的 `.mkv`
+ *   在 WebKit 里没有解复用器，`<video>` 报 `MEDIA_ERR_SRC_NOT_SUPPORTED`、
+ *   `play()` 抛 `NotSupportedError: The operation is not supported.`
+ *   （Chromium 能放，所以这条路径只有 Safari 会走到）。
+ *
+ * 这条降级的实现要点是**先起音频、再起视频，且视频单独 try/catch**：
+ * 早先两者写在同一个 try 里，视频一抛异常就把整段 catch 走掉、顺手
+ * `setPlaying(false)`，结果声音刚起来又被立刻掐掉，用户看到的就是"完全不能播"。
  */
 
 import {
@@ -333,6 +349,11 @@ export function Preview({ className }: PreviewProps) {
   const [audioState, setAudioState] = useState<AudioState>('loading')
   const [instrumentalReady, setInstrumentalReady] = useState(false)
   const [rvfcMissing, setRvfcMissing] = useState(false)
+  /**
+   * 工程里有视频，但这个浏览器放不了它（容器/编码不支持）。
+   * 置位后一切与 `<video>` 相关的路径都停掉，只留音频，画面位置改显提示。
+   */
+  const [videoUnplayable, setVideoUnplayable] = useState(false)
 
   const envIssues = useMemo(() => checkPreviewEnvironment(), [])
   const fatal = envIssues.filter((i) => i.level === 'fatal')
@@ -341,9 +362,45 @@ export function Preview({ className }: PreviewProps) {
   const projectId = project?.id ?? null
   const durationMs = project?.duration_ms ?? 0
   const hasVideo = !!project?.video_path
+  const videoPath = project?.video_path ?? null
   const fontName = project?.style.font_name ?? ''
   const audioPath = project?.audio_path ?? null
   const instrumentalPath = project?.instrumental_path ?? null
+
+  /**
+   * 视频画面这条路是否还走得通。**播放的前提只有音频**，这个值只决定
+   * 「要不要驱动 `<video>`、要不要挂字幕层」，不参与播放能否开始的判断。
+   */
+  const videoActive = hasVideo && !videoUnplayable
+
+  /**
+   * `videoUnplayable` 的 ref 镜像。命令式路径（seek / play）要读它，
+   * 但它们不该因为这个值变化而重挂 —— 播放中途才发现视频放不了时，
+   * 重挂播放 effect 会让音频从头 `start()` 一次，听感上就是"咔"一下。
+   */
+  const videoUnplayableRef = useRef(false)
+
+  const markVideoUnplayable = useCallback(() => {
+    videoUnplayableRef.current = true
+    setVideoUnplayable(true)
+  }, [])
+
+  /** 换了工程或换了视频文件，之前那次「放不了」的结论就作废，重新给它一次机会 */
+  useEffect(() => {
+    videoUnplayableRef.current = false
+    setVideoUnplayable(false)
+  }, [projectId, videoPath])
+
+  /**
+   * 取当前真正能用的 `<video>`。没有视频的工程根本不渲染这个元素，所以 ref 为空
+   * 就已经代表"纯音频工程"。除此之外还要现场看一眼 `video.error`：媒体元素报错是
+   * 异步事件，可能比某次命令式调用晚一步到，只靠 state 会有一帧的空窗。
+   */
+  const usableVideo = useCallback((): HTMLVideoElement | null => {
+    const video = videoRef.current
+    if (!video || videoUnplayableRef.current || video.error) return null
+    return video
+  }, [])
 
   // --- 音频：工程或音轨可用性变化时重建 ------------------------------------
 
@@ -407,14 +464,14 @@ export function Preview({ className }: PreviewProps) {
   useEffect(() => {
     const video = videoRef.current
     if (!video) return
-    video.muted = audioState !== 'fallback'
-  }, [audioState, hasVideo])
+    video.muted = !(videoActive && audioState === 'fallback')
+  }, [audioState, videoActive])
 
   // --- 字幕层：工程 / 视频 / 字体变化时重建 ---------------------------------
 
   useEffect(() => {
     const video = videoRef.current
-    if (!video || !projectId || !hasVideo || blocked) return
+    if (!video || !projectId || !videoActive || blocked) return
 
     let disposed = false
     let created: SubtitleOverlay | null = null
@@ -443,9 +500,12 @@ export function Preview({ className }: PreviewProps) {
     return () => {
       disposed = true
       overlayRef.current = null
+      // 视频中途被判定为放不了时这个 effect 会被拆掉，而上面的 finally 因为
+      // disposed 不再复位 loading —— 不在这里清掉，「字幕渲染器加载中…」会一直挂着
+      setOverlayLoading(false)
       void created?.destroy()
     }
-  }, [projectId, hasVideo, fontName, blocked])
+  }, [projectId, videoActive, fontName, blocked])
 
   // --- ASS 刷新：工程一变就重新拉 -------------------------------------------
 
@@ -499,7 +559,7 @@ export function Preview({ className }: PreviewProps) {
 
   useEffect(() => {
     const video = videoRef.current
-    if (!video || !hasVideo) return
+    if (!video || !videoActive) return
     setRvfcMissing(!hasFrameCallback(video))
 
     return requestFrameLoop(video, (meta: FrameMeta) => {
@@ -528,15 +588,16 @@ export function Preview({ className }: PreviewProps) {
         video.playbackRate = base
       }
     })
-  }, [emitPlayhead, hasVideo])
+  }, [emitPlayhead, videoActive])
 
   /**
-   * 没有视频时的时钟：rVFC 依附于 <video>，纯音频工程里它一帧都不会触发。
-   * 此时直接读音频引擎（主时钟本来就是它），否则播放头会一动不动 ——
+   * 没有可用视频时的时钟：rVFC 依附于 <video>，纯音频工程（以及视频放不了、
+   * 已降级为纯音频的工程）里它一帧都不会触发。此时直接读音频引擎
+   * （主时钟本来就是它），否则播放头会一动不动 ——
    * 「先只有音轨、边听边打轴」正是本工具最常见的起点（CLAUDE.md §2.5）。
    */
   useEffect(() => {
-    if (hasVideo || !playing) return
+    if (videoActive || !playing) return
     let raf = 0
     const tick = (): void => {
       const engine = audioRef.current
@@ -554,21 +615,24 @@ export function Preview({ className }: PreviewProps) {
     }
     raf = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(raf)
-  }, [emitPlayhead, hasVideo, playing, setPlaying])
+  }, [emitPlayhead, videoActive, playing, setPlaying])
 
   // --- 播放位置：store → 播放器（时间轴 / 注音编辑器发来的跳转意图） ----------
 
-  const seekTo = useCallback((ms: number) => {
-    const sec = Math.max(0, ms / 1000)
-    const video = videoRef.current
-    if (video) video.currentTime = sec
-    audioRef.current?.seek(sec)
-    if (seekBarRef.current) seekBarRef.current.value = String(ms)
-    if (clockRef.current) clockRef.current.textContent = formatTime(ms)
-    // 暂停时 seek，浏览器仍会呈现新帧并触发 rVFC，JASSUB 自会重绘；
-    // 没有视频画面时补一次，避免字幕停在旧位置
-    if (!video || !video.videoWidth) void overlayRef.current?.repaint()
-  }, [])
+  const seekTo = useCallback(
+    (ms: number) => {
+      const sec = Math.max(0, ms / 1000)
+      const video = usableVideo()
+      if (video) video.currentTime = sec
+      audioRef.current?.seek(sec)
+      if (seekBarRef.current) seekBarRef.current.value = String(ms)
+      if (clockRef.current) clockRef.current.textContent = formatTime(ms)
+      // 暂停时 seek，浏览器仍会呈现新帧并触发 rVFC，JASSUB 自会重绘；
+      // 没有视频画面时补一次，避免字幕停在旧位置
+      if (!video || !video.videoWidth) void overlayRef.current?.repaint()
+    },
+    [usableVideo],
+  )
 
   /**
    * store 里的播放头只要不是本组件刚写进去的，就一律当成「别人请求跳到这里」。
@@ -586,29 +650,38 @@ export function Preview({ className }: PreviewProps) {
   // --- 播放 / 暂停 -----------------------------------------------------------
 
   useEffect(() => {
-    const video = videoRef.current
     const engine = audioRef.current
     if (!playing) {
-      video?.pause()
+      videoRef.current?.pause()
       engine?.pause()
       return
     }
     void (async () => {
       const at = useProject.getState().playheadMs / 1000
+
+      // 第一步：起音频。它是主时钟也是唯一声源，只有它失败才算「播不了」。
       try {
         await engine?.play(at)
-        if (video) {
-          video.currentTime = at
-          video.playbackRate = rateRef.current
-          await video.play()
-        }
         setPlaybackError(null)
       } catch (e) {
         setPlaying(false)
         setPlaybackError(`无法开始播放：${describeError(e)}`)
+        return
+      }
+
+      // 第二步：起画面。视频只是从动方，起不来就地降级为纯音频预览，
+      // **不许回头去动播放状态** —— 否则 WebKit 放不了 mkv 会把整段播放掐掉。
+      const video = usableVideo()
+      if (!video) return
+      try {
+        video.currentTime = at
+        video.playbackRate = rateRef.current
+        await video.play()
+      } catch {
+        markVideoUnplayable()
       }
     })()
-  }, [playing, setPlaying, audioState])
+  }, [playing, setPlaying, audioState, usableVideo, markVideoUnplayable])
 
   const onEnded = useCallback(() => setPlaying(false), [setPlaying])
 
@@ -664,13 +737,25 @@ export function Preview({ className }: PreviewProps) {
           },
         ]
       : []),
+    ...(videoUnplayable
+      ? [
+          {
+            level: 'warn' as const,
+            title: '这个浏览器放不了当前视频，已降级为纯音频预览',
+            detail:
+              '声音、播放头、打轴、导出都不受影响，只是看不到画面和叠在画面上的字幕。' +
+              '常见原因是视频用的容器/编码本浏览器不支持 —— 例如 yt-dlp 下载得到的 .mkv 在 Safari' +
+              '（WebKit）上没有解复用器。换用 Chrome / Edge 预览，或把视频转成 MP4（H.264 + AAC）后重新导入即可恢复画面。',
+          },
+        ]
+      : []),
   ]
 
   return (
     <div className={className} style={styles.root}>
       {/* JASSUB 会把它的 canvas 绝对定位插在 <video> 之后，所以这里必须 relative */}
       <div style={styles.stage}>
-        {hasVideo ? (
+        {hasVideo && (
           <video
             ref={videoRef}
             // 跨源隔离页面里不加 crossOrigin，带 CORP 头的媒体会加载失败；
@@ -681,17 +766,20 @@ export function Preview({ className }: PreviewProps) {
             preload="auto"
             src={api.mediaUrl(project.id, 'video')}
             onEnded={onEnded}
-            onError={() =>
-              setPlaybackError(
-                '视频加载失败。请确认媒体文件仍在，且后端为 /media 响应带上了 Cross-Origin-Resource-Policy 头。',
-              )
-            }
+            // 元素报错就地降级为纯音频，**不当致命错误**：声音、播放头、打轴、
+            // 导出全都不依赖这条视频轨（WebKit 放不了 .mkv 时走的正是这里）
+            onError={markVideoUnplayable}
             style={styles.video}
           />
-        ) : (
-          <div style={styles.noVideo}>还没有视频。下载或选择本地文件后即可预览。</div>
         )}
-        {overlayLoading && <div style={styles.badge}>字幕渲染器加载中…</div>}
+        {!videoActive && (
+          <div style={styles.noVideo}>
+            {hasVideo
+              ? '这个浏览器放不了当前视频，已降级为纯音频预览。'
+              : '还没有视频。下载或选择本地文件后即可预览。'}
+          </div>
+        )}
+        {overlayLoading && videoActive && <div style={styles.badge}>字幕渲染器加载中…</div>}
       </div>
 
       <div style={styles.controls}>
