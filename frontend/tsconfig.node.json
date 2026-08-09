@@ -6,6 +6,13 @@
     "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo",
     "outDir": "./node_modules/.tmp/node-build",
     "skipLibCheck": true,
+    // 不给 target 就默认 ES5 库，`Object.entries` / `Array.flat` 这类都不认。
+    // 这里编的是 vite.config.ts，只跑在本机 Node 上，没有任何降级到 ES5 的理由；
+    // 与 tsconfig.json 取同一档，免得"应用里能用的写法配置文件里报错"。
+    // 曾经漏掉它：`tsc -b` 报 TS2550 而 `tsc --noEmit`、`vite build`、eslint 全绿，
+    // 只有 `npm run build` 会红——因为只有它跑 `tsc -b`。
+    "target": "ES2022",
+    "lib": ["ES2022"],
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "allowSyntheticDefaultImports": true,
