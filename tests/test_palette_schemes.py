@@ -50,10 +50,25 @@ MIN_STATE_DISTANCE = 90.0
 """
 
 MIN_VARIANT_DISTANCE = 60.0
-"""同一家族内两个变体的已唱填充距离下限。
+"""同一家族内两个变体的**已唱**填充距离下限。
 
-家族里的变体是给对唱的两位歌手准备的：未唱色共享（开唱前看起来是同一首歌），
-已唱色必须分得开，否则分色白做。
+家族里的变体是给对唱的两位歌手准备的，已唱色必须分得开，否则分色白做。
+"""
+
+MIN_UNSUNG_DE = 25.0
+"""未唱态的感知色差下限（CIELAB ΔE76），家族之间与家族内变体之间都卡这条。
+
+25 大致是"扫一眼就说得出不一样"。上一版在这条上是 **0**：三个家族的底色同为纯白、
+同一家族内各变体的未唱色**完全相同**——所以这条判据能把上一版判红，不是摆设。
+"""
+
+MIN_OUTLINE_CHROMA = 18.0
+"""未唱描边的 CIELAB 色度下限。
+
+声部身份压在描边色相上，那描边就必须**真的看得出色相**。上一版的「深褐」`#2A1400`
+色度只有 16.4、L* 只有 8.9——暗到在描边宽度下与近黑分不出来，等于**假装有区别**。
+假装有区别比没有区别更糟：用户按说明选了一套，结果和上一套长得一样，
+会觉得整个功能不可信。
 """
 
 
@@ -92,9 +107,51 @@ def _distance(a: str, b: str) -> float:
     return ((ra - rb) ** 2 + (ga - gb) ** 2 + (ba - bb) ** 2) ** 0.5
 
 
+def _lab(color: str) -> tuple[float, float, float]:
+    """sRGB → CIELAB（D65）。感知色差要在这个空间里量，RGB 欧氏距离在暗部会骗人。"""
+    red, green, blue = (_srgb_to_linear(c) for c in _parse_ass(color))
+    x = 0.4124 * red + 0.3576 * green + 0.1805 * blue
+    y = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+    z = 0.0193 * red + 0.1192 * green + 0.9505 * blue
+
+    def f(t: float) -> float:
+        return t ** (1 / 3) if t > 0.008856 else 7.787 * t + 16 / 116
+
+    fx, fy, fz = f(x / 0.95047), f(y), f(z / 1.08883)
+    return 116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)
+
+
+def _delta_e(a: str, b: str) -> float:
+    la, aa, ba = _lab(a)
+    lb, ab, bb = _lab(b)
+    return ((la - lb) ** 2 + (aa - ab) ** 2 + (ba - bb) ** 2) ** 0.5
+
+
+def _chroma(color: str) -> float:
+    _l, a, b = _lab(color)
+    return (a * a + b * b) ** 0.5
+
+
 def _family(name: str) -> str:
     """方案名形如「家族 · 变体」，家族名就是分隔符左边那截。"""
     return name.split("·")[0].strip()
+
+
+def _by_family() -> dict[str, list]:
+    out: dict[str, list] = {}
+    for scheme in ops.builtin_palette_schemes():
+        out.setdefault(_family(scheme.name), []).append(scheme)
+    return out
+
+
+def _is_swap(colors) -> bool:
+    """已唱的填充/描边正好是未唱那两个色互换——对调机制在四个色上是可观察的，
+    不需要给模型加一个"机制"字段。"""
+    return colors.sung_fill == colors.unsung_outline and colors.sung_outline == colors.unsung_fill
+
+
+BLACK = "&H00000000&"
+WHITE = "&H00FFFFFF&"
 
 
 # ---- 内置方案的不变式 ----
@@ -161,6 +218,26 @@ def test_fill_outline_contrast_is_readable() -> None:
     assert not weak, "；".join(weak)
 
 
+def test_readable_on_any_backdrop() -> None:
+    """**任意底判据**：纯黑与纯白两个极端上，填充与描边至少有一个能跳出来。
+
+    卡拉OK 字幕压的是 MV 画面，底可能是任何亮度。判据写成"至少一个"而不是
+    "填充必须"，是因为对调机制下已唱填充是深色、靠翻上来的白描边保护——
+    按"填充必须"写会把一个本来完全可读的组合误杀。
+    """
+    weak: list[str] = []
+    for scheme in ops.builtin_palette_schemes():
+        for layer, fill, outline in (
+            ("未唱", scheme.colors.unsung_fill, scheme.colors.unsung_outline),
+            ("已唱", scheme.colors.sung_fill, scheme.colors.sung_outline),
+        ):
+            for backdrop, label in ((BLACK, "纯黑底"), (WHITE, "纯白底")):
+                best = max(_contrast(fill, backdrop), _contrast(outline, backdrop))
+                if best < MIN_CONTRAST:
+                    weak.append(f"{scheme.name}/{layer} 在{label}上只有 {best:.2f}")
+    assert not weak, "；".join(weak)
+
+
 def test_sung_differs_from_unsung() -> None:
     """扫色要看得出走到哪——未唱与已唱的填充色必须差得开。"""
     weak: list[str] = []
@@ -173,43 +250,114 @@ def test_sung_differs_from_unsung() -> None:
 
 def test_every_family_has_at_least_two_variants() -> None:
     """对唱要能在**同一家族**里取到两套。只有一个变体的家族给不了这个。"""
-    families: dict[str, list[str]] = {}
-    for scheme in ops.builtin_palette_schemes():
-        families.setdefault(_family(scheme.name), []).append(scheme.name)
-    thin = {k: v for k, v in families.items() if len(v) < 2}
+    thin = {k: [s.name for s in v] for k, v in _by_family().items() if len(v) < 2}
     assert not thin, f"这些家族凑不出对唱的一对：{thin}"
 
 
-def test_family_shares_unsung_colors() -> None:
-    """同一家族共享未唱色：开唱之前满屏应当看起来是同一首歌的歌词。"""
-    unsung: dict[str, set[tuple[str, str]]] = {}
+def test_family_shares_its_base_fill() -> None:
+    """同一家族共享未唱**填充**（底色）——它承载的是家族身份。
+
+    注意只共享填充。描边刻意分声部，见 `test_unsung_distinguishes_parts`。
+    """
+    for family, schemes in _by_family().items():
+        bases = {s.colors.unsung_fill for s in schemes}
+        assert len(bases) == 1, f"{family} 的底色不统一：{bases}"
+
+
+def test_unsung_distinguishes_parts() -> None:
+    """**未唱态必须能区分声部**（本表最高优先级的一条）。
+
+    对唱曲里演唱者需要在**轮到自己之前**就知道下一句归谁。整个产品为此花了大力气
+    ——提前入场 2.0s、段落首行提前 4.2s、引导点踩着真实拍点倒数——如果未唱态两个
+    声部长得一样，"这句是不是我的"要等扫色开始才知道，那时已经晚了。
+
+    上一版在这条上恒为 0（同族共享全部未唱色），所以这条判据能把上一版判红。
+    """
+    weak: list[str] = []
+    for family, schemes in _by_family().items():
+        for i, a in enumerate(schemes):
+            for b in schemes[i + 1 :]:
+                gap = _delta_e(a.colors.unsung_outline, b.colors.unsung_outline)
+                if gap < MIN_UNSUNG_DE:
+                    weak.append(f"{family}：{a.name} vs {b.name} 未唱 ΔE {gap:.1f}")
+    assert not weak, "；".join(weak)
+
+
+def test_unsung_outline_actually_shows_a_hue() -> None:
+    """声部身份压在描边色相上，那描边就必须真的看得出色相——不许假装。"""
+    weak: list[str] = []
     for scheme in ops.builtin_palette_schemes():
-        unsung.setdefault(_family(scheme.name), set()).add(
-            (scheme.colors.unsung_fill, scheme.colors.unsung_outline)
+        chroma = _chroma(scheme.colors.unsung_outline)
+        if chroma < MIN_OUTLINE_CHROMA:
+            weak.append(f"{scheme.name} 未唱描边色度 {chroma:.1f}")
+    assert not weak, "；".join(weak)
+
+
+def test_unsung_distinguishes_families() -> None:
+    """家族之间的未唱态也要分得开——底色承载家族身份。
+
+    上一版里「NicoKara」「高对比」「机型红白」三个家族的底色同为纯白、描边同为近黑，
+    未唱态**完全一样**，列表看起来品种很多、用起来没差别。
+    """
+    families = {k: v[0].colors.unsung_fill for k, v in _by_family().items()}
+    weak: list[str] = []
+    names = list(families)
+    for i, a in enumerate(names):
+        for b in names[i + 1 :]:
+            gap = _delta_e(families[a], families[b])
+            if gap < MIN_UNSUNG_DE:
+                weak.append(f"{a} vs {b} 底色 ΔE {gap:.1f}")
+    assert not weak, "；".join(weak)
+
+
+def test_at_least_one_family_uses_the_swap_mechanism() -> None:
+    """至少一个家族用**对调机制**：已唱的填充/描边正是未唱那两个色互换。
+
+    对调让声部色在未唱态就占着描边（唱之前看得见），开唱瞬间整体反转（变化最显眼），
+    而且两个状态的填充/描边对比度天然相同。上一版一条都没有，所以这条能把它判红。
+    """
+    swapped = [s.name for s in ops.builtin_palette_schemes() if _is_swap(s.colors)]
+    assert len(swapped) >= 2, f"用对调机制的方案只有 {swapped}"
+    # 机制要按家族统一：半个家族对调、半个不对调，用户没法预期点下去会发生什么
+    for family, schemes in _by_family().items():
+        flags = {_is_swap(s.colors) for s in schemes}
+        assert len(flags) == 1, f"{family} 家族内机制不统一"
+
+
+def test_swap_beats_shift_on_perceived_change() -> None:
+    """对调的未唱↔已唱感知差应当明显大于只翻填充——这是选它作主导机制的依据。
+
+    不是"应该更明显"，是量出来的：填充 ΔE + 描边 ΔE 合计，对调 153–193，
+    只翻填充 75–128。
+    """
+
+    def total_change(colors) -> float:
+        return _delta_e(colors.unsung_fill, colors.sung_fill) + _delta_e(
+            colors.unsung_outline, colors.sung_outline
         )
-    bad = {k: v for k, v in unsung.items() if len(v) != 1}
-    assert not bad, f"这些家族的未唱色不统一：{list(bad)}"
+
+    swap = [total_change(s.colors) for s in ops.builtin_palette_schemes() if _is_swap(s.colors)]
+    shift = [
+        total_change(s.colors) for s in ops.builtin_palette_schemes() if not _is_swap(s.colors)
+    ]
+    assert swap and shift, "两种机制都要有，才谈得上对比"
+    assert min(swap) > max(shift), f"对调最小 {min(swap):.0f} 未超过只翻填充最大 {max(shift):.0f}"
 
 
 def test_family_variants_are_distinguishable() -> None:
-    """家族内变体的已唱色要分得开，否则给两个声部各选一个也看不出区别。"""
-    by_family: dict[str, list[tuple[str, str]]] = {}
-    for scheme in ops.builtin_palette_schemes():
-        by_family.setdefault(_family(scheme.name), []).append(
-            (scheme.name, scheme.colors.sung_fill)
-        )
+    """家族内变体的已唱色也要分得开，否则给两个声部各选一个也看不出区别。"""
     weak: list[str] = []
-    for family, items in by_family.items():
-        for i, (name_a, fill_a) in enumerate(items):
-            for name_b, fill_b in items[i + 1 :]:
-                dist = _distance(fill_a, fill_b)
+    for family, schemes in _by_family().items():
+        for i, a in enumerate(schemes):
+            for b in schemes[i + 1 :]:
+                dist = _distance(a.colors.sung_fill, b.colors.sung_fill)
                 if dist < MIN_VARIANT_DISTANCE:
-                    weak.append(f"{family}：{name_a} vs {name_b} 距离 {dist:.0f}")
+                    weak.append(f"{family}：{a.name} vs {b.name} 距离 {dist:.0f}")
     assert not weak, "；".join(weak)
 
 
 def test_schemes_cover_both_polarities() -> None:
-    """必须同时存在"亮字压暗底"与"暗字压亮底"两类。
+    """必须同时存在「亮字压暗底」与「暗字压亮底」两类。
 
     白字在雪景 / 白背景 / 逆光这类亮画面上会整片消失，只给白字方案等于漏掉一整类画面。
     """
@@ -218,6 +366,35 @@ def test_schemes_cover_both_polarities() -> None:
         for scheme in ops.builtin_palette_schemes()
     }
     assert polarity == {True, False}
+
+
+# ---- 判据本身能不能判红（否则它证明不了任何事） ----
+
+
+def test_criteria_reject_the_previous_table() -> None:
+    """把**上一版真实用过的取值**钉在这里，逐条断言新判据确实拒绝它们。
+
+    本项目反复吃过"判据在坏的一侧也通过"的亏。改判据时若不小心放松了，这里先红。
+    """
+    # 家族底色：NicoKara / 高对比 / 机型红白 三家同为纯白
+    assert _delta_e("&H00FFFFFF&", "&H00FFFFFF&") < MIN_UNSUNG_DE
+
+    # 家族内变体：同族共享全部未唱色，描边 ΔE 恒为 0
+    assert _delta_e("&H00202020&", "&H00202020&") < MIN_UNSUNG_DE
+
+    # 名义上的「深褐」#2A1400（ASS 是 BGR 序，写作 &H0000142A&）：色相看不出来
+    assert _chroma("&H0000142A&") < MIN_OUTLINE_CHROMA
+    # 名义上的「墨蓝」#16223C：色度勉强过线，但 L* 只有 13.5，暗到与近黑分不开
+    assert _lab("&H003C2216&")[0] < 15
+
+    # 上一版一条对调机制都没有
+    class _Old:
+        unsung_fill = "&H00FFFFFF&"
+        unsung_outline = "&H00202020&"
+        sung_fill = "&H00FF9010&"
+        sung_outline = "&H00501800&"
+
+    assert not _is_swap(_Old())
 
 
 # ---- 方案库：保存 / 改名 / 删除 ----
