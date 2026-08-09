@@ -12,9 +12,13 @@ dist/
 .vite/
 
 # 应用私有依赖目录（§2.5：自动获取的 ffmpeg / 模型权重 / 字体一律装在这里）
-.kvm/
-models/
-bin/
+#
+# 这几条**必须锚定到仓库根**（前导 `/`）。曾经写成裸 `models/` 与 `bin/`，
+# gitignore 的裸目录名匹配**任意层级**，于是把 `backend/kvm/models/` 整个包一起忽略了
+# —— §4.2 的核心数据模型 karaoke.py 因此从未进入版本控制，新克隆的仓库跑不起来。
+/.kvm/
+/models/
+/bin/
 
 # 工作产物：单曲工程动辄 3-5 GB（原视频 + 音轨 + stem + 代理视频 + 成片）
 workspace/
@@ -33,3 +37,7 @@ experiments/out/
 # 预览字体：从用户系统提取并子集化的产物，运行时按需生成。
 # 卡拉OK 常用的 ヒラギノ/游ゴシック 等是 Apple/微软专有字体，不得随仓库分发。
 frontend/public/fonts/
+
+# jassub 的 worker/wasm 静态副本（4.3MB 二进制），由
+# frontend/scripts/sync-jassub-assets.mjs 在 predev / prebuild 时从 node_modules 复制。
+frontend/public/jassub/
