@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent))
 
 from kvm.media.ffmpeg import find_ffmpeg_with_libass
 from kvm.models.karaoke import VoicePalette
+from kvm.pipeline.guide_melody import TIMBRES, GuideConfig  # 只取配置与常量，不触发 librosa
 from kvm.pipeline.qrc_import import load_project
 from kvm.render.ass_builder import AssBuilder
 from kvm.render.text_metrics import LibassMetrics
@@ -155,7 +156,32 @@ def main() -> int:
         "--guide-vocals", type=Path, default=None,
         help="人声 stem。给出后会合成引导声（ガイドメロディ）并混入 --audio",
     )
-    ap.add_argument("--guide-gain", type=float, default=0.16, help="引导声音量")
+    # 引导声参数全部走 CLI：合适的阈值与音色因曲速、唱法而异，写死常量等于逼人改代码
+    guide_defaults = GuideConfig()
+    ap.add_argument(
+        "--guide-gain", type=float, default=guide_defaults.gain,
+        help=f"引导声音量（RMS 口径，默认 {guide_defaults.gain}，约低于伴奏 5dB）",
+    )
+    ap.add_argument(
+        "--guide-timbre", choices=TIMBRES, default=guide_defaults.timbre,
+        help="引导声音色。square 穿透力最好、最接近卡拉OK 引导音；sine 最不抢原曲",
+    )
+    ap.add_argument(
+        "--guide-max-harmonics", type=int, default=guide_defaults.max_harmonics,
+        help="谐波数上限（实际还会按奈奎斯特再截断防混叠）。越大越亮",
+    )
+    ap.add_argument(
+        "--guide-no-quantize", action="store_true",
+        help="不把音高吸附到半音格。关掉量化会退回照搬实测 f0 的旧行为，听感偏人声",
+    )
+    ap.add_argument(
+        "--guide-legato-ms", type=float, default=guide_defaults.legato_gap_s * 1000,
+        help="短于此的音符间隙做 legato 桥接（辅音/换气），更长的才算真正的休止",
+    )
+    ap.add_argument(
+        "--guide-min-note-ms", type=float, default=guide_defaults.min_note_s * 1000,
+        help="短于此的音符并入音高最接近的邻居（滑音碎片），而不是丢弃",
+    )
     ap.add_argument("--no-beat", action="store_true", help="跳过节拍检测")
     ap.add_argument("--start", type=float, default=None, help="截取起点秒（用于试渲染）")
     ap.add_argument("--duration", type=float, default=None, help="截取时长秒")
@@ -232,12 +258,21 @@ def main() -> int:
     if args.guide_vocals:
         from kvm.pipeline.guide_melody import build_guide_track
 
+        guide_cfg = GuideConfig(
+            quantize=not args.guide_no_quantize,
+            min_note_s=args.guide_min_note_ms / 1000.0,
+            legato_gap_s=args.guide_legato_ms / 1000.0,
+            timbre=args.guide_timbre,
+            max_harmonics=args.guide_max_harmonics,
+            gain=args.guide_gain,
+        )
         guide_path = args.out.with_name("guide_melody.wav")
         print("合成引导声…（pYIN 提取音高，耗时约为曲长的 1/7）")
         n_notes = build_guide_track(
-            args.guide_vocals, guide_path, info["duration"], gain=args.guide_gain
+            args.guide_vocals, guide_path, info["duration"], config=guide_cfg
         )
-        print(f"引导声   : {n_notes} 个音符 → {guide_path.name}")
+        q = "半音量化" if guide_cfg.quantize else "不量化"
+        print(f"引导声   : {n_notes} 个音符  {guide_cfg.timbre}/{q} → {guide_path.name}")
         if audio_track is None:
             print("⚠️ 未指定 --audio，引导声将叠加在原始音轨上（通常应配合伴奏使用）")
             audio_track = _extract_audio(ffmpeg, args.video, args.out.with_name("src_audio.wav"))
