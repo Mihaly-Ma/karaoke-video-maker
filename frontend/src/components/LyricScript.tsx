@@ -20,7 +20,7 @@
  */
 
 import { MergeCellsOutlined, ScissorOutlined } from '@ant-design/icons'
-import { useState, type CSSProperties, type ReactNode } from 'react'
+import { useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 
 import { t } from '../i18n'
 import type { Line, Palette, RubySpan, Style } from '../api/types'
@@ -50,8 +50,18 @@ const TIMING_SOURCES = new Set(['provider', 'aligned', 'interpolated', 'manual']
 const FILM_FILL = '#ffffff'
 const FILM_OUTLINE = '#000000'
 
-/** 屏幕上的主文字号。工程样式里的 font_size 是相对视频高度的，不能直接当 px 用。 */
+/** 屏幕上的主文字号上限。工程样式里的 font_size 是相对视频高度的，不能直接当 px 用。 */
 const SCREEN_FONT_PX = 28
+
+/**
+ * 自动缩小的下限。
+ *
+ * 这个视图要回答的是"歌词内容与版本对不对、读音对不对"，字号的绝对值不重要——
+ * 注音的**排版**本来就不能在这里判断（这里走浏览器原生 ruby，成片走 karaskel 的
+ * advance 实测 + 组间避让）。但注音的**内容**要读得出来：16px 主文对应 7px 出头的
+ * 注音，已经是能认出假名的下沿，再小就只剩一团墨。到底之后不再缩，改走本行横向滚动。
+ */
+const MIN_FONT_PX = 16
 
 export function toScriptLines(lines: Line[]): ScriptLine[] {
   return lines.map((ln) => ({
@@ -86,17 +96,16 @@ function paletteColors(palettes: Record<string, Palette>, voicePart: string): { 
  * （4K 下字号 162px），照搬到网页上会撑满屏幕。比例照抄，绝对值按屏幕重定。
  */
 function filmVars(style: Style | null): CSSProperties {
-  const fs = SCREEN_FONT_PX
   const outlineRatio = style && style.font_size > 0 ? style.outline / style.font_size : 3 / 64
   const rubyScale = style?.ruby_scale ?? 0.45
-  const rubyFs = fs * rubyScale
   return {
     '--lyr-font': style?.font_name ? `"${style.font_name}", var(--font-ui)` : 'var(--font-ui)',
-    '--lyr-fs': `${fs}px`,
-    '--lyr-stroke': `${(fs * outlineRatio).toFixed(2)}px`,
-    '--lyr-ruby-fs': `${rubyFs.toFixed(1)}px`,
-    // 注音描边比主文细：后端取主描边的 0.55 倍，这里照抄同一个系数
-    '--lyr-ruby-stroke': `${(rubyFs * outlineRatio * 0.55).toFixed(2)}px`,
+    '--lyr-fs': `${SCREEN_FONT_PX}px`,
+    // 只交出**比例**，描边与注音字号由 CSS 从 --lyr-fs 派生（见 LyricStageCss）。
+    // 自动缩放只改 --lyr-fs 一个变量，派生量自动跟上，不会缩了字漏了边。
+    // 注音描边比主文细：后端取主描边的 0.55 倍，那个系数也写在 CSS 里
+    '--lyr-stroke-ratio': String(outlineRatio),
+    '--lyr-ruby-scale': String(rubyScale),
   } as CSSProperties
 }
 
@@ -153,9 +162,60 @@ export default function LyricScript({
   // 拆行是两步操作：先选行、再选位置。位置只能是 token 边界，而注音区间可以
   // 横跨边界，所以拆分态要换一种排版（见下），不能在注音结构里插分隔符。
   const [splittingId, setSplittingId] = useState<string | null>(null)
+  const filmRef = useRef<HTMLDivElement>(null)
+
+  // 行的身份 + 文本决定测量结果。直接依赖 lines 数组会因为父组件每次渲染都新建数组
+  // 而让下面的 effect 空转（连带反复重建 ResizeObserver）
+  const contentKey = useMemo(() => lines.map((l) => `${l.id}:${lineText(l)}`).join('\n'), [lines])
+
+  /**
+   * 把正文整体缩到「最长的一行也放得下」。
+   *
+   * 为什么必须缩而不是折：见 LyricStageCss 里 `.lyr-text` 的说明——软换行会发明
+   * 成片里不存在的断点。这里的取舍是"字号绝对值不重要，断点位置很重要"。
+   *
+   * 为什么直接写 DOM 而不是 setState：字号会改变测量结果，走 state 就成了
+   * 测量→渲染→再测量的回环。做法是**先把字号复位到基准**量出与缩放无关的自然宽度，
+   * 一次算出终值再写回，不迭代、不振荡。
+   */
+  useLayoutEffect(() => {
+    const film = filmRef.current
+    if (!film) return
+
+    const fit = () => {
+      // ---- 写：复位到基准字号 ----
+      film.style.setProperty('--lyr-fs', `${SCREEN_FONT_PX}px`)
+
+      // ---- 读：这一段里不能再写样式，否则每读一次就强制一次重排 ----
+      const cs = getComputedStyle(film)
+      const avail = film.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)
+      let scale = 1
+      for (const row of film.querySelectorAll<HTMLElement>('.lyr-line')) {
+        const body = row.querySelector<HTMLElement>('.lyr-line__body')
+        const text = body?.querySelector<HTMLElement>('.lyr-text')
+        if (!body || !text) continue
+        // scrollWidth 取整会少算不到 1px，宁可多留一点，免得刚好差半像素长出滚动条
+        const natural = text.scrollWidth + 1
+        // 行号、来源杠、徽章、操作按钮都不随字号缩放，先从可用宽度里扣掉
+        const room = avail - (row.getBoundingClientRect().width - body.getBoundingClientRect().width)
+        if (room > 0) scale = Math.min(scale, room / natural)
+      }
+
+      // ---- 写：终值 ----
+      film.style.setProperty(
+        '--lyr-fs',
+        `${Math.min(SCREEN_FONT_PX, Math.max(MIN_FONT_PX, SCREEN_FONT_PX * scale)).toFixed(2)}px`,
+      )
+    }
+
+    fit()
+    const ro = new ResizeObserver(fit)
+    ro.observe(film)
+    return () => ro.disconnect()
+  }, [contentKey, style, splittingId])
 
   return (
-    <div className="lyr-film" style={filmVars(style)}>
+    <div className="lyr-film" style={filmVars(style)} ref={filmRef}>
       <div className="lyr-script">
         {lines.map((line, i) => {
           const text = lineText(line)

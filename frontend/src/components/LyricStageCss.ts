@@ -162,7 +162,24 @@ export const LYRIC_STAGE_CSS = `
   --lyr-outline: #000000;          /* 未唱描边：黑边 */
   --lyr-gutter: rgb(255 255 255 / 0.42);   /* 压在成片底上的行号与操作 */
   --lyr-gutter-hi: rgb(255 255 255 / 0.14);
+
+  /*
+   * 描边与注音一律由 --lyr-fs 派生，而不是各自算好一个 px 值传进来。
+   * 自动缩放（LyricScript 的 fit）只改 --lyr-fs 一个变量，派生量跟着走——
+   * 否则会出现"字缩了、描边没缩"，观感立刻不像成片。
+   * 比例（--lyr-stroke-ratio / --lyr-ruby-scale）取自工程样式，由 React 写入。
+   */
+  --lyr-stroke: calc(var(--lyr-fs) * var(--lyr-stroke-ratio));
+  --lyr-ruby-fs: calc(var(--lyr-fs) * var(--lyr-ruby-scale));
+  --lyr-ruby-stroke: calc(var(--lyr-ruby-fs) * var(--lyr-stroke-ratio) * 0.55);
+
   flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  /*
+   * 纵向滚动条常驻留槽：clientWidth 不再随内容多少而跳变。
+   * 缩放是按 clientWidth 算的，宽度一跳就会变成"缩小→滚动条消失→变宽→放大→
+   * 滚动条回来"的来回振荡。
+   */
+  scrollbar-gutter: stable;
   background: var(--lyr-film-bg);
   padding: var(--sp-5) var(--sp-6);
 }
@@ -192,7 +209,15 @@ export const LYRIC_STAGE_CSS = `
 
 /* 行内元素紧跟文本而不是撑满整行：制作名单徽章要贴着它标注的那一行，
    拆行/并行按钮要落在手边——推到屏幕最右等于让用户横跨一屏去点 */
-.lyr-line__body { flex: 0 1 auto; min-width: 0; }
+/*
+ * 缩到下限仍放不下的行，横向滚动**限在本行之内**（overflow-x: auto 只在真放不下时
+ * 才长出滚动条，放得下的行一条都不会有）。让整页横滚是另一回事：行号、元信息栏、
+ * 其余几十行会一起被推走，为了看清一行付出满屏错位的代价。
+ * overflow-y 写死 hidden 是因为：一旦 overflow-x 不是 visible，另一轴的 visible 就会
+ * 被计算成 auto，于是注音稍微出界就冒出一条纵向滚动条。注音由 line-height: 2 留出的
+ * 空间容纳（0.45 倍字号 + 半行间距，量下来还有富余），hidden 不会裁到它。
+ */
+.lyr-line__body { flex: 0 1 auto; min-width: 0; overflow-x: auto; overflow-y: hidden; }
 
 .lyr-text {
   font-family: var(--lyr-font);
@@ -203,7 +228,14 @@ export const LYRIC_STAGE_CSS = `
   /* 描边画在填充下面，否则细笔画会被自己的描边吃掉一半（ASS \\bord 是纯外扩） */
   -webkit-text-stroke: var(--lyr-stroke) var(--lyr-outline);
   paint-order: stroke fill;
-  word-break: break-word;
+  /*
+   * 正文一行就是一行。成片遇到超宽行是**拆成两行 Dialogue**（后端 _split_wide_lines，
+   * 拆点选时间间隙最大处＝演唱里的自然停顿），从来不是把字折回来。放开软换行，
+   * 浏览器会按 CJK 规则在「触|れる」这种词中间随手断开——那是成片里根本不存在的版式，
+   * 用户据此判断"这行太长/这里该断句"就是被预览误导了。
+   * 放不下时的处理见 LyricScript：先整体缩字号，缩到下限再走本行横向滚动。
+   */
+  white-space: nowrap;
 }
 .lyr-text ruby { ruby-position: over; -webkit-ruby-position: before; }
 .lyr-text rt {
