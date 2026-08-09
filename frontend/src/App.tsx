@@ -1,60 +1,47 @@
-import { useEffect, useState } from 'react'
-import * as api from './api/client'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+
 import type { JobStatus } from './api/types'
 import { useProject } from './state/projectStore'
+import { STEP_ORDER, stepStatus, type StepKey } from './workflow'
 
-import ProjectBar from './components/ProjectBar'
-import MediaPanel from './components/MediaPanel'
+import ExportPanel from './components/ExportPanel'
+import HomeView from './components/HomeView'
 import JobProgress from './components/JobProgress'
-
-// 以下三个组件由其他 agent 并行编写，此刻可能尚不存在——本文件只 import、
-// 不实现它们。类型检查在它们落地前会报"找不到模块"，这是预期状态。
-import Preview from './components/Preview'
-import Timeline from './components/Timeline'
+import LineList from './components/LineList'
 import LyricPanel from './components/LyricPanel'
+import MediaPanel from './components/MediaPanel'
+import Preview from './components/Preview'
 import RubyEditor from './components/RubyEditor'
 import StylePanel from './components/StylePanel'
+import Timeline from './components/Timeline'
+import TopBar from './components/TopBar'
 
 /**
- * 应用外壳与主布局。
+ * 应用外壳。
  *
- * 工作流顺序（CLAUDE.md §4.1）：下载 → 歌词 → 分离 → 对轴 → 注音 → 样式 → 导出。
- * 左侧导航按此顺序排列引导用户，但每一步都可独立点开，允许任意跳步——
- * 用户可能直接导入已有素材，不能强制走完整条流水线（§2.5）。
+ * 结构（docs/ui-redesign.md §三）：
+ *   首页    → 选工程 / 新建工程，应用启动落在这里
+ *   顶栏    → 工程名（回首页）/ 撤销重做 / 步骤条 / 导出
+ *   舞台    → 唯一的主区域，**内容完全由当前步骤决定**
+ *   任务栏  → 跨步骤常驻，有长任务才出现
  *
- * 区域划分：
- *   顶栏：工程 / 撤销重做 / 导出（ProjectBar）
- *   左侧：工作流步骤 + 该步骤的操作面板（下载/分离/歌词/对轴/导出）
- *   中间：预览（Preview）+ 时间轴（Timeline）——主区域，占最大空间
- *   右侧：属性面板，注音（RubyEditor）/ 样式（StylePanel）两个 tab
- *   全局悬浮：长任务进度条（任务栏），跨步骤切换也不会消失
+ * 核心原则是"中间舞台属于当前步骤的主对象"。此前中间区域被写死成"预览 + 时间轴"，
+ * 与在第几步无关，于是搜歌词时最大的一块屏幕摆着一个此刻毫无用处的播放器。
+ * 现在预览+时间轴只是**对轴**这一步的舞台形态。
+ *
+ * 播放 transport 归舞台所有，全局不设播放器：只有对轴舞台挂了 Preview，
+ * 切换步骤即停止播放，"同屏两个播放按钮"结构上不可能出现（§五）。
  */
 
-const LAST_PROJECT_KEY = 'kvm.lastProjectId'
-
-type LeftStep = 'download' | 'lyrics' | 'separate' | 'align'
-type RightTab = 'ruby' | 'style'
-
-const LEFT_STEPS: { key: LeftStep; label: string }[] = [
-  { key: 'download', label: '① 下载' },
-  { key: 'lyrics', label: '② 歌词' },
-  { key: 'separate', label: '③ 分离' },
-  { key: 'align', label: '④ 对轴' },
-]
-
-const RIGHT_STEPS: { key: RightTab; label: string }[] = [
-  { key: 'ruby', label: '⑤ 注音' },
-  { key: 'style', label: '⑥ 样式' },
-]
+/** 每个工程各记各的步骤：点卡片进去应该回到它上次所在的那一步（§三点五） */
+const stepKey = (projectId: string) => `kvm.step.${projectId}`
 
 export default function App() {
-  const [leftStep, setLeftStep] = useState<LeftStep>('download')
-  const [rightTab, setRightTab] = useState<RightTab>('ruby')
-  const [showExport, setShowExport] = useState(false)
+  const [view, setView] = useState<'home' | 'editor'>('home')
+  const [step, setStep] = useState<StepKey>('media')
 
-  // 长任务 job id 提升到 App 级别持有：切换工作流步骤时子面板会卸载，
-  // 但任务栏（下方）始终挂载，进度条不会跟着消失，用户随时能看到还在
-  // 跑什么、跑到哪、要不要取消。
+  // 长任务 job id 提升到 App 级别持有：切换步骤时舞台会整个换掉，
+  // 但任务栏始终挂载，进度条不会跟着消失。
   const [downloadJobId, setDownloadJobId] = useState<string | null>(null)
   const [separateJobId, setSeparateJobId] = useState<string | null>(null)
   const [exportJobId, setExportJobId] = useState<string | null>(null)
@@ -68,34 +55,41 @@ export default function App() {
   const playing = useProject((s) => s.playing)
   const setPlaying = useProject((s) => s.setPlaying)
 
-  // 崩溃恢复：工程由后端每次编辑即落盘，刷新页面时靠 localStorage 记住的
-  // 最后打开工程 id 直接回到上次状态。记录的工程已不存在（比如被删除）或
-  // 首次启动没有记录时，退化为打开列表里第一个工程；仍然没有则保持空白，
-  // 由顶栏引导用户新建。
-  useEffect(() => {
-    const savedId = localStorage.getItem(LAST_PROJECT_KEY)
-    void (async () => {
-      if (savedId) {
-        await load(savedId)
-        if (useProject.getState().project) return
-      }
-      const list = await api.listProjects().catch(() => [])
-      if (list.length > 0) await load(list[0].id)
-    })()
-  }, [load])
+  const status = useMemo(() => stepStatus(project, !!exportResult), [project, exportResult])
 
+  const openProject = useCallback(
+    (id: string) => {
+      void load(id)
+      const saved = localStorage.getItem(stepKey(id))
+      setStep(STEP_ORDER.includes(saved as StepKey) ? (saved as StepKey) : 'media')
+      setView('editor')
+    },
+    [load],
+  )
+
+  const goStep = useCallback(
+    (next: StepKey) => {
+      setStep(next)
+      if (project) localStorage.setItem(stepKey(project.id), next)
+    },
+    [project],
+  )
+
+  // 切换步骤时停止播放：上一个舞台的 transport 已经卸载，让它继续"在播"
+  // 只会留下一个没人执行、也没人能停的播放意图（§五）。
   useEffect(() => {
-    if (project?.id) localStorage.setItem(LAST_PROJECT_KEY, project.id)
-  }, [project?.id])
+    setPlaying(false)
+  }, [step, view, setPlaying])
 
   // 键盘快捷键：Cmd/Ctrl+Z 撤销、Shift+Cmd/Ctrl+Z 或 Cmd/Ctrl+Y 重做、空格播放/暂停。
   // 输入框/下拉框/可编辑区域聚焦时不拦截，否则用户没法正常打字或用浏览器自带撤销。
   //
   // 这是全应用唯一注册这组组合键的地方——Timeline.tsx 曾经在 window 上重复监听
-  // 同一组合键，导致按一次 Cmd/Ctrl+Z 发出两次 undo 请求（用户按一次退两步），
-  // Redo 同理。现在撤销/重做的键盘快捷键统一收在这里；Timeline 只保留它自己
-  // 工具栏按钮的点击调用，以及打轴模式下需要独占的空格键处理（见 Timeline.tsx
-  // 的 stopImmediatePropagation 注释）。
+  // 同一组合键，导致按一次 Cmd/Ctrl+Z 发出两次 undo 请求（用户按一次退两步）。
+  //
+  // 空格只在**拥有 transport 的舞台**上生效：别处按空格会把 playing 置真却没有
+  // 任何执行者，表现为"按了没反应，再按也停不下来"。
+  const hasTransport = view === 'editor' && step === 'align'
   useEffect(() => {
     const isEditableTarget = (el: EventTarget | null) =>
       el instanceof HTMLElement &&
@@ -116,126 +110,102 @@ export default function App() {
         void redo()
         return
       }
-      if (e.code === 'Space') {
+      if (e.code === 'Space' && hasTransport) {
         e.preventDefault()
         setPlaying(!playing)
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [undo, redo, playing, setPlaying])
+  }, [undo, redo, playing, setPlaying, hasTransport])
 
-  const handleDownloadSettled = async (status: JobStatus) => {
+  const handleDownloadSettled = async (s: JobStatus) => {
     await refresh()
-    if (status.state === 'done') setDownloadJobId(null)
+    if (s.state === 'done') setDownloadJobId(null)
   }
-  const handleSeparateSettled = async (status: JobStatus) => {
+  const handleSeparateSettled = async (s: JobStatus) => {
     await refresh()
-    if (status.state === 'done') setSeparateJobId(null)
+    if (s.state === 'done') setSeparateJobId(null)
   }
-  const handleExportSettled = (status: JobStatus) => {
-    if (status.state === 'done') {
+  const handleExportSettled = (s: JobStatus) => {
+    if (s.state === 'done') {
       setExportJobId(null)
-      const out = status.result['output_path'] ?? status.result['path']
+      const out = s.result['output_path'] ?? s.result['path']
       if (typeof out === 'string') setExportResult(out)
     }
   }
 
-  const openLeftStep = (key: LeftStep) => {
-    setShowExport(false)
-    setLeftStep(key)
-  }
-  const openRightTab = (key: RightTab) => {
-    setShowExport(false)
-    setRightTab(key)
+  /** 舞台形态由步骤全权决定：分几栏、要不要播放器、要不要波形，都在这里分派 */
+  const renderStage = () => {
+    switch (step) {
+      case 'media':
+        return (
+          <main className="stage stage--scroll">
+            <div className="stage__center">
+              {/* 下载与分离合并为"素材"一步：二者都是把素材准备好，且分离依赖已有音频 */}
+              <MediaPanel
+                downloadJobId={downloadJobId}
+                onDownloadStart={setDownloadJobId}
+                separateJobId={separateJobId}
+                onSeparateStart={setSeparateJobId}
+              />
+            </div>
+          </main>
+        )
+      case 'lyrics':
+        return (
+          <main className="stage stage--scroll">
+            <div className="stage__center">
+              <LyricPanel />
+            </div>
+          </main>
+        )
+      // 只有这一步挂 Preview——"预览 + 时间轴"是对轴的舞台形态，不是全局外壳
+      case 'align':
+        return (
+          <main className="stage">
+            <AlignToolbar />
+            <div className="stage__viewport">
+              <Preview />
+            </div>
+            <div className="stage__rail">
+              <Timeline />
+            </div>
+          </main>
+        )
+      case 'ruby':
+        return <RubyStage />
+      case 'style':
+        return (
+          <main className="stage stage--scroll">
+            <div className="stage__center">
+              <StylePanel />
+            </div>
+          </main>
+        )
+      case 'export':
+        return (
+          <main className="stage stage--scroll">
+            <div className="stage__center">
+              <ExportPanel exportJobId={exportJobId} onExportStart={setExportJobId} exportResult={exportResult} />
+            </div>
+          </main>
+        )
+    }
   }
 
   return (
     <div className="app-shell">
-      <ProjectBar onExport={() => setShowExport(true)} />
+      {view === 'home' ? (
+        <HomeView onOpen={openProject} />
+      ) : (
+        <>
+          <TopBar step={step} status={status} onStep={goStep} onHome={() => setView('home')} />
+          {renderStage()}
+        </>
+      )}
 
-      <div className="app-body">
-        <nav className="workflow-nav">
-          <div className="workflow-nav__group">
-            {LEFT_STEPS.map((s) => (
-              <button
-                key={s.key}
-                type="button"
-                className={`workflow-nav__item${!showExport && leftStep === s.key ? ' active' : ''}`}
-                onClick={() => openLeftStep(s.key)}
-              >
-                {s.label}
-              </button>
-            ))}
-            {RIGHT_STEPS.map((s) => (
-              <button
-                key={s.key}
-                type="button"
-                className={`workflow-nav__item${!showExport && rightTab === s.key ? ' active' : ''}`}
-                onClick={() => openRightTab(s.key)}
-              >
-                {s.label}
-              </button>
-            ))}
-            <button
-              type="button"
-              className={`workflow-nav__item${showExport ? ' active' : ''}`}
-              onClick={() => setShowExport(true)}
-            >
-              ⑦ 导出
-            </button>
-          </div>
-
-          <div className="workflow-nav__content">
-            {showExport ? (
-              <ExportPanel exportJobId={exportJobId} onExportStart={setExportJobId} exportResult={exportResult} />
-            ) : leftStep === 'download' ? (
-              <MediaPanel
-                focusSection="download"
-                downloadJobId={downloadJobId}
-                onDownloadStart={setDownloadJobId}
-                separateJobId={separateJobId}
-                onSeparateStart={setSeparateJobId}
-              />
-            ) : leftStep === 'lyrics' ? (
-              <LyricPanel />
-            ) : leftStep === 'separate' ? (
-              <MediaPanel
-                focusSection="separate"
-                downloadJobId={downloadJobId}
-                onDownloadStart={setDownloadJobId}
-                separateJobId={separateJobId}
-                onSeparateStart={setSeparateJobId}
-              />
-            ) : (
-              <AlignPanel />
-            )}
-          </div>
-        </nav>
-
-        <main className="main-stage">
-          <div className="preview-area">
-            <Preview />
-          </div>
-          <div className="timeline-area">
-            <Timeline />
-          </div>
-        </main>
-
-        <aside className="side-panel">
-          <div className="side-panel__tabs">
-            <button type="button" className={rightTab === 'ruby' ? 'active' : ''} onClick={() => setRightTab('ruby')}>
-              注音
-            </button>
-            <button type="button" className={rightTab === 'style' ? 'active' : ''} onClick={() => setRightTab('style')}>
-              样式
-            </button>
-          </div>
-          <div className="side-panel__content">{rightTab === 'ruby' ? <RubyEditor /> : <StylePanel />}</div>
-        </aside>
-      </div>
-
-      {/* 任务栏：与工作流步骤切换解耦，只要有任务在跑就一直可见 */}
+      {/* 任务栏：与步骤切换解耦，只要有任务在跑就一直可见 */}
       <div className="job-tray">
         {downloadJobId && (
           <JobProgress
@@ -267,107 +237,59 @@ export default function App() {
 }
 
 /**
- * 对轴步骤没有独立组件（三级调轴的精细交互——tap-to-time、波形拖拽——
- * 由 Timeline 组件负责，见下方主区域）。这里只提供粗调整体平移的入口，
- * 满足"每个自动环节都要有手工旁路"（§2.5）：哪怕自动对齐完全不可用，
- * 用户也能在这里和下方时间轴上从零手动打完一首歌。
+ * 对轴舞台的工具条：把选中的行/词整段平移。
+ *
+ * 只在选中了行或词时出现——全曲平移时间轴自己已经有一条"整体偏移"，
+ * 再摆一份就是这次重做要消灭的"同一操作在多处重复出现"。
  */
-function AlignPanel() {
-  const project = useProject((s) => s.project)
+function AlignToolbar() {
   const selection = useProject((s) => s.selection)
   const shift = useProject((s) => s.shift)
 
-  if (!project) {
-    return (
-      <div className="panel">
-        <p className="muted">请先选择工程。</p>
-      </div>
-    )
-  }
-
-  const scope: 'global' | 'line' | 'token' = selection.kind === 'none' ? 'global' : selection.kind
-  const scopeLabel = scope === 'global' ? '全曲' : scope === 'line' ? '当前选中行' : '当前选中词'
-  const nudges = [-1000, -100, -10, 10, 100, 1000]
+  if (selection.kind === 'none') return null
+  const scope = selection.kind
 
   return (
-    <div className="panel align-panel">
-      <h3>对轴</h3>
-      <p className="hint">
-        自动轴来自 QRC 逐字轴 / 强制对齐，精度约 50–150ms，够“整行同时亮起”但不够“逐字擦除严丝合缝”。
-        精调请直接在下方时间轴上 tap-to-time 打轴或拖拽波形边界；这里的按钮用于快速整体/局部平移。
-      </p>
-      <p className="align-panel__scope">
-        当前作用范围：<strong>{scopeLabel}</strong>
-      </p>
-      <div className="align-panel__nudges">
-        {nudges.map((ms) => (
-          <button key={ms} type="button" onClick={() => void shift(scope, ms)}>
-            {ms > 0 ? `+${ms}` : ms} ms
+    <div className="stage-toolbar">
+      <span>平移{scope === 'line' ? '选中行' : '选中词'}</span>
+      <div className="nudges">
+        {[-1000, -100, -10, 10, 100, 1000].map((ms) => (
+          <button key={ms} type="button" className="small" onClick={() => void shift(scope, ms)}>
+            {ms > 0 ? `+${ms}` : ms}
           </button>
         ))}
       </div>
-      <p className="hint">在下方时间轴选中一行或一词后，这里的按钮会只作用于该范围。</p>
+      <span className="stage-toolbar__spacer" />
     </div>
   )
 }
 
-interface ExportPanelProps {
-  exportJobId: string | null
-  onExportStart: (jobId: string) => void
-  exportResult: string | null
-}
-
-function ExportPanel({ exportJobId, onExportStart, exportResult }: ExportPanelProps) {
+/**
+ * 注音舞台：左边选行，右边逐词改读音。
+ *
+ * 进来时自动选中第一条正文行——RubyEditor 只编辑"当前选中行"，而选中行此前
+ * 唯一的来源是时间轴。不自动选，这一步打开就是一句"请先选中一行"的死胡同。
+ * 跳过制作名单行（「词：xxx」这类），它们不需要注音。
+ */
+function RubyStage() {
   const project = useProject((s) => s.project)
-  const [withGuide, setWithGuide] = useState(false)
-  const [useInstrumental, setUseInstrumental] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const selection = useProject((s) => s.selection)
+  const select = useProject((s) => s.select)
 
-  if (!project) {
-    return (
-      <div className="panel">
-        <p className="muted">请先选择工程。</p>
-      </div>
-    )
-  }
-
-  const start = async () => {
-    setError(null)
-    try {
-      const job = await api.exportVideo({
-        project_id: project.id,
-        with_guide: withGuide,
-        use_instrumental: useInstrumental,
-      })
-      onExportStart(job.job_id)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-    }
-  }
+  useEffect(() => {
+    if (selection.kind !== 'none' || !project) return
+    const first = project.lines.find((l) => !l.is_metadata && l.tokens.length > 0)
+    if (first) select({ kind: 'line', lineId: first.id })
+  }, [project, selection.kind, select])
 
   return (
-    <div className="panel export-panel">
-      <h3>导出成片</h3>
-      <label className="checkbox-row">
-        <input type="checkbox" checked={useInstrumental} onChange={(e) => setUseInstrumental(e.target.checked)} />
-        使用伴奏音轨（OFF VOCAL，需已完成人声分离）
-      </label>
-      <label className="checkbox-row">
-        <input type="checkbox" checked={withGuide} onChange={(e) => setWithGuide(e.target.checked)} />
-        混入引导旋律（帮助跟唱音高）
-      </label>
-      <p className="hint">
-        ON VOCAL 与 OFF VOCAL 各需单独导出一次；字幕烧录本身会被缓存，两次导出不必重复烧录。
-      </p>
-      <button type="button" className="primary" onClick={() => void start()} disabled={!!exportJobId}>
-        开始导出
-      </button>
-      {error && <p className="error">{error}</p>}
-      {exportResult && (
-        <p className="success">
-          已导出：<code className="path">{exportResult}</code>
-        </p>
-      )}
-    </div>
+    <main className="stage stage--cols">
+      <aside className="stage__aside">
+        <LineList />
+      </aside>
+      <div className="stage__main">
+        <RubyEditor />
+      </div>
+    </main>
   )
 }
