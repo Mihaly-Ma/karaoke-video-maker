@@ -151,13 +151,21 @@ class OrphanedEdit(BaseModel):
     """
 
     kind: str
-    """`ruby` / `phonetic` / `timing` / `voice_part`。"""
+    """`ruby` / `phonetic` / `timing` / `voice_part` / `line`。
+
+    `line` 是行级的手工标记（制作名单、行声部）——整行在新歌词里都没有对应位置时，
+    这些标记没有 token 级的落点可以承接。
+    """
 
     detail: str
     """人类可读的中文说明，例如"「明日」的注音 あした 在拆行后跨越了分界"。"""
 
     payload: dict = Field(default_factory=dict)
-    """原始数据，供用户选择重新应用。"""
+    """原始数据，供用户选择重新应用。
+
+    各 `kind` 共有 `line_id` 与原文；`timing`/`voice_part` 另带 `tid`
+    （内容寻址身份键）与音节文本，`ruby`/`phonetic` 另带字符区间与 `base`。
+    """
 
 
 class ExportArtifactDTO(BaseModel):
@@ -335,6 +343,9 @@ class LyricApplyRequest(LyricFetchRequest):
 
     project_id: str
 
+    keep_manual_edits: bool = True
+    """默认做 `locked` 感知的合并，把用户的手工成果搬到新歌词上。见 `LyricImportRequest`。"""
+
 
 class LyricPreview(BaseModel):
     """下载前的预览。用户要能看到实际内容再决定用哪条。"""
@@ -361,7 +372,23 @@ class LyricImportRequest(BaseModel):
     kind: Literal["text", "lrc", "qrc"]
     content: str
     replace: bool = True
-    """False 表示追加到现有歌词之后。"""
+    """False 表示追加到现有歌词之后。
+
+    追加不覆盖任何既有内容，因此与 `keep_manual_edits` 无关；后端只会给追加进来的
+    行重排 tid 的行出现序号，避免与既有行撞号（撞号会让重绑绑到错误的那一行）。
+    """
+
+    keep_manual_edits: bool = True
+    """`replace=True` 时是否保留用户此前的手工修改。**默认保留。**
+
+    重新导入歌词，十有八九是因为歌词文本本身错了（漏字、断句不对、换了个更好的源），
+    而不是因为想丢掉自己调了四十分钟的轴。所以默认行为是 `locked` 感知的合并：
+    用内容寻址的 tid 把锁定过的时间/注音/发音形/声部重新绑到新歌词上，
+    绑不上的进 `ProjectDTO.orphans` 等用户确认（CLAUDE.md §4.4），**绝不静默丢弃**。
+
+    传 `false` 才回到"整体替换"——"我就是要推倒重来"同样是正当诉求，
+    但必须由用户显式表达。这一步照样占一格撤销，按错了可以撤回。
+    """
 
 
 # ---- 媒体 ----

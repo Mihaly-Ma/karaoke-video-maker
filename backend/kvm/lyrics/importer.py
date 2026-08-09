@@ -28,6 +28,7 @@ import re
 import unicodedata
 import uuid
 from collections import Counter
+from collections.abc import Sequence
 
 from kvm.api.schemas import LineDTO, RubySpanDTO, TokenDTO
 from kvm.lyrics.base import Granularity
@@ -63,6 +64,13 @@ def _normalize_for_tid(text: str) -> str:
     return "".join(unicodedata.normalize("NFKC", text).split())
 
 
+def _line_digest(line: LineDTO) -> str:
+    """行文本的内容 hash，tid 的第一维。"""
+    return hashlib.blake2s(
+        _normalize_for_tid(line_text(line)).encode("utf-8"), digest_size=6
+    ).hexdigest()
+
+
 def _assign_tids(lines: list[LineDTO]) -> None:
     """为每个 token 生成内容寻址身份键 `tid`。
 
@@ -86,17 +94,51 @@ def _assign_tids(lines: list[LineDTO]) -> None:
     重绑才有依据——这条性质不能因为多了一维而破坏，所以出现次数按**导入时的
     原始行序**计数，不随后续编辑重算。
     """
-    line_seen: Counter[str] = Counter()
+    _assign_tids_from(lines, {})
+
+
+def _assign_tids_from(lines: list[LineDTO], seed: dict[str, int]) -> None:
+    """`_assign_tids` 的实现，行出现序号可以从既有计数接着往下排。
+
+    `seed` 给出各 digest 已经被用掉的出现序号个数，供追加导入避号（见 `rebase_tids`）。
+    """
+    line_seen: Counter[str] = Counter(seed)
     for line in lines:
-        digest = hashlib.blake2s(
-            _normalize_for_tid(line_text(line)).encode("utf-8"), digest_size=6
-        ).hexdigest()
+        digest = _line_digest(line)
         line_occurrence = line_seen[digest]
         line_seen[digest] += 1
         seen: Counter[str] = Counter()
         for tok in line.tokens:
             tok.tid = f"{digest}.{line_occurrence}#{tok.text}#{seen[tok.text]}"
             seen[tok.text] += 1
+
+
+def tid_line_key(tid: str) -> str:
+    """取 tid 的行维部分 `digest.occurrence`。空串表示这个 token 还没有 tid。
+
+    tid 整体是**不可再解析**的（surface 里可能出现任何字符，包括 `#`），
+    但第一个 `#` 之前的这一段是确定的，追加避号与行级归组都只需要它。
+    """
+    return tid.split("#", 1)[0] if tid else ""
+
+
+def rebase_tids(existing: Sequence[LineDTO], added: list[LineDTO]) -> None:
+    """追加导入时给新行重排 tid 的行出现序号，避开既有行已经占用的号。
+
+    tid 每次导入都从 0 开始数行出现序号，所以把同一份内容追加两次会算出**两组
+    完全相同的 tid**——而 tid 的全部用途就是重绑用户的手工修改，重号意味着重绑
+    会绑到错误的那一行去（比绑不上更糟，见 `_assign_tids`）。追加是一次拼接，
+    新行的号必须接着既有行往下排。
+    """
+    used: dict[str, int] = {}
+    for line in existing:
+        for tok in line.tokens:
+            key = tid_line_key(tok.tid)
+            digest, _, occurrence = key.partition(".")
+            if not occurrence.isdigit():
+                continue
+            used[digest] = max(used.get(digest, 0), int(occurrence) + 1)
+    _assign_tids_from(added, used)
 
 
 def _assign_slots(lines: list[LineDTO], paragraph_gap_ms: int = _PARAGRAPH_GAP_MS) -> None:

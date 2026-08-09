@@ -50,10 +50,12 @@ QRC 逐字轴实测也是首尾相接。因此单词级的时间编辑必然牵�
 
 from __future__ import annotations
 
+import difflib
 import json
 import logging
 import tempfile
 import uuid
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1268,6 +1270,718 @@ def _set_line_voice_part(
             "要让整行统一，请选中它们并指派空声部以清除覆盖"
         )
     return out
+
+
+# ---- 重新导入歌词：locked 感知的合并 ----
+#
+# 用户重新导入歌词，十有八九是因为**歌词文本错了**（漏字、错字、断句不对、
+# 换了个更好的源），而不是因为想丢掉自己调了四十分钟的轴。所以"重新导入"
+# 的正确语义是**换文本、留手工成果**，不是整体替换。
+#
+# CLAUDE.md §4.4 给的做法照办：主键用内容寻址的 tid，次要模糊重绑用字符偏移，
+# **重绑失败的锁定项不得静默丢弃**，收进 `orphans` 让用户确认。
+# §7.3 的那句话也在这里兑现：绝不用"第几行第几个 token"定位——重新导入的歌词
+# 分行常常与旧的不同，按下标搬运会让每一条锁定项都落到别的字上。
+#
+# 两层结构：
+#
+# 1. **行的对应关系**由整曲字符对齐给出（`_Geometry`）。它按位置走，
+#    因此同一句副歌唱四遍也分得清是哪一遍。
+# 2. **行内的落点**以 tid 为主键、字符偏移为兜底（`_map_tokens` / `_map_span`），
+#    且一律要求"映射后的区间与目标严格重合"，只差一个字就宁可不绑。
+
+
+@dataclass
+class _MergeStats:
+    """一次合并的账目，用于给用户一句话回执。"""
+
+    timing: int = 0
+    voice: int = 0
+    ruby: int = 0
+    phonetic: int = 0
+    line_attr: int = 0
+    lost: int = 0
+
+    @property
+    def carried(self) -> int:
+        return self.timing + self.voice + self.ruby + self.phonetic + self.line_attr
+
+
+def _manual_items(line: LineDTO) -> int:
+    """一行里"用户手工成果"的条数。清点的口径与合并时要搬运的口径必须一致。"""
+    return (
+        sum(1 for t in line.tokens if t.locked_timing)
+        + sum(1 for t in line.tokens if t.voice_part is not None)
+        + sum(1 for sp in line.ruby if sp.locked)
+        + sum(1 for sp in line.phonetics if sp.locked)
+        + (1 if line.locked else 0)
+    )
+
+
+def _char_map(old_text: str, new_text: str) -> dict[int, int]:
+    """老行字符下标 → 新行字符下标，**只映射两边完全一致的那些字符**。
+
+    用 difflib 的匹配块而不是自己算偏移：重新导入的歌词与旧文本之间可能有
+    插入、删除、替换（送假名写法不同、半角空格变成全角读点），单一的整体偏移
+    表达不了这些。匹配块天然保证映射出来的字符两边完全相同，
+    因此凡是能整段映射的区间，其底下的书写文本必然没变——注音/发音形挂上去才安全。
+    """
+    matcher = difflib.SequenceMatcher(a=old_text, b=new_text, autojunk=False)
+    out: dict[int, int] = {}
+    for block in matcher.get_matching_blocks():
+        for k in range(block.size):
+            out[block.a + k] = block.b + k
+    return out
+
+
+def _map_span(cmap: dict[int, int], start: int, end: int) -> tuple[int, int] | None:
+    """把老行的字符区间 `[start, end)` 映射到新行；**必须整段连续**，否则不映射。
+
+    只要中间有一个字被改动或被拆开，这段读音的落点就不再确定，宁可让它进
+    「失效修正」清单，也不要挪到一个看着差不多的位置上。
+    """
+    if end <= start:
+        return None
+    base = cmap.get(start)
+    if base is None:
+        return None
+    for k in range(1, end - start):
+        if cmap.get(start + k) != base + k:
+            return None
+    return base, base + (end - start)
+
+
+def _token_char_offsets(line: LineDTO) -> list[int]:
+    """各 token 在行文本中的起始字符下标。"""
+    offsets: list[int] = []
+    cursor = 0
+    for tok in line.tokens:
+        offsets.append(cursor)
+        cursor += len(tok.text)
+    return offsets
+
+
+def _token_span_index(line: LineDTO) -> dict[tuple[int, int], int]:
+    """行内字符区间 → token 下标，供字符偏移重绑反查。"""
+    out: dict[tuple[int, int], int] = {}
+    cursor = 0
+    for i, tok in enumerate(line.tokens):
+        out[(cursor, cursor + len(tok.text))] = i
+        cursor += len(tok.text)
+    return out
+
+
+def _tid_index(lines: Sequence[LineDTO]) -> dict[str, tuple[int, int]]:
+    """tid → (行下标, token 下标)。**重复的 tid 一律剔除**。
+
+    tid 本该全局唯一（见 `lyrics.importer._assign_tids`），真撞号时无从判断该绑
+    哪一个，绑错行会把用户的轴搬到另一段副歌上——此时退回字符偏移重绑更安全。
+    """
+    seen: dict[str, tuple[int, int] | None] = {}
+    for li, line in enumerate(lines):
+        for ti, tok in enumerate(line.tokens):
+            if not tok.tid:
+                continue
+            seen[tok.tid] = None if tok.tid in seen else (li, ti)
+    return {tid: pos for tid, pos in seen.items() if pos is not None}
+
+
+def _flatten(lines: Sequence[LineDTO]) -> tuple[str, list[int], list[tuple[int, int]]]:
+    """把整首歌的行文本拼成一条长串。
+
+    返回 `(全曲文本, 每个字符所属的行下标, 每行占据的全局区间)`。行与行之间插入
+    换行符作分隔，它不属于任何行（行下标记 -1），也保证一行的字符不会与相邻行
+    的字符连成一片被当成同一段。
+    """
+    parts: list[str] = []
+    owners: list[int] = []
+    ranges: list[tuple[int, int]] = []
+    cursor = 0
+    for li, line in enumerate(lines):
+        if li:
+            parts.append("\n")
+            owners.append(-1)
+            cursor += 1
+        text = _line_text(line)
+        ranges.append((cursor, cursor + len(text)))
+        parts.append(text)
+        owners.extend([li] * len(text))
+        cursor += len(text)
+    return "".join(parts), owners, ranges
+
+
+@dataclass(frozen=True)
+class _Geometry:
+    """新旧歌词之间的**唯一一份**字符对应关系，以及由它得出的行候选。
+
+    ## 为什么是"整曲一份"而不是"逐行一份"
+
+    逐行各算一份看起来更省事，但在**重复片段**上会给出错误答案：用户把
+    「桜舞って宙を舞って」拆成两半之后，后半段「宙を舞って」单独拿去和整行比，
+    difflib 只会认第一处「舞って」——用户在后半段调的轴就搬到了前半段上。
+    整曲一份对齐按**位置**走，同一个词出现几次都分得清是第几次。
+
+    ## 为什么行的对应关系不能靠 tid 投票来定
+
+    tid 是 token 级的**内容寻址主键**（§4.4），这里照旧把它用在那一层
+    （见 `_map_tokens`）；但拿它来定**行**的对应关系会错得很难看。tid 的行维是
+    `(行文本 hash, 该文本在全曲的第几次出现)`，副歌重复行只要有一句被改动，
+    后面几句的出现序号就整体前移一位——老的第 1 段副歌拿着 `hash.0`，
+    而新导入里 `hash.0` 已经落到第 2 段副歌上了。赤春花实测（633 个音节全部锁定、
+    只改写 1 行、「桜舞って宙を舞って宙を舞って」重复 4 次）下，按 tid 投票定行
+    会造成 **42 个音节错绑**：用户在第一段副歌调的轴被搬到了第四段上。
+    **绑错比绑不上更糟**——绑不上还会进「失效修正」清单让他看见，
+    绑错则是悄悄把他的判断挪到了别的地方。
+
+    代价只是一次 difflib：赤春花全曲 716 字，整个合并实测 7ms。
+    """
+
+    gmap: dict[int, int]
+    """老行的全局字符下标 → 新歌词的全局字符下标。只含两边完全一致的字符。"""
+
+    old_ranges: list[tuple[int, int]]
+    new_ranges: list[tuple[int, int]]
+    candidates: list[list[int]]
+    """每个老行对应的新行候选，按落进去的字符数降序。
+
+    一个老行可以有多个候选：用户此前把两行并成一行、如今新歌词又把它拆回两行时，
+    它的字符本来就分布在两个新行里。
+    """
+
+
+def _build_geometry(
+    old_lines: Sequence[LineDTO], new_lines: Sequence[LineDTO]
+) -> _Geometry:
+    old_text, _old_owners, old_ranges = _flatten(old_lines)
+    new_text, new_owners, new_ranges = _flatten(new_lines)
+    gmap = _char_map(old_text, new_text)
+
+    candidates: list[list[int]] = []
+    for lo, hi in old_ranges:
+        votes: Counter[int] = Counter()
+        for g in range(lo, hi):
+            target = gmap.get(g)
+            if target is None:
+                continue
+            owner = new_owners[target]
+            if owner >= 0:
+                votes[owner] += 1
+        # 只落进去零星几个字的新行不算候选：那种命中多半是「の」「て」这类高频字
+        # 的巧合，让它进候选只会给后面的重绑制造误绑机会
+        floor = max(1, (hi - lo) // 4)
+        candidates.append([ni for ni, count in votes.most_common() if count >= floor])
+    return _Geometry(
+        gmap=gmap,
+        old_ranges=old_ranges,
+        new_ranges=new_ranges,
+        candidates=candidates,
+    )
+
+
+def _map_local_span(
+    geo: _Geometry, old_index: int, new_index: int, start: int, end: int
+) -> tuple[int, int] | None:
+    """把老行内的字符区间 `[start, end)` 映射到指定新行的行内区间。
+
+    整段必须连续地落在**同一个新行**里，否则不映射：跨行的注音在任何一行内
+    都表达不了，宁可让它进「失效修正」清单，也不要挪到一个看着差不多的位置上。
+    """
+    base = geo.old_ranges[old_index][0]
+    target = _map_span(geo.gmap, base + start, base + end)
+    if target is None:
+        return None
+    lo, hi = geo.new_ranges[new_index]
+    if not (lo <= target[0] and target[1] <= hi):
+        return None
+    return target[0] - lo, target[1] - lo
+
+
+def _place_span[S: CharSpanDTO](
+    spans: list[S], span: S, target: tuple[int, int]
+) -> list[S]:
+    """把一段用户锁定的读音放进新行，吃掉与它相交的自动值。
+
+    §4.2 要求读音区间无缝无重叠，而新导入自带的注音（`[kana:]`）与用户锁定的
+    那一段可能只差一个字的范围。§4.4 的裁决很明确：自动重算只覆盖 `locked=False`
+    的项，所以让路的是自动值。
+    """
+    kept = [
+        sp
+        for sp in spans
+        if sp.locked or not _intersects(sp.start, sp.end, target[0], target[1])
+    ]
+    kept.append(span.model_copy(update={"start": target[0], "end": target[1]}))
+    kept.sort(key=lambda sp: (sp.start, sp.end))
+    return kept
+
+
+def _repair_timing(lines: Sequence[LineDTO], out: EditOutcome) -> None:
+    """修掉合并后行内可能出现的时间倒挂，**只动没锁的那一侧**。
+
+    用户锁定的时间是他自己调出来的值，新导入的时间是歌词源给的值，两者在同一行里
+    首尾相接时可能差出几十毫秒（`ops` 模块文档的时间不变式 2）。让路的必须是
+    没锁的那一个——去动锁定值就等于把用户的手工调整又平掉了一次。
+    两侧都锁或两侧都没锁时不管：那是同一来源内部本就自洽的数据。
+    """
+    fixed = 0
+    for line in lines:
+        for i in range(len(line.tokens) - 1):
+            a, b = line.tokens[i], line.tokens[i + 1]
+            overlap = a.start_ms + a.dur_ms - b.start_ms
+            if overlap <= 0:
+                continue
+            if a.locked_timing and not b.locked_timing:
+                b.start_ms += overlap
+                b.dur_ms = max(MIN_DUR_MS, b.dur_ms - overlap)
+                fixed += 1
+            elif b.locked_timing and not a.locked_timing:
+                a.dur_ms = max(MIN_DUR_MS, b.start_ms - a.start_ms)
+                fixed += 1
+    if fixed:
+        out.warnings.append(
+            f"{fixed} 处新导入的时间与你锁定的音节首尾冲突，已让新导入的那一侧避让"
+        )
+
+
+def merge_imported_lines(
+    project: ProjectDTO,
+    new_lines: Sequence[LineDTO],
+    *,
+    keep_manual_edits: bool = True,
+) -> EditOutcome:
+    """把新导入的歌词并进工程：**换文本、留手工成果**。
+
+    `keep_manual_edits=False` 才是从前那个"整体替换"的行为——它仍然是正当诉求
+    （用户就是要推倒重来），但必须由用户**显式**要求，不能是默认。默认整体替换
+    会把调过的轴、改过的注音、填过的发音形、指派过的声部连同它们的 `locked`
+    标记一起无声抹掉，正是 §4.4 点名的"用户调了 40 分钟的轴莫名其妙消失"。
+
+    搬运的口径就是 §4.4 的 `locked`：**只搬用户锁定过的项**，其余一律以新导入
+    的值为准（歌词源的注音、逐字轴本来就该被新的覆盖）。发音形是个例外，
+    连没锁的也一并搬——新导入根本不产生发音形，此处没有"新值"可言，
+    丢掉只是白白清空一层。
+
+    绑不上的锁定项**全部进 `project.orphans`**，带人类可读的中文说明。
+    """
+    out = EditOutcome()
+    fresh = [ln.model_copy(deep=True) for ln in new_lines]
+    old_lines = list(project.lines)
+
+    if not keep_manual_edits:
+        dropped = sum(_manual_items(ln) for ln in old_lines)
+        project.lines = fresh
+        if dropped:
+            out.warnings.append(
+                f"已按你的选择放弃全部手工修改：{dropped} 项（调过的轴、注音、"
+                "发音形、声部标记）随旧歌词一并丢弃，本次导入可以整体撤销"
+            )
+        return out
+
+    if not old_lines:
+        project.lines = fresh
+        return out
+
+    tid_index = _tid_index(fresh)
+    geo = _build_geometry(old_lines, fresh)
+    stats = _MergeStats()
+    # 新行下标 → 已认领它行级属性的老行下标。用户此前拆过行时会有两个老行指向
+    # 同一个新行，而行级属性只能有一份主人，第二份走"声部下沉到 token"
+    owner: dict[int, int] = {}
+    # 已经被认领的 (新行下标, token 下标)，防止两个老 token 抢同一个落点
+    claimed_tokens: set[tuple[int, int]] = set()
+
+    for oi, old_line in enumerate(old_lines):
+        _merge_one_line(
+            project,
+            out,
+            old_line=old_line,
+            old_index=oi,
+            fresh=fresh,
+            geo=geo,
+            tid_index=tid_index,
+            owner=owner,
+            claimed_tokens=claimed_tokens,
+            stats=stats,
+        )
+
+    project.lines = fresh
+    _repair_timing(fresh, out)
+
+    # 注音已经整体换成新导入的那一份，由它推出来的发音形立刻过期。物化与否按
+    # **整个工程**判断而不是逐行：用户是对整首歌启用了这一层，不该因为某一行
+    # 一条都没搬过来就把那行永久留空。锁定的发音形照旧不动（§4.4）。
+    materialized = any(ln.phonetics for ln in old_lines) or any(
+        ln.phonetics for ln in fresh
+    )
+    for line in fresh:
+        _rederive_phonetics(line, materialized=materialized)
+
+    if stats.carried:
+        out.warnings.append(
+            f"已保留你的手工修改 {stats.carried} 项（时间 {stats.timing}、"
+            f"注音 {stats.ruby}、发音形 {stats.phonetic}、声部 {stats.voice}、"
+            f"行标记 {stats.line_attr}）"
+        )
+    if stats.lost:
+        out.warnings.append(
+            f"{stats.lost} 项手工修改在新歌词里找不到对应位置，已收进「失效修正」"
+            "清单等你确认——它们没有被丢掉，但也没有自动落到新歌词上"
+        )
+    return out
+
+
+def _merge_one_line(
+    project: ProjectDTO,
+    out: EditOutcome,
+    *,
+    old_line: LineDTO,
+    old_index: int,
+    fresh: list[LineDTO],
+    geo: _Geometry,
+    tid_index: dict[str, tuple[int, int]],
+    owner: dict[int, int],
+    claimed_tokens: set[tuple[int, int]],
+    stats: _MergeStats,
+) -> None:
+    """把一个老行的手工成果搬到它的候选新行上，搬不动的记进失效修正清单。
+
+    候选可能不止一个（用户此前把两行并成了一行，如今又被拆回两行），
+    所以每一项都按"第一个能接住它的候选"落位，落过就不再参与后续候选。
+    """
+    old_text = _line_text(old_line)
+    done_tokens: set[int] = set()
+    done_ruby: set[int] = set()
+    done_phonetics: set[int] = set()
+
+    for ni in geo.candidates[old_index]:
+        new_line = fresh[ni]
+        token_map = _map_tokens(old_line, old_index, ni, tid_index, geo, new_line)
+
+        for ti, target in token_map.items():
+            tok = old_line.tokens[ti]
+            if ti in done_tokens or (ni, target) in claimed_tokens:
+                continue
+            if not tok.locked_timing and tok.voice_part is None:
+                continue
+            claimed_tokens.add((ni, target))
+            done_tokens.add(ti)
+            _carry_token(tok, new_line.tokens[target], stats)
+
+        for si, sp in enumerate(old_line.ruby):
+            if si in done_ruby or not sp.locked:
+                continue
+            target_span = _map_local_span(geo, old_index, ni, sp.start, sp.end)
+            if target_span is None:
+                continue
+            new_line.ruby = _place_span(new_line.ruby, sp, target_span)
+            done_ruby.add(si)
+            stats.ruby += 1
+
+        for si, sp in enumerate(old_line.phonetics):
+            # 发音形连没锁的也搬：新导入不产生这一层，此处没有"新值"可以覆盖它，
+            # 丢掉只是白白清空。只有锁定的那些才计入"保住了多少手工成果"
+            if si in done_phonetics:
+                continue
+            target_span = _map_local_span(geo, old_index, ni, sp.start, sp.end)
+            if target_span is None:
+                continue
+            new_line.phonetics = _place_span(new_line.phonetics, sp, target_span)
+            done_phonetics.add(si)
+            if sp.locked:
+                stats.phonetic += 1
+
+        if old_line.locked:
+            _carry_line_attrs(
+                project,
+                out,
+                old_line=old_line,
+                old_index=old_index,
+                new_line=new_line,
+                new_index=ni,
+                mapped=set(token_map.values()),
+                owner=owner,
+                stats=stats,
+            )
+
+    _record_merge_orphans(
+        project,
+        out,
+        old_line=old_line,
+        old_text=old_text,
+        bound=bool(geo.candidates[old_index]),
+        done_tokens=done_tokens,
+        done_ruby=done_ruby,
+        done_phonetics=done_phonetics,
+        stats=stats,
+    )
+
+
+def _map_tokens(
+    old_line: LineDTO,
+    old_index: int,
+    new_index: int,
+    tid_index: dict[str, tuple[int, int]],
+    geo: _Geometry,
+    new_line: LineDTO,
+) -> dict[int, int]:
+    """老行 token 下标 → 新行 token 下标。
+
+    主键是 tid（内容寻址三元组 + 行出现序号，§4.4/§7.3），它在这一层最强：
+    用户拆开的两个半行仍带着**原行**的 tid，`#っ#1` 明确指向"本行第 2 个っ"，
+    比任何字符相似度都准。而候选行已经由整曲字符对齐圈定，tid 只在这一行内
+    起作用，副歌重复行那种跨段错绑在这里不可能发生。
+
+    tid 对不上——行文本改过一个字，该行全部 tid 就都变了——退回字符偏移这条
+    次要模糊重绑，且要求映射后的区间与某个新 token **严格重合**：只差一个字
+    就宁可不绑，让它进「失效修正」清单。
+
+    这里**不做认领**，全部 token 都算：认领与否取决于这个 token 上有没有东西
+    要搬，而声部下沉还需要知道"这个老行落在新行的哪几个音节上"。
+    """
+    span_index = _token_span_index(new_line)
+    offsets = _token_char_offsets(old_line)
+    out: dict[int, int] = {}
+    for ti, tok in enumerate(old_line.tokens):
+        if not tok.text:
+            continue
+        hit = tid_index.get(tok.tid) if tok.tid else None
+        if hit is not None and hit[0] == new_index:
+            out[ti] = hit[1]
+            continue
+        target_span = _map_local_span(
+            geo, old_index, new_index, offsets[ti], offsets[ti] + len(tok.text)
+        )
+        if target_span is None:
+            continue
+        target = span_index.get(target_span)
+        if target is not None:
+            out[ti] = target
+    return out
+
+
+def _carry_token(old: TokenDTO, new: TokenDTO, stats: _MergeStats) -> None:
+    """把老 token 上锁定过的时间与声部覆盖搬到新 token 上。
+
+    连 `timing_source` 一起搬：§7.4 要求界面用颜色区分来源，搬了值不搬来源，
+    用户就会看到一个"歌词源给的"颜色配着自己调出来的数字。
+    """
+    if old.locked_timing:
+        new.start_ms = old.start_ms
+        new.dur_ms = old.dur_ms
+        new.timing_source = old.timing_source
+        new.timing_granularity = old.timing_granularity
+        new.locked_timing = True
+        stats.timing += 1
+    if old.voice_part is not None:
+        new.voice_part = old.voice_part
+        new.locked_voice = old.locked_voice
+        stats.voice += 1
+
+
+def _carry_line_attrs(
+    project: ProjectDTO,
+    out: EditOutcome,
+    *,
+    old_line: LineDTO,
+    old_index: int,
+    new_line: LineDTO,
+    new_index: int,
+    mapped: set[int],
+    owner: dict[int, int],
+    stats: _MergeStats,
+) -> None:
+    """搬运行级手工成果：制作名单标记、行声部、行级锁。
+
+    一个新行只能有一位"主人"。用户此前把一行拆成两半、又给两半指派了不同声部时，
+    第二半的声部**下沉到 token 级**保住——模型本来就支持 token 级声部
+    （对唱一行内男女交替是常态），`merge_line` 走的也是这条路。数据没丢就不该
+    往清单里塞东西，清单只装真的没保住的东西。
+
+    制作名单标记没有 token 级的落点，两个老行判得不一样时只能留一份，
+    另一份进清单——它是用户亲手判过的一位信息，静默取其一等于替他做主。
+    """
+    if new_index not in owner:
+        owner[new_index] = old_index
+        new_line.is_metadata = old_line.is_metadata
+        new_line.voice_part = old_line.voice_part
+        new_line.locked = True
+        stats.line_attr += 1
+        return
+
+    if old_line.voice_part != new_line.voice_part:
+        sunk = 0
+        for ti in sorted(mapped):
+            tok = new_line.tokens[ti]
+            if tok.voice_part is None:
+                tok.voice_part = old_line.voice_part
+                tok.locked_voice = True
+                sunk += 1
+        if sunk:
+            stats.line_attr += 1
+            out.warnings.append(
+                f"「{_preview_text(_line_text(old_line))}」的声部「{old_line.voice_part}」"
+                f"与并到同一新行上的另一段不同，已下沉到 {sunk} 个音节上，着色不变"
+            )
+
+    if old_line.is_metadata != new_line.is_metadata:
+        was = "制作名单" if old_line.is_metadata else "正文歌词"
+        now = "制作名单" if new_line.is_metadata else "正文歌词"
+        _add_orphan(
+            project,
+            out,
+            kind="line",
+            detail=(
+                f"「{_preview_text(_line_text(old_line))}」你标过{was}，"
+                f"但新歌词把它与另一句并成了同一行，那一句是{now}，只能保留一种"
+            ),
+            payload={
+                "line_id": old_line.id,
+                "text": _line_text(old_line),
+                "is_metadata": old_line.is_metadata,
+                "voice_part": old_line.voice_part,
+            },
+        )
+        stats.lost += 1
+
+
+def _record_merge_orphans(
+    project: ProjectDTO,
+    out: EditOutcome,
+    *,
+    old_line: LineDTO,
+    old_text: str,
+    bound: bool,
+    done_tokens: set[int],
+    done_ruby: set[int],
+    done_phonetics: set[int],
+    stats: _MergeStats,
+) -> None:
+    """把这一行里没能落到新歌词上的手工成果逐条记进「失效修正」清单。
+
+    §4.4：**重绑失败的锁定项不得静默丢弃**。文案一律带上原文——用户看到
+    「『明日』的注音『あした』」能立刻认出是哪个词，看到"第 7 行第 3 个音节"
+    还得回去数。`payload` 留够重新应用所需的原始数据。
+    """
+    label = _preview_text(old_text)
+    where = "在新歌词里找不到对应位置" if bound else "在新歌词里找不到对应的这一句"
+
+    for ti, tok in enumerate(old_line.tokens):
+        if ti in done_tokens:
+            continue
+        if tok.locked_timing:
+            _add_orphan(
+                project,
+                out,
+                kind="timing",
+                detail=(
+                    f"「{label}」中「{tok.text}」的时间（{tok.start_ms}ms 起、"
+                    f"长 {tok.dur_ms}ms）是你手工调过的，{where}，需要重新调"
+                ),
+                payload={
+                    "line_id": old_line.id,
+                    "line_text": old_text,
+                    "tid": tok.tid,
+                    "text": tok.text,
+                    "start_ms": tok.start_ms,
+                    "dur_ms": tok.dur_ms,
+                    "timing_source": tok.timing_source,
+                },
+            )
+            stats.lost += 1
+        if tok.voice_part is not None:
+            _add_orphan(
+                project,
+                out,
+                kind="voice_part",
+                detail=(
+                    f"「{label}」中「{tok.text}」你指派的声部「{tok.voice_part}」"
+                    f"{where}，需要重新指派"
+                ),
+                payload={
+                    "line_id": old_line.id,
+                    "line_text": old_text,
+                    "tid": tok.tid,
+                    "text": tok.text,
+                    "voice_part": tok.voice_part,
+                },
+            )
+            stats.lost += 1
+
+    for si, sp in enumerate(old_line.ruby):
+        if si in done_ruby or not sp.locked:
+            continue
+        base = old_text[sp.start : sp.end]
+        _add_orphan(
+            project,
+            out,
+            kind="ruby",
+            detail=(
+                f"「{base}」的注音「{sp.text}」是你锁定过的，{where}（原句"
+                f"「{label}」），请重新标注"
+            ),
+            payload={
+                "line_id": old_line.id,
+                "line_text": old_text,
+                "start": sp.start,
+                "end": sp.end,
+                "text": sp.text,
+                "source": sp.source,
+                "locked": True,
+                "base": base,
+            },
+        )
+        stats.lost += 1
+
+    for si, sp in enumerate(old_line.phonetics):
+        if si in done_phonetics or not sp.locked:
+            # 没锁的发音形是推导出来的，重新推一遍就回来了，进清单只会把真正
+            # 需要用户确认的条目淹掉
+            continue
+        base = old_text[sp.start : sp.end]
+        _add_orphan(
+            project,
+            out,
+            kind="phonetic",
+            detail=(
+                f"「{base}」上你锁定过的发音形「{sp.text}」{where}（原句"
+                f"「{label}」），请重新填写"
+            ),
+            payload={
+                "line_id": old_line.id,
+                "line_text": old_text,
+                "start": sp.start,
+                "end": sp.end,
+                "text": sp.text,
+                "source": sp.source,
+                "locked": True,
+                "base": base,
+            },
+        )
+        stats.lost += 1
+
+    if bound or not old_line.locked:
+        return
+    if not old_line.is_metadata and old_line.voice_part == "main":
+        # 行级锁本身是"别让自动分行动这一行"的标记，不承载别的信息。整行都不在
+        # 新歌词里了，这个标记也就无所指——为它写一条清单只会制造噪声
+        return
+    _add_orphan(
+        project,
+        out,
+        kind="line",
+        detail=(
+            f"「{label}」你标过的"
+            + ("制作名单" if old_line.is_metadata else f"声部「{old_line.voice_part}」")
+            + f"{where}，需要重新标记"
+        ),
+        payload={
+            "line_id": old_line.id,
+            "text": old_text,
+            "is_metadata": old_line.is_metadata,
+            "voice_part": old_line.voice_part,
+        },
+    )
+    stats.lost += 1
 
 
 # ---- 配色模板（跨工程的全局资源） ----

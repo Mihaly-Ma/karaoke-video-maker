@@ -6,6 +6,12 @@ CLAUDE.md §5.2（已定）：provider 只负责"取回并归一化"，不负责
 CLAUDE.md §2.5：手工导入不是"搜索失败后的惩罚性回退"，`/import` 必须随时可用；
 `/search` 部分歌词源失败时，其余源的结果照常返回，失败原因进 `errors`，
 不能让一个源的故障拖垮整个搜索请求。
+
+CLAUDE.md §4.4：**重新导入歌词不是整体替换，而是一次 `locked` 感知的合并**。
+用户重新导入十有八九是因为歌词文本错了，不是因为想丢掉自己调了四十分钟的轴；
+从前 `draft.lines = parsed.lines` 会把调过的轴、改过的注音、填过的发音形、
+指派过的声部连同 `locked` 标记一起无声抹掉。合并逻辑在
+`editing.ops.merge_imported_lines`，绑不上的项进 `ProjectDTO.orphans`。
 """
 
 from __future__ import annotations
@@ -15,6 +21,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from fastapi import APIRouter, HTTPException, Request
 from kvm.api.schemas import (
+    LineDTO,
+    LyricApplyRequest,
     LyricCandidate,
     LyricFetchRequest,
     LyricImportRequest,
@@ -24,8 +32,9 @@ from kvm.api.schemas import (
     ProjectDTO,
 )
 from kvm.api.store import ProjectStore
+from kvm.editing.ops import merge_imported_lines
 from kvm.lyrics.base import LyricProvider, LyricProviderError, TrackMatch
-from kvm.lyrics.importer import parse_import
+from kvm.lyrics.importer import parse_import, rebase_tids
 from kvm.lyrics.qq import QqMusicProvider
 
 _log = logging.getLogger(__name__)
@@ -39,17 +48,6 @@ router = APIRouter(prefix="/api/lyrics", tags=["lyrics"])
 PROVIDERS: dict[str, LyricProvider] = {
     "qq": QqMusicProvider(),
 }
-
-
-class LyricApplyRequest(LyricFetchRequest):
-    """`/apply` 请求体：在 `schemas.LyricFetchRequest` 基础上加 `project_id`。
-
-    预览阶段（`/preview`）不需要知道写到哪个工程，所以契约里的
-    `LyricFetchRequest` 没带 `project_id`；应用阶段必须知道，这里在路由层
-    组合出一个新类型，不修改 `schemas.py`。
-    """
-
-    project_id: str
 
 
 def _store(request: Request) -> ProjectStore:
@@ -150,9 +148,39 @@ def preview(req: LyricFetchRequest) -> LyricPreview:
     )
 
 
+def _apply_lines(
+    draft: ProjectDTO,
+    lines: list[LineDTO],
+    *,
+    replace: bool,
+    keep_manual_edits: bool,
+    source: str,
+) -> None:
+    """把解析好的歌词写进工程草稿。**替换路径走合并，不整体覆盖。**
+
+    追加路径不覆盖任何既有内容，唯一要做的是给追加进来的行重排 tid 的行出现序号：
+    tid 每次导入都从 0 开始数，把同一份内容追加两次会算出两组完全相同的 tid，
+    而重绑一旦撞号就会绑到错误的那一行去（比绑不上更糟，见 `importer.rebase_tids`）。
+    """
+    if not replace:
+        rebase_tids(draft.lines, lines)
+        draft.lines = [*draft.lines, *lines]
+        return
+
+    outcome = merge_imported_lines(draft, lines, keep_manual_edits=keep_manual_edits)
+    for note in outcome.warnings:
+        # 回执写日志即可：真正需要用户逐条确认的损失已经进了 `draft.orphans`，
+        # 随响应体一起回到前端（CLAUDE.md §4.4）
+        _log.info("导入歌词（%s）：%s", source, note)
+
+
 @router.post("/apply", response_model=ProjectDTO)
 def apply_lyric(req: LyricApplyRequest, request: Request) -> ProjectDTO:
-    """下载并写入工程，走 `store.mutate` 进撤销栈——用户随时能撤销这次替换。"""
+    """下载并写入工程，走 `store.mutate` 进撤销栈——用户随时能撤销这次导入。
+
+    默认做 `locked` 感知的合并（`keep_manual_edits=True`）：用户此前调过的轴、
+    改过的注音都会被重新绑到新歌词上，绑不上的进 `orphans`。
+    """
     provider = PROVIDERS.get(req.provider)
     if provider is None:
         raise HTTPException(status_code=404, detail=f"未知歌词源：{req.provider}")
@@ -162,7 +190,13 @@ def apply_lyric(req: LyricApplyRequest, request: Request) -> ProjectDTO:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     def _mutator(draft: ProjectDTO) -> None:
-        draft.lines = parsed.lines
+        _apply_lines(
+            draft,
+            parsed.lines,
+            replace=True,
+            keep_manual_edits=req.keep_manual_edits,
+            source=req.provider,
+        )
 
     try:
         return _store(request).mutate(
@@ -181,7 +215,13 @@ def import_lyric(req: LyricImportRequest, request: Request) -> ProjectDTO:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     def _mutator(draft: ProjectDTO) -> None:
-        draft.lines = lines if req.replace else [*draft.lines, *lines]
+        _apply_lines(
+            draft,
+            lines,
+            replace=req.replace,
+            keep_manual_edits=req.keep_manual_edits,
+            source=req.kind,
+        )
 
     try:
         return _store(request).mutate(req.project_id, _mutator, label="手工导入歌词")
