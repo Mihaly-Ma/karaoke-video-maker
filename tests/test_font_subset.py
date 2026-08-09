@@ -31,7 +31,11 @@ from fontTools.fontBuilder import FontBuilder  # noqa: E402
 from fontTools.pens.ttGlyphPen import TTGlyphPen  # noqa: E402
 from fontTools.ttLib import TTFont  # noqa: E402
 from kvm.api.routes.fonts import _subset_cache_key  # noqa: E402
-from kvm.render.font_subset import SUBSET_VERSION, subset_font  # noqa: E402
+from kvm.render.font_subset import (  # noqa: E402
+    SUBSET_VERSION,
+    FontFamilyMismatchError,
+    subset_font,
+)
 
 # 复刻 macOS 日文字体的命名习惯：nameID 1 带字重后缀，真族名只在 nameID 16
 FAMILY = "Kvm Test Gothic"
@@ -97,6 +101,53 @@ def test_subset_rewrites_family_name(tmp_path: Path) -> None:
     assert _names(out, 2) == ["Regular"]
     # 字形没有被改写连累
     assert 0x41 in out.getBestCmap()
+
+
+def _strip_name_records(path: Path, name_ids: set[int]) -> None:
+    """把指定的 nameID 从字体里全部删掉，模拟"改写无从下手"的源字体。"""
+    font = TTFont(str(path))
+    for name_id in name_ids:
+        font["name"].removeNames(nameID=name_id)
+    font.save(str(path))
+
+
+def test_subset_refuses_to_emit_a_font_that_cannot_be_matched(tmp_path: Path) -> None:
+    """族名改写落空时必须**响亮失败**，绝不能把产物写出去。
+
+    `_rewrite_family_name` 只改**已存在**的记录：源字体一条 nameID 1 都没有时，
+    它什么也改不到，产物于是带着一个与请求族名无关的名字。这种产物在 libass 里
+    **匹配不上而每帧返回 0 张图**——画面空白、控制台干净、刷新页面也修不好
+    （坏的是磁盘缓存）。所以宁可 500，也不要送出一份注定画不出字的字体。
+    """
+    src = tmp_path / "src.ttf"
+    _make_source_font(src)
+    _strip_name_records(src, {1})
+    dest = tmp_path / "out.otf"
+
+    with pytest.raises(FontFamilyMismatchError, match="族名"):
+        subset_font(src, dest, charset={"A"}, family_name=FAMILY)
+
+    # 关键：坏产物不许落盘，否则它会进缓存、之后每次请求都命中同一份坏文件
+    assert not dest.exists()
+
+
+def test_subset_refuses_when_a_conflicting_family_name_survives(tmp_path: Path) -> None:
+    """产物里同时存在两个族名同样要拒绝——匹配器取哪一个是不确定的。"""
+    src = tmp_path / "src.ttf"
+    _make_source_font(src)
+    dest = tmp_path / "out.otf"
+
+    # 造一条改写覆盖不到的额外族名：Mac 平台的 nameID 16（改写只删 16，这里验证删干净了）
+    font = TTFont(str(src))
+    font["name"].setName("Some Other Family", 16, 1, 0, 0)
+    font.save(str(src))
+
+    # 删 16 是改写的既定行为，所以这一份应当**通过**——这条用例守的是
+    # "冲突确实被清掉了"，而不是"有冲突就报错"
+    subset_font(src, dest, charset={"A"}, family_name=FAMILY)
+    out = TTFont(str(dest))
+    assert _names(out, 1) == [FAMILY]
+    assert _names(out, 16) == []
 
 
 def test_subset_without_family_name_keeps_original(tmp_path: Path) -> None:

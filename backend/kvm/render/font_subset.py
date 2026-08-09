@@ -52,11 +52,17 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:  # pragma: no cover - 仅供类型标注，运行期不导入
     from fontTools.ttLib import TTFont
 
-SUBSET_VERSION = 2
+SUBSET_VERSION = 3
 """子集产物的生成逻辑版本。**改动 `subset_font` 的产物内容时必须 +1。**
 
 调用方（`kvm.api.routes.fonts`）把它算进磁盘缓存键，否则老用户的缓存目录里
-会永远躺着按旧逻辑生成的坏字体——那正是本次族名改写要修的东西。
+会永远躺着按旧逻辑生成的坏字体——那正是族名改写要修的东西。
+
+v3 的这一次 +1 并没有改变产物内容，改变的是**产物的保证**：`_assert_family_name`
+从这版起在保存之前拦下族名对不上的产物。已经躺在磁盘上的旧产物没有经过这道检查，
+而这类坏文件的症状恰恰是"预览空白且刷新页面也修不好"——因为坏的是缓存本身，
+每次请求都稳定命中同一份。加版本号是唯一能把它们从用户磁盘上赶走的手段。
+**"内容没变就不用 +1" 在这里是错的**：判断依据是"旧产物还能不能信"，不是字节是否相同。
 """
 
 # 常见的系统字体位置。TTC 是字体集合，需要按 family 挑出其中一个。
@@ -152,6 +158,55 @@ def _rewrite_family_name(font: TTFont, family: str) -> None:
         name.removeNames(nameID=name_id)
 
 
+class FontFamilyMismatchError(RuntimeError):
+    """子集产物的族名与请求的族名对不上。
+
+    **这个错误必须响亮，不能降级。**预览侧 JASSUB 走 `ASS_FONTPROVIDER_NONE`，
+    libass 唯一的匹配依据就是 ASS 里的 `Fontname` 与内嵌字体 name 表里的族名；
+    对不上时它**既不报错也不回退，只是每帧返回 0 张图**——用户看到的是一块空白，
+    而控制台干干净净。这正是"只有某几个字体能用"那类报告的形状，
+    并且**刷新页面也修不好**，因为坏的是磁盘上的缓存产物。
+
+    实测佐证（`frontend/scripts/diag-font-render.mjs` 的 `samefont` 对照组）：
+    故意让每个族名都拿到同一份字体字节后，四个字体的着墨格数直接归零、
+    字形指纹撞成一片——与"渲染正常"在像素总量上**看不出区别**的那种失败，
+    只有指纹才分得出来。所以宁可这里 500，也不要送出一份注定画不出字的产物。
+    """
+
+
+def _family_names(font: TTFont) -> set[str]:
+    """产物里所有会被字体匹配器当成"族名"的字符串。
+
+    同时看 nameID 1 与 16：FreeType 合成 `family_name` 时优先取 16（若存在），
+    而 libass 两者都会碰。`_rewrite_family_name` 会删掉 16，这里再核一遍，
+    确保没有漏网的记录与 nameID 1 打架。
+    """
+    out: set[str] = set()
+    for record in font["name"].names:
+        if record.nameID in (1, 16):
+            try:
+                out.add(str(record.toUnicode()))
+            except UnicodeDecodeError:  # pragma: no cover - 坏记录直接忽略
+                continue
+    return out
+
+
+def _assert_family_name(font: TTFont, family: str, src: Path) -> None:
+    """改名之后立刻自检：产物的族名必须**唯一**且等于请求的族名。
+
+    放在保存之前，坏产物就永远落不了盘——否则它会进缓存，之后每次请求都命中
+    同一份坏文件，表现成"这个字体永久用不了"。
+    """
+    names = _family_names(font)
+    if names != {family}:
+        msg = (
+            f"字体子集产物的族名与请求的对不上：请求「{family}」，"
+            f"产物里是 {sorted(names) or '（一条 nameID 1 都没有）'}；源文件 {src}。"
+            "带着这样的族名，libass 会匹配不上而每帧返回 0 张图（画面空白且不报错）。"
+        )
+        raise FontFamilyMismatchError(msg)
+
+
 def subset_font(
     src: Path,
     dest: Path,
@@ -210,6 +265,7 @@ def subset_font(
 
     if family_name:
         _rewrite_family_name(font, family_name)
+        _assert_family_name(font, family_name, src)
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     if flavor:
