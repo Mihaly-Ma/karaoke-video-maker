@@ -2,10 +2,11 @@
  * 「歌词」舞台的样式，由 LyricPanel 一次性注入。
  *
  * 取值一律来自 styles.css 的设计 token（docs/ui-redesign.md §六点五：六套并行的
- * 内联样式必须收编成一套）。**唯一的例外是成片渲染区**——那里的颜色表达的是
- * "成片长什么样"，与外壳 token 是两套坐标系，套用界面配色反而会让用户分不清
- * 哪个颜色是成片的、哪个是界面的。例外集中在 `.lyr-film` 一个作用域里，并在
- * 该处逐条注明出处。
+ * 内联样式必须收编成一套）。**唯一的例外是歌词文字本身的填充色与描边色**——
+ * 那两个颜色表达的是"成片长什么样"，与外壳 token 是两套坐标系，套用界面配色
+ * 会让用户分不清哪个颜色是成片的、哪个是界面的。例外只有 `.lyr-film` 作用域里的
+ * `--lyr-fill` / `--lyr-outline` 两条，并在该处注明出处；**底色不在例外之列**，
+ * 理由见该处注释。
  *
  * 旧实现（`kvm-lyric-*`）带一个 `@media (prefers-color-scheme)` 分支，在浅色
  * macOS 上把面板渲染成白卡片，与无条件深色的新外壳打架。本文件不再有任何
@@ -152,72 +153,84 @@ export const LYRIC_STAGE_CSS = `
 
 .lyr-blank { flex: 1 1 auto; display: flex; align-items: center; justify-content: center; color: var(--fg-3); }
 
-/* ---- 成片渲染区 ----
- * 这一段的颜色**不是**界面 token，而是成片本身的取值（docs/ui-redesign.md §六：
- * "预览区域不套用界面配色"）。字号/描边比例由工程样式换算，见 LyricScript.tsx。
+/* ---- 歌词正文区 ----
+ * 文字沿用**成片**的填充色与描边色（白字黑边 + 注音），那才是这块视图里真正有
+ * 信息量的部分：用户靠它认版本、核读音。
+ *
+ * **底色反而必须是界面 token。** 成片的纯色背景兜底 #005500（CLAUDE.md §8.5）
+ * 是给"没有视频画面时的成片"用的，不是给这一步用的：这一步用户在读几十行文字挑
+ * 版本，一大片饱和绿伤长时间阅读、与深色外壳打架，而且不提供任何信息——成片里
+ * 那块地方其实是视频画面。绿底留给**样式**舞台，那里才是在判断成片观感。
  */
 .lyr-film {
-  --lyr-film-bg: #005500;          /* 纯色背景兜底，CLAUDE.md §8.5 */
-  --lyr-fill: #ffffff;             /* 未唱填充：nicokara 惯例白字 */
-  --lyr-outline: #000000;          /* 未唱描边：黑边 */
-  --lyr-gutter: rgb(255 255 255 / 0.42);   /* 压在成片底上的行号与操作 */
-  --lyr-gutter-hi: rgb(255 255 255 / 0.14);
+  --lyr-fill: #ffffff;             /* 未唱填充：nicokara 惯例白字，成片取值不是界面 token */
+  --lyr-outline: #000000;          /* 未唱描边：黑边，同上 */
 
   /*
-   * 描边与注音一律由 --lyr-fs 派生，而不是各自算好一个 px 值传进来。
-   * 自动缩放（LyricScript 的 fit）只改 --lyr-fs 一个变量，派生量跟着走——
-   * 否则会出现"字缩了、描边没缩"，观感立刻不像成片。
+   * 描边与注音一律由 --lyr-fs 派生，而不是各自算好一个 px 值传进来：
+   * 换算源头只有 --lyr-fs 一处，不会出现"字改了、描边没跟上"。
    * 比例（--lyr-stroke-ratio / --lyr-ruby-scale）取自工程样式，由 React 写入。
    */
   --lyr-stroke: calc(var(--lyr-fs) * var(--lyr-stroke-ratio));
   --lyr-ruby-fs: calc(var(--lyr-fs) * var(--lyr-ruby-scale));
   --lyr-ruby-stroke: calc(var(--lyr-ruby-fs) * var(--lyr-stroke-ratio) * 0.55);
 
-  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  flex: 1 1 auto; min-height: 0;
   /*
-   * 纵向滚动条常驻留槽：clientWidth 不再随内容多少而跳变。
-   * 缩放是按 clientWidth 算的，宽度一跳就会变成"缩小→滚动条消失→变宽→放大→
-   * 滚动条回来"的来回振荡。
+   * 两个方向都归这一个容器管：纵向翻歌词，横向读超宽行。
+   * 横滚**整块一起滚**（而不是每行各滚各的）是刻意的——一条滚动条、行与行始终对齐，
+   * 且不需要任何 JS 测量，因此不存在"某个引擎量出来不一样"的余地。
    */
-  scrollbar-gutter: stable;
-  background: var(--lyr-film-bg);
+  overflow: auto;
+  background: var(--bg-canvas);
   padding: var(--sp-5) var(--sp-6);
 }
 
-.lyr-script { display: flex; flex-direction: column; }
+/*
+ * 宽度取最宽那行（max-content），窄于容器时补满（min-width: 100%）。
+ * 取 max-content 是为了让所有行共用同一条基线宽度：横滚时行与行一起走，
+ * 不会你走我不走。min-width: 100% 则保证内容短时整行仍可 hover。
+ */
+.lyr-script { display: flex; flex-direction: column; width: max-content; min-width: 100%; }
 
-.lyr-line { display: flex; align-items: flex-start; gap: var(--sp-3); border-radius: var(--r-md); padding: 0 var(--sp-2); width: fit-content; max-width: 100%; }
-.lyr-line--edit:hover { background: var(--lyr-gutter-hi); }
+.lyr-line { display: flex; align-items: flex-start; gap: var(--sp-3); border-radius: var(--r-md); padding: 0 var(--sp-2); }
+.lyr-line--edit:hover { background: var(--bg-surface); }
 .lyr-line--meta { opacity: 0.55; }
 
+/*
+ * 行号与来源杠的定宽写成 flex: none + width，**不要写成 flex: 0 0 34px**。
+ * WebKit 在给这一行算 max-content 时会漏掉 flex-basis，改按子元素内容宽度累加：
+ * 行号里只有个位数字（约 7px）却占着 34px 的位，来源杠是空元素（0px）却占 3px，
+ * 于是整行被少算 30px，多出来的量由可收缩的 .lyr-line__body 吃掉——正文被静默裁掉
+ * 30px，而 Safari 的浮层滚动条平时不显形，看上去就是"每行都被切了一刀"。
+ * 写成 width 后 WebKit 走的是另一条计算路径，量出来与 Chromium 一致。
+ */
 .lyr-line__no {
-  flex: 0 0 34px;
+  flex: none;
+  width: 34px;
   padding-top: 0.6em;
   text-align: right;
-  color: var(--lyr-gutter);
+  color: var(--fg-3);
   font-family: var(--font-ui);
   font-size: var(--fs-xs);
   font-variant-numeric: tabular-nums;
 }
 
 /* 行首一条来源色的细杠：哪几行的轴是机器猜的，扫一眼就知道（CLAUDE.md §7.4） */
-.lyr-line__src { flex: 0 0 3px; align-self: stretch; margin: 0.5em 0; border-radius: var(--r-pill); background: transparent; }
+.lyr-line__src { flex: none; width: 3px; align-self: stretch; margin: 0.5em 0; border-radius: var(--r-pill); background: transparent; }
 .lyr-line__src--provider { background: var(--src-provider); }
 .lyr-line__src--aligned { background: var(--src-aligned); }
 .lyr-line__src--interpolated { background: var(--src-interp); }
 .lyr-line__src--manual { background: var(--src-manual); }
 
-/* 行内元素紧跟文本而不是撑满整行：制作名单徽章要贴着它标注的那一行，
-   拆行/并行按钮要落在手边——推到屏幕最右等于让用户横跨一屏去点 */
 /*
- * 缩到下限仍放不下的行，横向滚动**限在本行之内**（overflow-x: auto 只在真放不下时
- * 才长出滚动条，放得下的行一条都不会有）。让整页横滚是另一回事：行号、元信息栏、
- * 其余几十行会一起被推走，为了看清一行付出满屏错位的代价。
- * overflow-y 写死 hidden 是因为：一旦 overflow-x 不是 visible，另一轴的 visible 就会
- * 被计算成 auto，于是注音稍微出界就冒出一条纵向滚动条。注音由 line-height: 2 留出的
- * 空间容纳（0.45 倍字号 + 半行间距，量下来还有富余），hidden 不会裁到它。
+ * **绝不可收缩**（flex: 0 0 auto）。正文的宽度由文字本身定，容器放不下是容器的事，
+ * 由 .lyr-film 横滚解决——一旦允许收缩，任何一处宽度算少了都会直接从文字上扣，
+ * 而扣掉的部分是静默消失的（Safari 的浮层滚动条不显形，用户只看到行被切断）。
+ * 行内元素紧跟文本而不是推到最右：制作名单徽章要贴着它标注的那一行，
+ * 拆行/并行按钮要落在手边——推到屏幕最右等于让用户横跨一屏去点。
  */
-.lyr-line__body { flex: 0 1 auto; min-width: 0; overflow-x: auto; overflow-y: hidden; }
+.lyr-line__body { flex: 0 0 auto; }
 
 .lyr-text {
   font-family: var(--lyr-font);
@@ -233,7 +246,7 @@ export const LYRIC_STAGE_CSS = `
    * 拆点选时间间隙最大处＝演唱里的自然停顿），从来不是把字折回来。放开软换行，
    * 浏览器会按 CJK 规则在「触|れる」这种词中间随手断开——那是成片里根本不存在的版式，
    * 用户据此判断"这行太长/这里该断句"就是被预览误导了。
-   * 放不下时的处理见 LyricScript：先整体缩字号，缩到下限再走本行横向滚动。
+   * 放不下时由 .lyr-film 整块横滚，字号不动——这一步要认的是文本内容，不是版式。
    */
   white-space: nowrap;
 }
@@ -269,8 +282,8 @@ export const LYRIC_STAGE_CSS = `
 .lyr-split__tok { padding: 0 1px; }
 .lyr-split__pt {
   width: 12px; height: 1.4em; margin: 0 1px; padding: 0; vertical-align: middle;
-  background: var(--lyr-gutter-hi); border: 1px solid transparent; border-radius: var(--r-sm);
-  color: var(--lyr-gutter);
+  background: var(--bg-surface); border: 1px solid transparent; border-radius: var(--r-sm);
+  color: var(--fg-2);
   display: inline-flex; align-items: center; justify-content: center;
 }
 /* 竖杠是分隔符本身而不是图标，用 CSS 画——图标一律走 @ant-design/icons */
