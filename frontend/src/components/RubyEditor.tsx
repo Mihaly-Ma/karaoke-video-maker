@@ -44,7 +44,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, RefObject } from 'react'
 
-import type { Palette, Project } from '../api/types'
+import type { Line, Palette, Project } from '../api/types'
 import { t } from '../i18n'
 import { assToCssHex } from '../lib/assColor'
 import { alignReading, normalizeKana, toHiragana, validateKana } from '../lib/kana'
@@ -638,6 +638,31 @@ function scrollLineIntoView(
   paper.scrollTop = Math.max(0, next)
 }
 
+/**
+ * 这个词自己的声部覆盖（与所在行不同才算）。
+ * 一个 ruby 单元可能横跨多个 token（「明日」两个字一个词），取首字的覆盖即可 ——
+ * 一个词内部再分声部在演唱上没有意义。
+ */
+function tokenVoiceOf(line: Line, tokenIndex: number): string | null {
+  const vp = line.tokens[tokenIndex]?.voice_part
+  return vp && vp !== line.voice_part ? vp : null
+}
+
+/**
+ * 这一行实际用到的全部声部（行级 + 字级覆盖），按出现顺序去重。
+ * 只有一个且是 main 时返回空 —— main 是默认值，每行挂一个「main」只是噪音。
+ */
+function linePartsOf(line: Line): string[] {
+  const out: string[] = []
+  const push = (v: string) => {
+    if (v && !out.includes(v)) out.push(v)
+  }
+  push(line.voice_part)
+  for (const tk of line.tokens) if (tk.voice_part) push(tk.voice_part)
+  if (out.length === 1 && out[0] === 'main') return []
+  return out
+}
+
 // ---------------------------------------------------------------- 正文
 
 export interface RubyPaperProps {
@@ -681,6 +706,14 @@ export function RubyPaper({ editing, reviewOpen, onToggleReview }: RubyPaperProp
 
   const selection = useProject((s) => s.selection)
   const selLineId = selection.kind === 'none' ? null : selection.lineId
+
+  /** 点整行 = 选中它的首字 + 播放头跳过去，与点字（`pick`）是同一套语义 */
+  const pickLine = (lineId: string) => {
+    const st = useProject.getState()
+    st.select({ kind: 'token', lineId, tokenIndex: 0 })
+    const tk = st.project?.lines.find((l) => l.id === lineId)?.tokens[0]
+    if (tk) st.setPlayhead(Math.max(0, Math.round(tk.start_ms + (st.project?.global_offset_ms ?? 0))))
+  }
 
   /*
    * 正在打字时不许抢视口：就地改写行文本、或者在某个词头上开着注音输入框时，
@@ -773,6 +806,21 @@ export function RubyPaper({ editing, reviewOpen, onToggleReview }: RubyPaperProp
               data-active={selLineId === line.id || undefined}
               data-voice={line.voice_part || undefined}
               style={paletteVars(project.palettes[line.voice_part] ?? project.palettes['main'])}
+              /*
+                **整行都可点**，不只是字。行里除了字还有行号、右侧留白、声部标签，
+                点在那些地方本来什么也不会发生 —— 而用户想做的事很明确：选中这一句。
+                一句几十个字里只有字身上有热区，等于逼人去瞄准。
+
+                落到**首字**而不是整行：选中项是 token 级的，落到行上会让底栏检查器
+                半空着。点具体某个字时由 `pick` 接手（它更精确），所以这里要把
+                来自字、按钮、输入框的点击让出去，否则会把刚选好的字又拽回首字。
+              */
+              onClick={(e) => {
+                const el = e.target as HTMLElement
+                if (el.closest('.kvm-ruby__unit, button, input')) return
+                if (!line.tokens.length) return
+                pickLine(line.id)
+              }}
             >
               <span className="kvm-ruby__no num">{lineNo.get(line.id)}</span>
               <span className="kvm-ruby__text">
@@ -787,6 +835,12 @@ export function RubyPaper({ editing, reviewOpen, onToggleReview }: RubyPaperProp
                       data-unit={k}
                       data-src={u.missing ? 'missing' : u.src}
                       data-selected={k === selectedKey || undefined}
+                      /*
+                        这个词自己被指派了别的声部（与所在行不同）。带上属性之后
+                        CSS 会在它上方压一条声部色的短线 —— 光靠行标签只说得出
+                        "这句里有两个声部"，说不出**是哪几个词**。
+                      */
+                      data-voice={tokenVoiceOf(line, u.tokenIndex) ?? undefined}
                       tabIndex={0}
                       onClick={() => pick(u, true)}
                       onKeyDown={(e) => {
@@ -827,12 +881,17 @@ export function RubyPaper({ editing, reviewOpen, onToggleReview }: RubyPaperProp
                 于是"改了声部却看起来毫无变化"，用户会以为指派没生效。
                 标签是那一刻唯一的证据；等去样式舞台配好四个颜色，颜色才接手。
                 main 不标 —— 它是默认值，每行挂一个「main」只是噪音。
+
+                **一句多声部要在这里看得出来。**「A: 君の / B: 声が / 合: 聞こえる」
+                是对唱的常态（§8.5「Token 级可覆盖」），只画行级那一个标签的话，
+                屏幕上这一句看起来就是单声部的，字级覆盖等于隐身。
+                所以标的是这一行**实际用到的全部声部**，多于一个时逐个列出。
               */}
-              {line.voice_part && line.voice_part !== 'main' && (
-                <span className="kvm-ruby__voice" data-role="voice-tag">
-                  {line.voice_part}
+              {linePartsOf(line).map((vp) => (
+                <span key={vp} className="kvm-ruby__voice" data-role="voice-tag" data-part={vp}>
+                  {vp}
                 </span>
-              )}
+              ))}
               {/*
                 改写这一行的文字。§2.5 要求每个自动环节都有等价的手工旁路，
                 而歌词文本此前是唯一空着的一档——改一个错字得把整首歌重贴一遍。
@@ -964,6 +1023,8 @@ const CSS = `
 }
 
 .kvm-ruby__line {
+  /* 整行可点（见 JSX 里的 onClick），光标要跟上，否则没人知道行首行尾也能点 */
+  cursor: pointer;
   display: flex;
   align-items: flex-end;
   gap: var(--sp-3);
@@ -1045,6 +1106,27 @@ const CSS = `
   border-radius: var(--r-pill);
   border: 1px solid var(--src-manual);
   color: var(--src-manual);
+}
+/*
+ * 被单独指派了声部的词：**上方**压一条短线 + 一个小标签。
+ *
+ * 走上边而不是下边：下划线已经被"读音来源"占了（§7.4 要求来源可见），
+ * 两条线叠在同一侧谁也读不出来。标签用 data-part 直接吐出声部名 ——
+ * 一句里两个声部时，用户要知道的是"这几个字是谁唱"，不是"这里有点不一样"。
+ */
+.kvm-ruby__unit[data-voice] {
+  box-shadow: inset 0 2px 0 var(--src-manual);
+}
+.kvm-ruby__unit[data-voice]::before {
+  content: attr(data-voice);
+  position: absolute;
+  top: -0.55em;
+  left: 0;
+  font-size: var(--fs-xs);
+  line-height: 1;
+  color: var(--src-manual);
+  pointer-events: none;
+  white-space: nowrap;
 }
 
 /*

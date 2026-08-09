@@ -551,11 +551,17 @@ label.checkbox-row {
   overflow-y: auto;
 }
 
-/* 歌词正文：这一步的第二主角，宽度由左右分割条给定 */
+/*
+ * 歌词正文：这一步的第二主角，宽度由左右分割条给定。
+ * 纵向叠两块：正文（吃掉剩余高度）+ 底下贴着的声部条（自然高度）。
+ * `min-height: 0` 是让正文内部那个 overflow-y 真的成为滚动容器的必要条件（§七点五）。
+ */
 .edit-lyrics {
   min-width: 0;
   min-height: 0;
   display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
   padding-left: var(--sp-3);
 }
 
@@ -659,13 +665,24 @@ label.checkbox-row {
 
 /* ---- 声部指派（§2.5：自动没有可靠方案，手工旁路就是唯一入口） ---- */
 
+/*
+ * 贴在歌词正文下方的一条。**只吃一行高度**：上一轮刚把正文从 1004px 拓到 1232px，
+ * 在这儿摆一块面板等于把腾出来的地方又吃回去。
+ * 横向不与正文竞争（它在正文下面，不在旁边），所以正文宽度一点不受影响。
+ */
 .edit-voice {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: var(--sp-1);
   flex-wrap: wrap;
-  padding-left: var(--sp-3);
-  border-left: var(--hairline);
+  padding: var(--sp-1) var(--sp-2);
+  background: var(--bg-panel);
+  border: var(--hairline);
+  border-radius: var(--r-md);
+  /* 窄窗口下换行会让它长高，但绝不许把正文顶没了 */
+  max-height: 22vh;
+  overflow-y: auto;
 }
 /*
  * 当前行的声部，读起来是"现在是什么"，与右边那排"改成什么"分开。

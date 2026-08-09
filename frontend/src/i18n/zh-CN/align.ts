@@ -87,6 +87,10 @@ export const align: Record<string, string> = {
   // 默认声部也能改名：声部名是给人看的标签（「男」「女」「合」比 duet_a 好读得多）
   'align.voiceRename': '改名',
   'align.voiceRenameHint': '点击给「{part}」改名（全曲一起改）',
+  // 删除 = 归并：一行总得有个声部，所以要说清并到哪儿去
+  'align.voiceDelete': '删除声部',
+  'align.voiceDeleteHint': '删除「{part}」，它的行并入「{to}」',
+  'align.voiceDeleteLast': '只剩这一个声部，删不得',
   'align.voiceDone': '已把 {n} 处改为 {part}',
 
   // ---- 整曲偏移（三级调轴的「整体」级）----

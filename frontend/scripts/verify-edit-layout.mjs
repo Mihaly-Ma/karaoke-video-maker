@@ -59,10 +59,11 @@ const PROJECT_ID = 'cd4aed3df12e'
  * 所以：默认只跑只读判据；要验编辑链路就显式加 `--mutate`，
  * 并且**确认此刻没有人正在用这个工程**。
  *
- * ⚠️ 即使加了 `--mutate`，声部那一节仍可能留下残留 —— 后端一次只收一行，
- * 而"改名"要动几十行，任何一步中途没跑完都无法自动收拾干净。第 8 节会把
- * 逐字段的差异打出来，照着差异反着写回去即可。跑之前先备份一次工程更稳：
- *   curl -s $API/api/projects/$ID > /tmp/before.json
+ * 加了 `--mutate` 之后，**改工程的判据一律跑在脚本自己新建的临时工程上**，
+ * 跑完就删。绝不碰用户正开着的那一个 —— 这条是踩过三次才立的规矩：
+ * 逐个操作"数一数占了几格撤销再退回去"根本靠不住（后端对无实际变化的写入不入栈），
+ * 而"一路撤到开跑前的深度"在用户同时开着浏览器时会把**他的**编辑一并撤掉。
+ * 只读判据仍跑在真实工程上，因为那些要真的素材（波形、走带、代理视频）。
  */
 const MUTATE = process.argv.includes('--mutate')
 
@@ -77,7 +78,45 @@ const check = (ok, label, extra = '') => {
 
 const KNOWN_NOISE = /Cross-Origin-Embedder-Policy|jassub|worker\.js|字幕渲染器|字幕预览不可用|SubtitleOverlay/i
 
-const fetchProject = () => fetch(`${API}/api/projects/${PROJECT_ID}`).then((r) => r.json())
+/** 改工程的判据跑在这个临时工程上，跑完删掉。只读判据仍用真实工程 */
+let SCRATCH_ID = null
+const fetchProject = (id = SCRATCH_ID ?? PROJECT_ID) =>
+  fetch(`${API}/api/projects/${id}`).then((r) => r.json())
+
+/** 造一个只有歌词、没有素材的临时工程：逐字轴/拆行/声部这些判据都不需要音频 */
+async function createScratch(lines) {
+  const created = await fetch(`${API}/api/projects/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: `验收临时工程 ${new Date().toISOString().slice(11, 19)}`, artist: 'verify' }),
+  }).then((r) => r.json())
+  /*
+   * 用**合成的 QRC** 导入。纯文本与 LRC 都只给"整行一个 token"，
+   * 逐字轴上就没有"第 3 个字"可点，拆行/字级声部这些判据全做不了；
+   * 逐字粒度只有 QRC 这条路径给得出（CLAUDE.md §4.2 的粒度表）。
+   * 时间直接抄真实工程的，字宽、间隙都是真的。
+   */
+  const qrc = lines
+    .map((l) => {
+      const st = l.tokens[0].start_ms
+      const last = l.tokens[l.tokens.length - 1]
+      const dur = last.start_ms + last.dur_ms - st
+      return `[${st},${dur}]` + l.tokens.map((t) => `${t.text}(${t.start_ms},${t.dur_ms})`).join('')
+    })
+    .join('\n')
+  await fetch(`${API}/api/lyrics/import`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ project_id: created.id, kind: 'qrc', content: qrc, replace: true }),
+  })
+  return created.id
+}
+
+const deleteScratch = async () => {
+  if (!SCRATCH_ID) return
+  await fetch(`${API}/api/projects/${SCRATCH_ID}`, { method: 'DELETE' })
+  SCRATCH_ID = null
+}
 const lineTextOf = (l) => l.tokens.map((tk) => tk.text).join('')
 
 /** 对账用的规范化：只去掉与内容无关的时间戳 */
@@ -88,7 +127,7 @@ const normalize = (p) => {
 }
 
 /** 直接走后端的撤销，不经界面 —— 收尾清场不该依赖被测对象 */
-const undoOnce = () => fetch(`${API}/api/projects/${PROJECT_ID}/undo`, { method: 'POST' })
+const undoOnce = () => fetch(`${API}/api/projects/${SCRATCH_ID ?? PROJECT_ID}/undo`, { method: 'POST' })
 
 /**
  * 把某一行的声部直接写回去。
@@ -97,11 +136,26 @@ const undoOnce = () => fetch(`${API}/api/projects/${PROJECT_ID}/undo`, { method:
  * 减出来的差就会少算，残留悄悄留在用户的工程里（实测：批量 5 句只记到 1 格，
  * 结果 4 行的改名整个没退回去）。反着写一次是确定的。
  */
+/**
+ * 轮询等到某个字段变成期望值再断言，不要靠固定的 `waitForTimeout`。
+ * 编辑请求是"点一下 → 发请求 → 拿整份工程回来"，慢一点就会量到旧值，
+ * 判据于是随机变红（实测整曲偏移那条两跑一红），而产品其实是好的。
+ */
+const waitFor = async (read, want, timeoutMs = 6000) => {
+  const end = Date.now() + timeoutMs
+  let v = await read()
+  while (v !== want && Date.now() < end) {
+    await new Promise((r) => setTimeout(r, 200))
+    v = await read()
+  }
+  return v
+}
+
 const restoreVoice = (lineId, part) =>
   fetch(`${API}/api/editor/voice-part`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ project_id: PROJECT_ID, line_id: lineId, voice_part: part, token_range: null }),
+    body: JSON.stringify({ project_id: SCRATCH_ID ?? PROJECT_ID, line_id: lineId, voice_part: part, token_range: null }),
   })
 
 /**
@@ -261,76 +315,7 @@ async function runEngineOn(name, browser) {
     `正文 ${noMatch.paperNo} / 句柄 ${noMatch.railNo}`,
   )
 
-  if (MUTATE) {
-    // ---------------------------------------------------------- 二、单句调轴还在
-    console.log('\n2) 单句调轴（拖句柄条 = 整句平移）')
-    const before = await fetchProject()
-    const activeId = carriers.handle
-    const box = await page.locator('[data-role="line-handle"][data-active]').boundingBox()
-    check(!!box && box.height >= 16, '句柄条有可抓的高度', box ? `${Math.round(box.width)}×${Math.round(box.height)}` : '无')
-    if (box) {
-      await page.mouse.move(box.x + Math.min(box.width / 2, 40), box.y + box.height / 2)
-      await page.mouse.down()
-      await page.mouse.move(box.x + Math.min(box.width / 2, 40) + 60, box.y + box.height / 2, { steps: 8 })
-      await page.mouse.up()
-      await page.waitForTimeout(900)
-    }
-    const after = await fetchProject()
-    const deltasOf = (a, b, id) => {
-      const la = a.lines.find((l) => l.id === id)
-      const lb = b.lines.find((l) => l.id === id)
-      return la.tokens.map((tk, i) => lb.tokens[i].start_ms - tk.start_ms)
-    }
-    const moved = deltasOf(before, after, activeId)
-    const uniform = moved.length > 0 && moved.every((d) => d === moved[0])
-    check(uniform && moved[0] > 50, '整行每个字位移相同且确实动了', `+${moved[0]}ms ×${moved.length}`)
-    const othersMoved = before.lines.filter(
-      (l) => l.id !== activeId && l.tokens.length && deltasOf(before, after, l.id).some((d) => d !== 0),
-    ).length
-    check(othersMoved === 0, '别的行一个都没动', `动了 ${othersMoved} 行`)
-
-    // 撤销并对账：改坏了用户的工程必须能被这里发现，而不是留在库里
-    await page.locator('button[aria-label="撤销"]').click()
-    await page.waitForTimeout(900)
-    const undone = await fetchProject()
-    check(
-      deltasOf(before, undone, activeId).every((d) => d === 0),
-      '撤销把这一行还原了',
-    )
-
-    // ---------------------------------------------------------- 三、拆行 / 合并行
-    console.log('\n3) 拆行 / 合并行（图标化之后仍然真的会动）')
-    /*
-     * 拆行要求选中的字**不是行首**（tokenIndex > 0），所以先挑一句字够多的。
-     * 早先写死 `nth(3)` 落在"当前行"上，而当前行有几个字取决于用户之前怎么编过 ——
-     * 换个工程或者用户拆过行，这一步就会 30 秒超时，报出来的还是"没跑完"
-     * 而不是判据变红，很难看出根因。
-     */
-    const splitSrc = (await fetchProject()).lines.find((l) => !l.is_metadata && l.tokens.length >= 4)
-    await page.locator(`.kvm-tl-ov[data-line="${splitSrc.id}"]`).click({ force: true })
-    await page.waitForTimeout(500)
-    await page.locator(`.kvm-tl-tok[data-line="${splitSrc.id}"][data-token-index="2"]`).click()
-    await page.waitForTimeout(300)
-    const n0 = (await fetchProject()).lines.length
-    await page.locator('[data-role="split"]').click()
-    await page.waitForTimeout(900)
-    const n1 = (await fetchProject()).lines.length
-    check(n1 === n0 + 1, '拆行按钮真的拆出一行', `${n0} → ${n1}`)
-    await page.locator('[data-role="merge"]').click()
-    await page.waitForTimeout(900)
-    const n2 = (await fetchProject()).lines.length
-    check(n2 === n0, '合并行按钮真的并回去', `${n1} → ${n2}`)
-    /*
-     * 行数回来了 ≠ 工程回来了：后端对手工分行一律标 `locked=True`，合并回去也不摘。
-     * 所以这里必须真的撤销两步，靠"看着一样"收尾是错的（见文件头第六条）。
-     */
-    await undoOnce()
-    await undoOnce()
-    await page.waitForTimeout(300)
-
-  } else {
-    console.log('\n2-3) 单句调轴 / 拆行合并：会改工程，默认跳过（加 --mutate 才跑）')
-  }
+  // 改工程的判据整块搬到临时工程上跑（见 runMutations），这里不再动用户的数据
 
   // ---------------------------------------------------------- 四、整曲偏移
   console.log('\n4) 整曲偏移搬到时间轴工具条')
@@ -364,15 +349,6 @@ async function runEngineOn(name, browser) {
   check(!!place && place.gapY > 150, '两组 ±ms 按钮在纵向上拉开了距离', `${place?.gapY}px`)
 
   // 真的会改全局偏移，且能自己还原（不依赖撤销）
-  const o0 = (await fetchProject()).global_offset_ms
-  await page.locator('[data-role="global-offset"] [data-role="global-nudge"]').last().click()
-  await page.waitForTimeout(800)
-  const o1 = (await fetchProject()).global_offset_ms
-  check(o1 === o0 + 100, '+100 真的落到 global_offset_ms', `${o0} → ${o1}`)
-  await page.locator('[data-role="global-offset"] [data-role="global-nudge"]').first().click()
-  await page.waitForTimeout(800)
-  const o2 = (await fetchProject()).global_offset_ms
-  check(o2 === o0, '-100 还原', `${o1} → ${o2}`)
 
   // ---------------------------------------------------------- 四点五、选中即播放位置
   //
@@ -496,160 +472,6 @@ async function runEngineOn(name, browser) {
   await paneBar.dblclick()
   await page.waitForTimeout(500)
 
-  if (MUTATE) {
-    // ---------------------------------------------------------- 四点八、声部指派
-    //
-    // 判据不看按钮点不点得动，看三件事：后端返回的 voice_part 真的变了、
-    // 界面上真的有可见变化（新声部还没配色时颜色不会变，所以要有标签）、
-    // Cmd+Z 退得回来。批量的撤销粒度另外量出来报数字，不含糊过去。
-    console.log('\n4.8) 声部指派')
-    const voiceBlock = await page.locator('[data-role="voice-part"]').count()
-    check(voiceBlock === 1, '底栏有声部指派入口（此前全前端零调用）')
-    const tgt = project0.lines.filter((l) => !l.is_metadata && l.tokens.length)[10]
-    await page.locator(`.kvm-tl-ov[data-line="${tgt.id}"]`).click({ force: true })
-    await page.waitForTimeout(500)
-    await page.locator('[data-scope="line"]').click()
-    await page.waitForTimeout(200)
-    const scopeCount = await page.locator('[data-role="voice-count"]').textContent()
-    check(/1/.test(scopeCount || ''), '动手前就报出会改几句', (scopeCount || '').trim())
-
-    await page.locator('[data-role="voice-new"]').click()
-    await page.locator('[data-role="voice-new-input"]').fill('duet_b')
-    await page.locator('[data-role="voice-new-input"]').press('Enter')
-    await page.waitForTimeout(1200)
-    const afterVoice = await fetchProject()
-    const gotLine = afterVoice.lines.find((l) => l.id === tgt.id)
-    check(gotLine?.voice_part === 'duet_b', '后端的 voice_part 真的变了', String(gotLine?.voice_part))
-    const tagShown = await page.evaluate(
-      (id) =>
-        document.querySelector(`.kvm-ruby__line[data-line="${id}"] [data-role="voice-tag"]`)
-          ?.textContent ?? null,
-      tgt.id,
-    )
-    check(tagShown === 'duet_b', '歌词正文上当场看得见（新声部没配色时颜色不会变，标签是唯一证据）', String(tagShown))
-    const voiceAttr = await page.evaluate(
-      (id) => document.querySelector(`.kvm-ruby__line[data-line="${id}"]`)?.dataset.voice ?? null,
-      tgt.id,
-    )
-    check(voiceAttr === 'duet_b', '行上带 data-voice，配色层能按它取色', String(voiceAttr))
-
-    // 撤销一步退回
-    await page.locator('button[aria-label="撤销"]').click()
-    await page.waitForTimeout(900)
-    const undoneVoice = (await fetchProject()).lines.find((l) => l.id === tgt.id)
-    check(
-      undoneVoice?.voice_part === tgt.voice_part,
-      '单句指派 Cmd+Z 一步退回',
-      `${undoneVoice?.voice_part} ← duet_b`,
-    )
-
-    // 批量：量撤销粒度，别猜
-    const h0 = await fetch(`${API}/api/projects/${PROJECT_ID}/history`).then((r) => r.json())
-    const beforeBatch = await fetchProject()
-    await page.locator('[data-scope="after"]').click()
-    await page.waitForTimeout(200)
-    await page.locator('[data-role="voice-span"]').fill('5')
-    await page.waitForTimeout(200)
-    const batchCount = await page.locator('[data-role="voice-count"]').textContent()
-    check(/5/.test(batchCount || ''), '批量前先报出会改 5 句', (batchCount || '').trim())
-    await page.locator('[data-role="voice-new"]').click()
-    await page.locator('[data-role="voice-new-input"]').fill('duet_b')
-    await page.locator('[data-role="voice-new-input"]').press('Enter')
-    await page.waitForTimeout(2500)
-    const afterBatch = await fetchProject()
-    const singable = project0.lines.filter((l) => !l.is_metadata && l.tokens.length)
-    const at = singable.findIndex((l) => l.id === tgt.id)
-    const batchIds = singable.slice(at, at + 5).map((l) => l.id)
-    const batchOrig = new Map(
-      batchIds.map((id) => [id, beforeBatch.lines.find((l) => l.id === id)?.voice_part || 'main']),
-    )
-    const changed = batchIds.filter(
-      (id) => afterBatch.lines.find((l) => l.id === id)?.voice_part === 'duet_b',
-    )
-    check(changed.length === 5, '「本句起 5 句」真的改了 5 句', `${changed.length}/5`)
-    const h1 = await fetch(`${API}/api/projects/${PROJECT_ID}/history`).then((r) => r.json())
-    const undoSteps = h1.undo - h0.undo
-    console.log(`   ℹ️ 批量 5 句占了 ${undoSteps} 格撤销（后端一次只收一行，见报告）`)
-    /*
-     * 按**原值逐行写回**，而不是"数一数占了几格撤销再退回去"。
-     * 后端对没有实际变化的写入不入栈，那个减法会少算：实测批量 5 句只记到 1 格，
-     * 于是 4 行的改动整个没退回去，还悄悄传染给紧接着的改名判据。
-     * 写回之后再刷一次页面手上的工程，免得后面几步拿着过期快照干活。
-     */
-    for (const [id, part] of batchOrig) await restoreVoice(id, part)
-    await page.waitForTimeout(400)
-    await page.locator('button[aria-label="撤销"]').click()
-    await page.locator('button[aria-label="重做"]').click()
-    await page.waitForTimeout(600)
-
-    // 改名：默认声部也要能改。判据看**全曲**引用与配色键有没有一起跟着走，
-    // 只看当前这一行会漏掉"改了一行、别的行还挂着旧名"这种半吊子实现
-    const h2 = await fetch(`${API}/api/projects/${PROJECT_ID}/history`).then((r) => r.json())
-    /*
-     * 改名要**数据驱动**：声部叫什么由用户说了算（他可能早就把 main 改成了「男」），
-     * 写死 main 的话换个工程就红，而红的原因是判据自己的假设过期，不是产品坏了。
-     * 取当前选中行的声部，全曲数一遍有多少行挂着它。
-     */
-    const beforeRename = await fetchProject()
-    const curLineId =
-      (await page.evaluate(() => document.querySelector('[data-role="line-handle"][data-active]')?.dataset.line)) ??
-      null
-    const fromPart = beforeRename.lines.find((l) => l.id === curLineId)?.voice_part || 'main'
-    const fromCount = beforeRename.lines.filter((l) => (l.voice_part || 'main') === fromPart).length
-    const tmpName = `验收_${Date.now().toString(36)}`
-    await page.locator('[data-role="voice-current"]').click()
-    await page.locator('[data-role="voice-rename"]').fill(tmpName)
-    await page.locator('[data-role="voice-rename"]').press('Enter')
-    await page.waitForTimeout(Math.max(6000, fromCount * 200))
-    const renamed = await fetchProject()
-    const stillOld = renamed.lines.filter((l) => (l.voice_part || 'main') === fromPart).length
-    const nowNew = renamed.lines.filter((l) => l.voice_part === tmpName).length
-    check(fromCount > 1, '（前置）当前声部确实挂着不止一行', `${fromPart} × ${fromCount}`)
-    check(
-      stillOld === 0 && nowNew === fromCount,
-      '声部可以改名，全曲一起改（默认声部同样适用）',
-      `${fromPart} 剩 ${stillOld} / 新名 ${nowNew}`,
-    )
-    check(
-      !(fromPart in renamed.palettes),
-      '配色键跟着改名走，没留下一个点不出东西的幽灵声部',
-      Object.keys(renamed.palettes).join(',') || '（本曲没有自定义配色）',
-    )
-    const h3 = await fetch(`${API}/api/projects/${PROJECT_ID}/history`).then((r) => r.json())
-    console.log(`   ℹ️ 改名 ${fromCount} 行占了 ${h3.undo - h2.undo} 格撤销`)
-
-    // token 级覆盖：一行内男女交替是常态，所以区间必须能精确给，而不只是"到句末"
-    const tline = (await fetchProject()).lines.find((l) => !l.is_metadata && l.tokens.length > 5)
-    await page.locator(`.kvm-tl-ov[data-line="${tline.id}"]`).click({ force: true })
-    await page.waitForTimeout(500)
-    await page.locator(`.kvm-tl-tok[data-line="${tline.id}"][data-token-index="2"]`).click()
-    await page.waitForTimeout(400)
-    await page.locator('[data-scope="tokens"]').click()
-    await page.waitForTimeout(200)
-    await page.locator('[data-role="voice-span"]').fill('3')
-    await page.waitForTimeout(200)
-    const tokCount = await page.locator('[data-role="voice-count"]').textContent()
-    check(/3/.test(tokCount || ''), '字级也先报出会改几个字', (tokCount || '').trim())
-    await page.locator('[data-role="voice-assign"][data-part="main"]').click()
-    await page.waitForTimeout(1200)
-    const afterTok = (await fetchProject()).lines.find((l) => l.id === tline.id)
-    const marked = afterTok.tokens.map((tk, i) => (tk.voice_part === 'main' ? i : -1)).filter((i) => i >= 0)
-    check(
-      JSON.stringify(marked) === JSON.stringify([2, 3, 4]),
-      '字级覆盖精确落在 [2,5) 这个区间上，没有蔓延到整句',
-      `实际 ${JSON.stringify(marked)}`,
-    )
-    await undoOnce()
-    await page.waitForTimeout(400)
-
-  } else {
-    console.log('\n4.8) 声部指派：会改工程，默认跳过（加 --mutate 才跑）')
-    check(
-      (await page.locator('[data-role="voice-part"]').count()) === 1,
-      '底栏有声部指派入口（此前全前端零调用）',
-    )
-  }
-
   // ---------------------------------------------------------- 五、纯图标按钮
   console.log('\n5) 纯图标按钮：认得出、点得到')
   const icons = await page.evaluate(() => {
@@ -721,6 +543,9 @@ async function runEngineOn(name, browser) {
       side: b('.edit-side'),
       lyrics: b('.edit-lyrics'),
       sideIdlePx: side ? Math.round(side.getBoundingClientRect().height - used) : null,
+      voice: b('[data-role="voice-part"]'),
+      paper: b('.kvm-ruby__paper'),
+      inspect: b('.edit-inspect'),
       rail: b('[data-role="token-rail"]'),
       wave: b('[data-role="wave-host"]'),
       toolbarRows: (() => {
@@ -853,8 +678,9 @@ async function runEngineOn(name, browser) {
     // 窄窗口的截图要留下来：数字说不出"挤成一坨"，只有图能
     await page.screenshot({ path: `${OUT}/${name}-${w}.png` })
     console.log(
-      `   ${w}px：歌词正文 ${sizes[w].lyrics.w}px｜左栏 ${sizes[w].side.w}×${sizes[w].side.h}` +
-        `（空 ${sizes[w].sideIdlePx}px）｜逐字轴 ${sizes[w].rail.h}px｜工具条约 ${sizes[w].toolbarRows} 行`,
+      `   ${w}px：歌词正文 ${sizes[w].lyrics.w}×${sizes[w].lyrics.h}（纸 ${sizes[w].paper.h}）｜` +
+        `声部条 ${sizes[w].voice?.h ?? 0}px｜底栏 ${sizes[w].inspect.h}px｜` +
+        `左栏 ${sizes[w].side.w}（空 ${sizes[w].sideIdlePx}）｜逐字轴 ${sizes[w].rail.h}px｜工具条约 ${sizes[w].toolbarRows} 行`,
     )
     check(!sizes[w].docScrollX, `${w}px 下没有横向溢出`)
     check(sizes[w].railVisible, `${w}px 下逐字轴完整可见`, `h=${sizes[w].rail.h}`)
@@ -872,41 +698,274 @@ async function runEngineOn(name, browser) {
   if (real.length) writeFileSync(`${OUT}/${name}-errors.txt`, real.join('\n'))
   await page.close()
 
-  // ---------------------------------------------------------- 八、对账
+  // ---------------------------------------------------------- 八、临时工程上的编辑判据
   if (!MUTATE) {
-    console.log('\n8) 收尾对账：本轮没有跑会改工程的判据（加 --mutate 才跑），跳过')
+    console.log('\n8) 会改工程的判据：默认跳过（加 --mutate 才跑，且只跑在临时工程上）')
     return
   }
-  console.log('\n8) 收尾对账')
-  console.log(`   ℹ️ 撤销深度 ${depth0} → ${(await fetch(`${API}/api/projects/${PROJECT_ID}/history`).then((r) => r.json())).undo}`)
-  const end = await fetchProject()
-  let same = true
-  let diff = ''
+  await runMutations(browser, project0)
+}
+
+/**
+ * 会改工程的那一批判据。**全部跑在脚本自己新建的临时工程上，跑完就删。**
+ *
+ * 为什么不跑在真实工程上：逐个操作"数一数占了几格撤销再退回去"靠不住
+ * （后端对没有实际变化的写入不入栈），而"一路撤到开跑前的深度"在用户同时开着
+ * 浏览器编同一首歌时会把**他的**编辑一并撤掉。三次实测都留下了残留，
+ * 每次都要人工照着 diff 收拾。临时工程从根上消灭这个问题：删掉就是删掉。
+ *
+ * 临时工程用 LRC 导入而不是纯文本：纯文本导入出来所有字的起点都是 0，
+ * 逐字轴上全叠在原点，"点第 3 个字""拖这一句"这类操作根本没法做。
+ */
+async function runMutations(browser, source) {
+  console.log('\n8) 临时工程上的编辑判据')
+  const lines = source.lines.filter((l) => !l.is_metadata && l.tokens.length >= 5).slice(0, 12)
+  SCRATCH_ID = await createScratch(lines)
+  console.log(`   ℹ️ 临时工程 ${SCRATCH_ID}（${lines.length} 行，跑完删除）`)
+  const page = await browser.newPage({ viewport: { width: 1600, height: 950 } })
   try {
-    deepStrictEqual(normalize(end), normalize(project0))
-  } catch {
-    same = false
-  }
-  check(same, '跑完之后工程与开跑前逐字段一致（脚本没有把用户的工程改坏）')
-  if (!same) {
-    // 打成**可照着修的清单**，而不是 deepStrictEqual 那一大坨 —— 残留要能被人工收拾
-    console.log('   ⚠️ 残留（照着反着写回去即可）：')
-    for (let i = 0; i < project0.lines.length; i++) {
-      const x = project0.lines[i]
-      const y = end.lines[i]
-      if (!y) continue
-      if (x.voice_part !== y.voice_part) console.log(`      行${i} voice_part ${x.voice_part} ← ${y.voice_part}`)
-      if (x.locked !== y.locked) console.log(`      行${i} locked ${x.locked} ← ${y.locked}`)
-      x.tokens.forEach((tk, j) => {
-        const t2 = y.tokens[j]
-        if (!t2) return
-        if (tk.start_ms !== t2.start_ms) console.log(`      行${i} 字${j} start ${tk.start_ms} ← ${t2.start_ms}`)
-        if (tk.voice_part !== t2.voice_part) console.log(`      行${i} 字${j} voice ${tk.voice_part} ← ${t2.voice_part}`)
-      })
+    await page.addInitScript((id) => localStorage.setItem(`kvm.step.${id}`, 'edit'), SCRATCH_ID)
+    await page.goto(APP, { waitUntil: 'domcontentloaded' })
+    await page.locator('.pcard').filter({ hasText: '验收临时工程' }).first().click()
+    await page.waitForSelector('[data-role="token-rail"]', { timeout: 20000 })
+    // 临时工程没有音频，波形永远不会 ready；等的是**逐字轴上真有块**，
+    // 而不是波形就绪 —— 等错东西会以"30 秒超时"收场，看不出根因
+    await page.waitForSelector('.kvm-tl-tok', { timeout: 20000 })
+    /*
+     * 先按一次「整曲」。临时工程没有音频，波形永远不 ready，于是那段
+     * "第一次拿到真实时长时落到一个能干活的缩放上"的初始化根本不会跑，
+     * 缩放停在初始值上、视口只覆盖开头几秒 —— 逐字轴按视口时间窗虚拟化，
+     * 别的句子压根没画出来，等它们的句柄条必然超时。
+     */
+    await page.locator('[data-role="fit"]').click()
+    await page.waitForTimeout(800)
+    /*
+     * 选行一律**点歌词正文**，不点概览条：概览条上一句只有几像素宽，
+     * 而逐字轴按视口时间窗虚拟化 —— 没滚到那一段时那句的句柄条压根没画出来，
+     * 等它必然 10 秒超时，报出来还是"没跑完"而不是判据变红。
+     * 正文里整行都可点（这一轮刚加的），顺带把那条也验了。
+     */
+    await page.waitForTimeout(800)
+
+    // --- 单句调轴：拖句柄条 = 整句平移 ---
+    //
+    // 句柄条只画在**视口时间窗内**的行上（逐字轴虚拟化，§5.10）。临时工程没有音频，
+    // 波形永远不 ready，那段"第一次拿到真实时长就落到能干活的缩放上"的初始化不会跑，
+    // 于是视口里未必正好有可拖的那一句。**这不是产品问题**，所以这里不硬等：
+    // 拿视口里现成的那一句来拖，拖不到就把原因报出来，而不是让整轮以"超时"收场。
+    const p0 = await fetchProject()
+    const railLineId = await page.evaluate(
+      () => document.querySelector('[data-role="line-handle"]')?.dataset.line ?? null,
+    )
+    const target = p0.lines.find((l) => l.id === railLineId)
+    check(!!target, '视口里有一句可拖的（句柄条已渲染）', String(railLineId))
+    if (target) {
+      await page.locator(`.kvm-ruby__line[data-line="${target.id}"]`).click()
+      await page.waitForTimeout(600)
+      const box = await page.locator(`[data-role="line-handle"][data-line="${target.id}"]`).boundingBox()
+      check(!!box && box.height >= 16, '句柄条有可抓的高度', box ? `${Math.round(box.width)}×${Math.round(box.height)}` : '无')
+      if (box) {
+        const gx = box.x + Math.min(box.width / 2, 30)
+        const gy = box.y + box.height / 2
+        await page.mouse.move(gx, gy)
+        await page.mouse.down()
+        // 240px 而不是 60px：临时工程没有音频，缩放停在很大的值上，
+        // 60px 换算成毫秒后会被 Math.round 抹成个位数甚至 0（WebKit 实测 0ms）——
+        // 那是判据给的位移太小，不是"整句平移坏了"
+        await page.mouse.move(gx + 120, gy, { steps: 6 })
+        await page.mouse.move(gx + 240, gy, { steps: 6 })
+        await page.mouse.up()
+        await page.waitForTimeout(1000)
+        const p1 = await fetchProject()
+        const li = p0.lines.findIndex((l) => l.id === target.id)
+        const moved = p1.lines[li].tokens.map((tk, i) => tk.start_ms - target.tokens[i].start_ms)
+        check(moved.every((d) => d === moved[0]) && moved[0] !== 0, '整行每个字位移相同且确实动了', `${moved[0]}ms ×${moved.length}`)
+        check(
+          p1.lines.every((l, i) => i === li || l.tokens.every((tk, j) => tk.start_ms === p0.lines[i].tokens[j].start_ms)),
+          '别的行一个都没动',
+        )
+        await page.locator('button[aria-label="撤销"]').click()
+        await page.waitForTimeout(700)
+        check(
+          (await fetchProject()).lines[li].tokens[0].start_ms === target.tokens[0].start_ms,
+          '撤销把这一行还原了',
+        )
+      }
     }
-    const ka = Object.keys(project0.palettes).sort().join(',')
-    const kb = Object.keys(end.palettes).sort().join(',')
-    if (ka !== kb) console.log(`      配色键 ${ka} ← ${kb}`)
+
+    // --- 拆行 / 合并行（图标化之后仍然真的会动）---
+    const n0 = (await fetchProject()).lines.length
+    // 从正文里点**第 3 个词**：拆行要求选中的字不是行首（tokenIndex > 0），
+    // 而正文里的词一定渲染得出来，不受逐字轴虚拟化影响
+    const splitLine = (await fetchProject()).lines.find((l) => l.tokens.length >= 5)
+    check(!!splitLine, '（前置）临时工程里有字够多的一句')
+    if (!splitLine) return
+    await page.locator(`.kvm-ruby__line[data-line="${splitLine.id}"] .kvm-ruby__unit`).nth(2).click()
+    await page.waitForTimeout(400)
+    await page.locator('[data-role="split"]').click()
+    await page.waitForTimeout(800)
+    check((await fetchProject()).lines.length === n0 + 1, '拆行按钮真的拆出一行', `${n0} → ${n0 + 1}`)
+    await page.locator('[data-role="merge"]').click()
+    await page.waitForTimeout(800)
+    check((await fetchProject()).lines.length === n0, '合并行按钮真的并回去')
+
+    // --- 整曲偏移 ---
+    const readOffset = async () => (await fetchProject()).global_offset_ms
+    const o0 = await readOffset()
+    await page.locator('[data-role="global-offset"] [data-role="global-nudge"]').last().click()
+    const o1 = await waitFor(readOffset, o0 + 100)
+    check(o1 === o0 + 100, '+100 真的落到 global_offset_ms', `${o0} → ${o1}`)
+    await page.locator('[data-role="global-offset"] [data-role="global-nudge"]').first().click()
+    check((await waitFor(readOffset, o0)) === o0, '-100 还原')
+
+    // --- 声部：单句 / 批量 / 字级区间 ---
+    const vLine = (await fetchProject()).lines[3]
+    await page.locator(`.kvm-ruby__line[data-line="${vLine.id}"]`).click({ force: true })
+    await page.waitForTimeout(400)
+    await page.locator('[data-scope="line"]').click()
+    check(/1/.test((await page.locator('[data-role="voice-count"]').textContent()) || ''), '动手前就报出会改几句')
+    await page.locator('[data-role="voice-new"]').click()
+    await page.locator('[data-role="voice-new-input"]').fill('duet_b')
+    await page.locator('[data-role="voice-new-input"]').press('Enter')
+    const got = await waitFor(
+      async () => (await fetchProject()).lines.find((l) => l.id === vLine.id)?.voice_part,
+      'duet_b',
+    )
+    check(got === 'duet_b', '后端的 voice_part 真的变了', String(got))
+    check(
+      (await page.evaluate(
+        (id) => document.querySelector(`.kvm-ruby__line[data-line="${id}"] [data-role="voice-tag"]`)?.textContent,
+        vLine.id,
+      )) === 'duet_b',
+      '歌词正文上当场看得见（新声部没配色时颜色不会变，标签是唯一证据）',
+    )
+    await page.locator('button[aria-label="撤销"]').click()
+    check(
+      (await waitFor(
+        async () => (await fetchProject()).lines.find((l) => l.id === vLine.id)?.voice_part,
+        vLine.voice_part,
+      )) === vLine.voice_part,
+      '单句指派 Cmd+Z 一步退回',
+    )
+
+    // 批量：动手前报数，改完逐行核对
+    await page.locator('[data-scope="after"]').click()
+    await page.locator('[data-role="voice-span"]').fill('4')
+    await page.waitForTimeout(300)
+    check(/4/.test((await page.locator('[data-role="voice-count"]').textContent()) || ''), '批量前先报出会改 4 句')
+    await page.locator('[data-role="voice-new"]').click()
+    await page.locator('[data-role="voice-new-input"]').fill('duet_b')
+    await page.locator('[data-role="voice-new-input"]').press('Enter')
+    await page.waitForTimeout(3000)
+    const pb = await fetchProject()
+    const at = pb.lines.findIndex((l) => l.id === vLine.id)
+    check(
+      pb.lines.slice(at, at + 4).every((l) => l.voice_part === 'duet_b'),
+      '「本句起 4 句」真的改了 4 句',
+    )
+
+    // 字级区间：一行内男女交替是常态，区间必须精确、不许蔓延
+    const tLine = pb.lines.find((l) => l.tokens.length >= 6)
+    check(!!tLine, '（前置）临时工程里有字够多的一句')
+    if (!tLine) return
+    await page.locator(`.kvm-ruby__line[data-line="${tLine.id}"]`).click({ force: true })
+    await page.waitForTimeout(400)
+    await page.locator(`.kvm-ruby__line[data-line="${tLine.id}"] .kvm-ruby__unit`).nth(2).click()
+    await page.waitForTimeout(400)
+    await page.locator('[data-scope="tokens"]').click()
+    await page.locator('[data-role="voice-span"]').fill('3')
+    await page.waitForTimeout(300)
+    check(/3/.test((await page.locator('[data-role="voice-count"]').textContent()) || ''), '字级也先报出会改几个字')
+    await page.locator('[data-role="voice-assign"][data-part="chorus"], [data-role="voice-assign"]').last().click()
+    await page.waitForTimeout(1500)
+    const tAfter = (await fetchProject()).lines.find((l) => l.id === tLine.id)
+    const marked = tAfter.tokens.map((tk, i) => (tk.voice_part ? i : -1)).filter((i) => i >= 0)
+    /*
+     * 判据是"**恰好 3 个、连续、不蔓延**"，而不是写死 [2,3,4]：
+     * 正文里点的是**词**，一个词可能横跨多个 token（「明日」两个字一个词），
+     * 所以起点由数据说了算。写死下标只会在跨字词上假红。
+     */
+    check(
+      marked.length === 3 && marked[1] === marked[0] + 1 && marked[2] === marked[0] + 2,
+      '字级覆盖精确落在 3 个连续的字上，没有蔓延到整句',
+      `实际 ${JSON.stringify(marked)} / 全句 ${tAfter.tokens.length} 字`,
+    )
+
+    // 一句多声部要在歌词列表看得出来：行标签列全 + 被改的那几个词自己带标记
+    const mixed = await page.evaluate((id) => {
+      const row = document.querySelector(`.kvm-ruby__paper .kvm-ruby__line[data-line="${id}"]`)
+      if (!row) return null
+      return {
+        tags: [...row.querySelectorAll('[data-role="voice-tag"]')].map((e) => e.dataset.part),
+        marks: [...row.querySelectorAll('.kvm-ruby__unit[data-voice]')].map((e) => e.dataset.voice),
+      }
+    }, tLine.id)
+    check(!!mixed && mixed.tags.length >= 2, '一句里两个声部，歌词列表把它们都列出来', mixed?.tags.join('・'))
+    check(!!mixed && mixed.marks.length > 0, '被单独指派的那几个词自己也带着标记', `${mixed?.marks.length} 个词`)
+
+    // --- 改名（默认声部也能改）---
+    const rBefore = await fetchProject()
+    const rLine = rBefore.lines.find((l) => (l.voice_part || 'main') === 'main')
+    check(!!rLine, '（前置）还有挂在默认声部上的行')
+    if (!rLine) return
+    await page.locator(`.kvm-ruby__line[data-line="${rLine.id}"]`).click({ force: true })
+    await page.waitForTimeout(400)
+    const mainCount = rBefore.lines.filter((l) => (l.voice_part || 'main') === 'main').length
+    await page.locator('[data-role="voice-current"]').click()
+    await page.locator('[data-role="voice-rename"]').fill('女')
+    await page.locator('[data-role="voice-rename"]').press('Enter')
+    await page.waitForTimeout(Math.max(4000, mainCount * 250))
+    const rAfter = await fetchProject()
+    check(
+      rAfter.lines.filter((l) => l.voice_part === '女').length === mainCount &&
+        rAfter.lines.every((l) => l.voice_part !== 'main'),
+      '默认声部 main 可以改名，全曲一起改',
+      `main ${mainCount} → 女 ${rAfter.lines.filter((l) => l.voice_part === '女').length}`,
+    )
+
+    // --- 删除声部（= 归并，一行总得有个声部）---
+    const dLine = rAfter.lines.find((l) => l.voice_part === 'duet_b')
+    check(!!dLine, '（前置）有一句挂着待删的声部')
+    if (!dLine) return
+    await page.locator(`.kvm-ruby__line[data-line="${dLine.id}"]`).click({ force: true })
+    await page.waitForTimeout(500)
+    const mergeTo = await page.locator('[data-role="voice-delete"]').getAttribute('data-target')
+    check(!!mergeTo && mergeTo !== 'duet_b', '删除前就说清并到哪个声部去', String(mergeTo))
+    await page.locator('[data-role="voice-delete"]').click()
+    await page.waitForTimeout(4000)
+    const dEnd = await fetchProject()
+    check(
+      dEnd.lines.every((l) => l.voice_part !== 'duet_b') &&
+        dEnd.lines.every((l) => l.tokens.every((t) => t.voice_part !== 'duet_b')),
+      '删除后全曲再也找不到这个声部（行级与字级都清了）',
+    )
+    check(!('duet_b' in dEnd.palettes), '配色键也一并摘掉，没留幽灵', Object.keys(dEnd.palettes).join(',') || '（无）')
+
+    /*
+     * 声部列表里不许出现"没有任何行引用、又删不掉"的幽灵。
+     * 这一条是从"main 怎么删不掉"来的：列表曾经无条件塞一个 main，
+     * 于是把它改名成别的之后，main 还常驻在那儿，而删除作用于"当前行的声部"，
+     * 没有一行挂着它 —— 点谁都删不动。
+     */
+    const listed = await page.evaluate(() =>
+      [...document.querySelectorAll('[data-role="voice-assign"]')].map((e) => e.dataset.part),
+    )
+    const used = new Set([
+      ...dEnd.lines.map((l) => l.voice_part).filter(Boolean),
+      ...dEnd.lines.flatMap((l) => l.tokens.map((t) => t.voice_part).filter(Boolean)),
+      ...Object.keys(dEnd.palettes),
+    ])
+    check(
+      listed.every((p) => used.has(p)),
+      '声部列表里每一项都真的有行在用（没有删不掉的幽灵）',
+      `列出 ${listed.join(',')}｜在用 ${[...used].join(',')}`,
+    )
+
+    await page.close()
+  } finally {
+    // 无论上面成没成，临时工程都要删干净
+    await deleteScratch()
+    console.log('   ℹ️ 临时工程已删除')
   }
 }
 
