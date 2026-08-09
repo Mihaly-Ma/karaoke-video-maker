@@ -33,6 +33,10 @@ export const align: Record<string, string> = {
   'align.fit': '整曲',
   'align.fitHint': '缩到整曲铺满',
 
+  // ---- 画面 / 波形分割条 ----
+  'align.paneDivider': '画面与波形分割条',
+  'align.paneDividerHint': '拖动调整高度，双击复位',
+
   // ---- 整体偏移（三级调轴的「整体」级）----
   'align.offset': '整体偏移',
   'align.offsetHint': '只改这一个数，不动逐字时间',

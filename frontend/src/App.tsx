@@ -12,6 +12,7 @@ import LyricPanel from './components/LyricPanel'
 import MediaPanel from './components/MediaPanel'
 import Preview from './components/Preview'
 import RubyEditor from './components/RubyEditor'
+import StageSplit from './components/StageSplit'
 import StylePanel from './components/StylePanel'
 import Timeline from './components/Timeline'
 import TopBar from './components/TopBar'
@@ -35,6 +36,23 @@ import TopBar from './components/TopBar'
 
 /** 每个工程各记各的步骤：点卡片进去应该回到它上次所在的那一步（§三点五） */
 const stepKey = (projectId: string) => `kvm.step.${projectId}`
+
+/**
+ * 对轴舞台的分割位置。**全工程共用一个键**，不按工程分：
+ * 它是"我这块屏幕上画面留多高"的偏好，跟在编哪首歌无关。
+ */
+const ALIGN_SPLIT_KEY = 'kvm.split.align'
+
+/**
+ * 画面默认占 42%，波形占 58%——契约要求"默认波形占更大比例"（§四 对轴）。
+ * 旧布局是画面 62% / 波形 38%，正好反了：实际工作发生在波形上。
+ *
+ * 58% 这个具体数字不是拍脑袋：1440×900 下它给到波形栏 480px，而时间轴**展开打轴
+ * 面板后实测 465px**，正好装得下。于是进出打轴模式不再重排版面——旧布局里波形栏
+ * 按内容取高，一进打轴模式画面区就从 531px 掉到 386px，画面跟着跳一下。
+ * 打轴是一等公民（CLAUDE.md §2.5），按它的高度定默认值。
+ */
+const ALIGN_SPLIT_DEFAULT = 0.42
 
 export default function App() {
   const [view, setView] = useState<'home' | 'editor'>('home')
@@ -169,12 +187,21 @@ export default function App() {
         return (
           <main className="stage">
             <AlignToolbar />
-            <div className="stage__viewport">
-              <Preview />
-            </div>
-            <div className="stage__rail">
-              <Timeline />
-            </div>
+            {/*
+              画面与波形之间是可拖的分割条（§四 对轴）。给 Preview 传 className 是
+              为了从**容器侧**把它的画面块设成可收缩——Preview 是全应用唯一的播放
+              时钟，不能改，而它内部把 16:9 画面块和走带控件条堆在一列里，
+              画面一超高就把走带挤出视口。打轴模式下空格被时间轴占去打点，
+              走带一旦裁掉就没有任何办法起播。样式见 styles.css 的 .stage-preview。
+            */}
+            <StageSplit
+              storageKey={ALIGN_SPLIT_KEY}
+              defaultTop={ALIGN_SPLIT_DEFAULT}
+              topClassName="stage__viewport"
+              bottomClassName="stage__rail"
+              top={<Preview className="stage-preview" />}
+              bottom={<Timeline />}
+            />
           </main>
         )
       case 'ruby':

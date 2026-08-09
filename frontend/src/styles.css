@@ -492,24 +492,123 @@ label.checkbox-row {
   padding: var(--sp-5);
 }
 
-/* 对轴舞台：上画面下波形。播放 transport 在画面区里，全局不再有第二个 */
-.stage__viewport {
+/* ---- 对轴舞台：上画面、下波形，中间一条可拖分割条 ---- */
+
+/*
+ * 分割容器。两栏都是 `flex-basis: 0` + grow 因子，剩余空间严格按比例分；
+ * grow 因子由 StageSplit 用自定义属性下发，取值是 0–100 而不是 0–1——
+ * CSS 规定 grow 之和小于 1 时剩余空间分不完，写小数会留下一条分不掉的空隙。
+ */
+.stage-split {
   flex: 1 1 auto;
   min-height: 0;
-  background: #000;
   display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
+  flex-direction: column;
 }
+
+/* 拖动中锁掉选中：不然拖过波形和歌词会顺手刷蓝一片 */
+.stage-split--dragging {
+  user-select: none;
+  cursor: row-resize;
+}
+
+.stage-split__pane {
+  flex-basis: 0;
+  flex-shrink: 1;
+  /* 这一条是整条高度链的必要条件（docs/ui-redesign.md §七点五）：
+     纵向 flex 子项的 min-height 默认是 auto，装着长内容就会把自己撑开，
+     内部写了 overflow-y: auto 的元素永远成不了滚动容器 */
+  min-height: 0;
+}
+.stage-split__pane--top {
+  flex-grow: var(--split-top);
+  /* 拖到底也要留住走带控件条，否则会拖出"没法起播"的死角 */
+  min-height: 120px;
+}
+.stage-split__pane--bottom {
+  flex-grow: var(--split-bottom);
+  min-height: 160px;
+}
+
 /*
- * 波形轨按自身内容取高（实测 310px），不写死高度——旧布局固定 260px，
- * 把时间轴底部的一条轨切掉了，而被切掉的恰好是要拖边界的那条。
- * 上限 60% 防止将来轨道变多时把画面挤没。第二阶段这里换成可拖分割条。
+ * 分割条。8px 是抓得住又不显眼的宽度；中间那道短横线是"这里可以拖"的唯一提示，
+ * 光靠 cursor 只有把鼠标移上去才发现得了。
  */
-.stage__rail {
+.stage-split__bar {
+  flex: 0 0 var(--sp-2);
+  position: relative;
+  background: var(--bg-panel);
+  border-top: var(--hairline);
+  border-bottom: var(--hairline);
+  cursor: row-resize;
+  /* 触摸设备上不加这条，拖动会被浏览器当成滚动手势接管 */
+  touch-action: none;
+}
+.stage-split__bar::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 40px;
+  height: 2px;
+  transform: translate(-50%, -50%);
+  border-radius: var(--r-pill);
+  background: var(--stroke-strong);
+}
+.stage-split__bar:hover::after,
+.stage-split__bar:focus-visible::after,
+.stage-split--dragging .stage-split__bar::after {
+  background: var(--accent);
+}
+
+/*
+ * 画面区。
+ *
+ * 旧版是"居中 + overflow:hidden"，而 Preview 内部把 16:9 画面块和走带控件条
+ * 堆在一列里：画面按宽度算出来的高度一旦超过本区高度，控件条就被推到区外裁掉。
+ * **打轴模式下空格是"打点"不是"播放"**（Timeline 刻意独占了空格），走带被裁掉
+ * 就等于没有任何办法起播，是真正的功能死角，不是观感问题。
+ *
+ * 改法只能在容器侧：Preview 是全应用唯一的播放时钟，不动它。本区改成纵向 flex，
+ * 再由下面的 .stage-preview 规则把画面块设成可收缩、控件条固定，
+ * 让控件条永远贴在本区底部。
+ *
+ * 背景不再涂黑：黑色属于画面本身（Preview 的画面块自带黑底），涂在整区上会让
+ * 走带控件条也坐在黑底上，和外壳的低饱和基调打架（§六）。
+ */
+.stage__viewport {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: var(--sp-2);
+  background: var(--bg-canvas);
+}
+
+/*
+ * Preview 的外部约束。Preview 内部全是内联样式且不归本次改动所有，
+ * 所以这里只能按结构选子元素：第一个 div 是画面块（内联写死 16:9），
+ * 第二个 div 是走带控件条，再往后是可选的问题提示列表。
+ *
+ * 画面块保持 16:9、按**高度**收缩、宽度由比例反推再水平居中，
+ * 而不是拉伸铺满：铺满会让画面在宽扁的窗格里 letterbox 出大片黑边，白占地方。
+ */
+.stage-preview {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+.stage-preview > div:first-child {
+  flex: 1 1 auto;
+  min-height: 0;
+  align-self: center;
+  max-width: 100%;
+}
+.stage-preview > div:nth-child(2) {
   flex: 0 0 auto;
-  max-height: 60%;
+}
+
+/* 波形轨。高度由分割条给定，内容更高时自己滚（打轴面板展开时就会） */
+.stage__rail {
   overflow-y: auto;
   border-top: var(--hairline);
   background: var(--bg-panel);
