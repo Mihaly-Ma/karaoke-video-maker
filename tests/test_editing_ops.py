@@ -23,7 +23,6 @@ import pytest  # noqa: E402
 from kvm.api.schemas import (  # noqa: E402
     LineDTO,
     LockItem,
-    PaletteDTO,
     ProjectDTO,
     RubySpanDTO,
     TimingItem,
@@ -47,7 +46,12 @@ def _project() -> ProjectDTO:
     """
     line_a = LineDTO(
         id="L1",
-        tokens=[_tok("桜", 1000, 500), _tok("舞", 1500, 300), _tok("っ", 1800, 200), _tok("て", 2000, 400)],
+        tokens=[
+            _tok("桜", 1000, 500),
+            _tok("舞", 1500, 300),
+            _tok("っ", 1800, 200),
+            _tok("て", 2000, 400),
+        ],
         ruby=[
             RubySpanDTO(start=0, end=1, text="さくら"),
             RubySpanDTO(start=1, end=2, text="ま"),
@@ -67,7 +71,9 @@ def _assert_monotonic(line: LineDTO) -> None:
         assert tok.start_ms >= 0, f"第 {i} 个音节起点为负"
         assert tok.dur_ms >= ops.MIN_DUR_MS, f"第 {i} 个音节时长低于下限"
         if i + 1 < len(line.tokens):
-            assert tok.start_ms + tok.dur_ms <= line.tokens[i + 1].start_ms, f"第 {i} 个音节与后一个倒挂"
+            assert tok.start_ms + tok.dur_ms <= line.tokens[i + 1].start_ms, (
+                f"第 {i} 个音节与后一个倒挂"
+            )
 
 
 # ---- 平移：locked / source 标记 ----
@@ -134,11 +140,19 @@ def test_set_timing_marks_manual_and_locked() -> None:
 
 def test_global_shift_only_changes_offset() -> None:
     p = _project()
-    before = [(t.start_ms, t.dur_ms, t.timing_source, t.locked_timing) for ln in p.lines for t in ln.tokens]
+    before = [
+        (t.start_ms, t.dur_ms, t.timing_source, t.locked_timing)
+        for ln in p.lines
+        for t in ln.tokens
+    ]
 
     ops.shift(p, scope="global", delta_ms=-250)
 
-    after = [(t.start_ms, t.dur_ms, t.timing_source, t.locked_timing) for ln in p.lines for t in ln.tokens]
+    after = [
+        (t.start_ms, t.dur_ms, t.timing_source, t.locked_timing)
+        for ln in p.lines
+        for t in ln.tokens
+    ]
     assert p.global_offset_ms == -250
     assert after == before, "整体平移必须只改 global_offset_ms，否则用户无法归零重来"
 
@@ -826,9 +840,7 @@ def test_set_locks_batches_across_lines() -> None:
 def test_set_locks_toggles_ruby_lock() -> None:
     p = _project()
 
-    ops.set_locks(
-        p, items=[LockItem(line_id="L1", target="ruby", ruby_range=(0, 1), locked=True)]
-    )
+    ops.set_locks(p, items=[LockItem(line_id="L1", target="ruby", ruby_range=(0, 1), locked=True)])
 
     assert p.lines[0].ruby[0].locked
     assert not p.lines[0].ruby[1].locked, "只动被点名的那一段"
@@ -856,123 +868,9 @@ def test_set_locks_rejects_out_of_range_token() -> None:
         ops.set_locks(p, items=[LockItem(line_id="L1", token_index=99)])
 
 
-# ---- 配色模板 ----
-
-
-def _palettes() -> dict[str, PaletteDTO]:
-    return {"main": PaletteDTO(name="main", sung_fill="&H0000FF00&")}
-
-
-def test_builtin_palette_templates_are_complete() -> None:
-    """内置至少三套，且每套都要给齐对唱声部——只给 main 的话一碰对唱就得自己配色。"""
-    builtin = ops.builtin_palette_templates()
-
-    assert len(builtin) >= 3
-    assert {"NicoKara 经典白蓝", "高对比黄黑", "柔和粉白"} <= {t.name for t in builtin}
-    for tpl in builtin:
-        assert tpl.builtin
-        assert {"main", "duet_a", "duet_b"} <= set(tpl.palettes)
-        for pal in tpl.palettes.values():
-            # 一个声部要四个颜色：描边跟着填充一起翻色，两层各需一组
-            assert pal.unsung_fill and pal.unsung_outline
-            assert pal.sung_fill and pal.sung_outline
-
-
-def test_builtin_templates_are_fresh_copies() -> None:
-    """调用方改坏了不能污染下一次。"""
-    ops.builtin_palette_templates()[0].palettes["main"].sung_fill = "&H00000000&"
-
-    assert ops.builtin_palette_templates()[0].palettes["main"].sung_fill != "&H00000000&"
-
-
-def test_save_and_list_user_template(tmp_path: Path) -> None:
-    path = tmp_path / "palettes.json"
-
-    ops.save_palette_template("我的粉色", _palettes(), description="自用", path=path)
-    names = [t.name for t in ops.load_palette_templates(path)]
-
-    assert "我的粉色" in names
-    assert names[: len(ops.builtin_palette_templates())] == [
-        t.name for t in ops.builtin_palette_templates()
-    ], "内置在前"
-
-
-def test_user_template_survives_reload(tmp_path: Path) -> None:
-    """配色调完刷新就丢，正是这次要补的缺口。"""
-    path = tmp_path / "palettes.json"
-    ops.save_palette_template("我的粉色", _palettes(), path=path)
-
-    loaded = next(t for t in ops.load_palette_templates(path) if t.name == "我的粉色")
-
-    assert loaded.palettes["main"].sung_fill == "&H0000FF00&"
-    assert loaded.builtin is False
-
-
-def test_save_template_overwrites_same_name(tmp_path: Path) -> None:
-    path = tmp_path / "palettes.json"
-    ops.save_palette_template("我的粉色", _palettes(), path=path)
-
-    ops.save_palette_template(
-        "我的粉色", {"main": PaletteDTO(name="main", sung_fill="&H00FF0000&")}, path=path
-    )
-
-    hits = [t for t in ops.load_palette_templates(path) if t.name == "我的粉色"]
-    assert len(hits) == 1
-    assert hits[0].palettes["main"].sung_fill == "&H00FF0000&"
-
-
-def test_delete_user_template(tmp_path: Path) -> None:
-    path = tmp_path / "palettes.json"
-    ops.save_palette_template("我的粉色", _palettes(), path=path)
-
-    ops.delete_palette_template("我的粉色", path=path)
-
-    assert "我的粉色" not in {t.name for t in ops.load_palette_templates(path)}
-
-
-def test_delete_builtin_template_rejected(tmp_path: Path) -> None:
-    """内置删了就再也拿不回来。"""
-    with pytest.raises(ops.EditError):
-        ops.delete_palette_template("高对比黄黑", path=tmp_path / "palettes.json")
-
-
-def test_delete_missing_template_raises_key_error(tmp_path: Path) -> None:
-    with pytest.raises(KeyError):
-        ops.delete_palette_template("不存在的", path=tmp_path / "palettes.json")
-
-
-def test_save_template_rejects_builtin_name(tmp_path: Path) -> None:
-    with pytest.raises(ops.EditError):
-        ops.save_palette_template("柔和粉白", _palettes(), path=tmp_path / "palettes.json")
-
-
-@pytest.mark.parametrize("bad_name", ["", "   ", "a/b"])
-def test_save_template_rejects_unusable_name(bad_name: str, tmp_path: Path) -> None:
-    """带斜杠的名字会让 DELETE 的路径段对不上，模板存进去就再也删不掉。"""
-    with pytest.raises(ops.EditError):
-        ops.save_palette_template(bad_name, _palettes(), path=tmp_path / "palettes.json")
-
-
-def test_save_template_rejects_empty_palettes(tmp_path: Path) -> None:
-    with pytest.raises(ops.EditError):
-        ops.save_palette_template("空的", {}, path=tmp_path / "palettes.json")
-
-
-def test_corrupt_template_file_degrades_to_builtin(tmp_path: Path) -> None:
-    """配色是锦上添花的功能，一个坏文件不该让整个样式面板打不开（§2.5 失败要降级）。"""
-    path = tmp_path / "palettes.json"
-    path.write_text("{ 半截 JSON", encoding="utf-8")
-
-    templates = ops.load_palette_templates(path)
-
-    assert [t.name for t in templates] == [t.name for t in ops.builtin_palette_templates()]
-
-
-def test_template_write_leaves_no_partial_file(tmp_path: Path) -> None:
-    """原子写：临时文件必须换名顶替，不能在目录里留下半截产物。"""
-    path = tmp_path / "palettes.json"
-
-    ops.save_palette_template("我的粉色", _palettes(), path=path)
-
-    assert path.exists()
-    assert list(tmp_path.glob("*.tmp")) == []
+# ---- 配色方案 ----
+#
+# 配色方案的用例整体搬到了 `tests/test_palette_schemes.py`：方案已经从
+# "按声部索引的一整套配色"改成"一组四色"（声部名由用户自定义，把它焊进方案
+# 会让取色在真实工程里全部落空，详见 `schemas.PaletteScheme`），
+# 配色的可读性判据与方案库的增删改名放在一起看更完整。

@@ -309,10 +309,10 @@ console.log(`   刷新后读到 ${afterReload}`)
 check(afterReload === probeColor, '刷新页面后配色仍在')
 await shot('06-palette-persisted')
 
-// 顺手验一下模板：套用一整套预设也走同一条持久化路径
-const tplCount = await page.locator('.sty-tpl').count()
-console.log(`   配色预设 ${tplCount} 套（来自后端 /api/palettes/templates）`)
-check(tplCount > 0, '配色预设来自后端模板')
+// 顺手验一下方案列表还在（逐声部施加与自定义方案的完整用例在 ui-palette.mjs）
+const tplCount = await page.locator('.sty-scheme').count()
+console.log(`   配色方案 ${tplCount} 套（来自后端 /api/palettes/schemes）`)
+check(tplCount > 0, '配色方案来自后端方案库')
 
 // --- 7. flex 高度链：每个滚动容器单独验 ------------------------------------
 

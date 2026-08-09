@@ -67,7 +67,7 @@ from kvm.api.schemas import (
     LockItem,
     OrphanedEdit,
     PaletteDTO,
-    PaletteTemplate,
+    PaletteScheme,
     PhoneticSpanDTO,
     ProjectDTO,
     RubySpanDTO,
@@ -310,7 +310,9 @@ def _partition_spans[S: CharSpanDTO](
         for j in range(len(buckets)):
             lo, hi = char_bounds[j], char_bounds[j + 1]
             if lo <= sp.start and sp.end <= hi:
-                buckets[j].append(sp.model_copy(update={"start": sp.start - lo, "end": sp.end - lo}))
+                buckets[j].append(
+                    sp.model_copy(update={"start": sp.start - lo, "end": sp.end - lo})
+                )
                 break
         else:
             dropped.append(sp)
@@ -422,9 +424,7 @@ def _derive_span_range(line: LineDTO, lo: int, hi: int) -> _DeriveStats:
     """
     stats = _DeriveStats()
     locked = [sp for sp in line.phonetics if sp.locked]
-    kept = [
-        sp for sp in line.phonetics if sp.locked or not _intersects(sp.start, sp.end, lo, hi)
-    ]
+    kept = [sp for sp in line.phonetics if sp.locked or not _intersects(sp.start, sp.end, lo, hi)]
     previous = {(sp.start, sp.end): sp.text for sp in line.phonetics if not sp.locked}
 
     for unit in _reading_units(line):
@@ -527,8 +527,7 @@ def _record_dropped_phonetics(
             out,
             kind="phonetic",
             detail=(
-                f"「{base}」上你锁定过的发音形「{sp.text}」在拆行后跨越了分界，"
-                "无法迁移，请重新填写"
+                f"「{base}」上你锁定过的发音形「{sp.text}」在拆行后跨越了分界，无法迁移，请重新填写"
             ),
             payload={
                 "line_id": line_id,
@@ -747,7 +746,9 @@ def set_timings(project: ProjectDTO, *, items: Sequence[TimingItem]) -> EditOutc
                 dur_ms=item.dur_ms,
             )
         except EditError as exc:
-            msg = f"批量调轴第 {i} 项（行 {item.line_id} 第 {item.token_index} 个音节）不成立：{exc}"
+            msg = (
+                f"批量调轴第 {i} 项（行 {item.line_id} 第 {item.token_index} 个音节）不成立：{exc}"
+            )
             raise EditError(msg) from exc
         out.warnings.extend(sub.warnings)
     return out
@@ -843,9 +844,7 @@ def _lock_phonetic(line: LineDTO, item: LockItem, i: int) -> None:
 # ---- 注音 ----
 
 
-def set_ruby(
-    project: ProjectDTO, *, line_id: str, start: int, end: int, text: str
-) -> EditOutcome:
+def set_ruby(project: ProjectDTO, *, line_id: str, start: int, end: int, text: str) -> EditOutcome:
     """给行内字符区间 `[start, end)` 设定注音；`text` 为空表示清除该区间的注音。
 
     注音区间之间**不得重叠**（§4.2 不变式：ruby span 与假名字符无缝无重叠地
@@ -1002,23 +1001,17 @@ def set_phonetic(
     if not is_kana_text(value):
         # 不拒绝——用户可能真有理由这么填（外来语、拟声词的特殊写法）。
         # 但强制对齐的 vocab 是假名，非假名字符到那一步会被丢掉，得让他现在就知道
-        out.warnings.append(
-            f"发音形「{value}」含非假名字符；强制对齐只认假名，这一段可能对不上"
-        )
+        out.warnings.append(f"发音形「{value}」含非假名字符；强制对齐只认假名，这一段可能对不上")
     return out
 
 
-def _clear_phonetic(
-    line: LineDTO, lo: int, hi: int, surface: str, out: EditOutcome
-) -> None:
+def _clear_phonetic(line: LineDTO, lo: int, hi: int, surface: str, out: EditOutcome) -> None:
     """清除 `[lo, hi)` 上的发音形覆盖，并把这一段交还给自动推导。
 
     连锁定的一起删：清除是用户对自己那条覆盖的明确撤回，此时还拦着他反而怪。
     """
     before = len(line.phonetics)
-    line.phonetics = [
-        sp for sp in line.phonetics if not _intersects(sp.start, sp.end, lo, hi)
-    ]
+    line.phonetics = [sp for sp in line.phonetics if not _intersects(sp.start, sp.end, lo, hi)]
     removed = before - len(line.phonetics)
     stats = _derive_span_range(line, lo, hi)
     now = [sp.text for sp in line.phonetics if _intersects(sp.start, sp.end, lo, hi)]
@@ -1029,9 +1022,7 @@ def _clear_phonetic(
         out.warnings.append(f"「{base}」的发音形已清空；这一段推导不出来，需要手工填")
 
 
-def derive_phonetics(
-    project: ProjectDTO, *, line_ids: Sequence[str] | None = None
-) -> EditOutcome:
+def derive_phonetics(project: ProjectDTO, *, line_ids: Sequence[str] | None = None) -> EditOutcome:
     """由表记读法批量推导发音形。**只覆盖 `locked=False` 的项**（§4.4）。
 
     这是"发音形层"的物化入口：导入歌词后跑一遍，注音改过之后再跑一遍。
@@ -1396,9 +1387,7 @@ def set_line_text(project: ProjectDTO, *, line_id: str, text: str) -> EditOutcom
     if new_text == old_text:
         return out
 
-    granularity = (
-        old_line.tokens[0].timing_granularity if old_line.tokens else _LINE_GRANULARITY
-    )
+    granularity = old_line.tokens[0].timing_granularity if old_line.tokens else _LINE_GRANULARITY
     unset_line = bool(old_line.tokens) and all(
         t.timing_source == _UNSET_TIMING for t in old_line.tokens
     )
@@ -1459,9 +1448,7 @@ def set_line_text(project: ProjectDTO, *, line_id: str, text: str) -> EditOutcom
             continue
         new_line.phonetics = _place_span(new_line.phonetics, sp, target_span)
 
-    filled = _fill_unbound_timing(
-        new_line, bound=set(token_map.values()), window=window, out=out
-    )
+    filled = _fill_unbound_timing(new_line, bound=set(token_map.values()), window=window, out=out)
     project.lines[idx] = new_line
 
     # 改过字的地方读音单元会重新划分，锁定的照旧不动（§4.4）
@@ -1523,8 +1510,7 @@ def _record_retext_orphans(
             out,
             kind="phonetic",
             detail=(
-                f"「{base}」上你锁定过的发音形「{sp.text}」所在的字已被改写，"
-                "无法迁移，请重新填写"
+                f"「{base}」上你锁定过的发音形「{sp.text}」所在的字已被改写，无法迁移，请重新填写"
             ),
             payload={
                 "line_id": line_id,
@@ -1795,9 +1781,7 @@ class _Geometry:
     """
 
 
-def _build_geometry(
-    old_lines: Sequence[LineDTO], new_lines: Sequence[LineDTO]
-) -> _Geometry:
+def _build_geometry(old_lines: Sequence[LineDTO], new_lines: Sequence[LineDTO]) -> _Geometry:
     old_text, _old_owners, old_ranges = _flatten(old_lines)
     new_text, new_owners, new_ranges = _flatten(new_lines)
     gmap = _char_map(old_text, new_text)
@@ -1842,9 +1826,7 @@ def _map_local_span(
     return target[0] - lo, target[1] - lo
 
 
-def _place_span[S: CharSpanDTO](
-    spans: list[S], span: S, target: tuple[int, int]
-) -> list[S]:
+def _place_span[S: CharSpanDTO](spans: list[S], span: S, target: tuple[int, int]) -> list[S]:
     """把一段用户锁定的读音放进新行，吃掉与它相交的自动值。
 
     §4.2 要求读音区间无缝无重叠，而新导入自带的注音（`[kana:]`）与用户锁定的
@@ -1852,9 +1834,7 @@ def _place_span[S: CharSpanDTO](
     的项，所以让路的是自动值。
     """
     kept = [
-        sp
-        for sp in spans
-        if sp.locked or not _intersects(sp.start, sp.end, target[0], target[1])
+        sp for sp in spans if sp.locked or not _intersects(sp.start, sp.end, target[0], target[1])
     ]
     kept.append(span.model_copy(update={"start": target[0], "end": target[1]}))
     kept.sort(key=lambda sp: (sp.start, sp.end))
@@ -1884,9 +1864,7 @@ def _repair_timing(lines: Sequence[LineDTO], out: EditOutcome) -> None:
                 a.dur_ms = max(MIN_DUR_MS, b.start_ms - a.start_ms)
                 fixed += 1
     if fixed:
-        out.warnings.append(
-            f"{fixed} 处新导入的时间与你锁定的音节首尾冲突，已让新导入的那一侧避让"
-        )
+        out.warnings.append(f"{fixed} 处新导入的时间与你锁定的音节首尾冲突，已让新导入的那一侧避让")
 
 
 def merge_imported_lines(
@@ -1956,9 +1934,7 @@ def merge_imported_lines(
     # 注音已经整体换成新导入的那一份，由它推出来的发音形立刻过期。物化与否按
     # **整个工程**判断而不是逐行：用户是对整首歌启用了这一层，不该因为某一行
     # 一条都没搬过来就把那行永久留空。锁定的发音形照旧不动（§4.4）。
-    materialized = any(ln.phonetics for ln in old_lines) or any(
-        ln.phonetics for ln in fresh
-    )
+    materialized = any(ln.phonetics for ln in old_lines) or any(ln.phonetics for ln in fresh)
     for line in fresh:
         _rederive_phonetics(line, materialized=materialized)
 
@@ -2262,8 +2238,7 @@ def _record_merge_orphans(
             out,
             kind="ruby",
             detail=(
-                f"「{base}」的注音「{sp.text}」是你锁定过的，{where}（原句"
-                f"「{label}」），请重新标注"
+                f"「{base}」的注音「{sp.text}」是你锁定过的，{where}（原句「{label}」），请重新标注"
             ),
             payload={
                 "line_id": old_line.id,
@@ -2289,8 +2264,7 @@ def _record_merge_orphans(
             out,
             kind="phonetic",
             detail=(
-                f"「{base}」上你锁定过的发音形「{sp.text}」{where}（原句"
-                f"「{label}」），请重新填写"
+                f"「{base}」上你锁定过的发音形「{sp.text}」{where}（原句「{label}」），请重新填写"
             ),
             payload={
                 "line_id": old_line.id,
@@ -2330,129 +2304,214 @@ def _record_merge_orphans(
     stats.lost += 1
 
 
-# ---- 配色模板（跨工程的全局资源） ----
+# ---- 配色方案（跨工程的全局资源） ----
 
 
-def default_templates_path() -> Path:
-    """用户配色模板的落盘位置。
+def default_schemes_path() -> Path:
+    """用户配色方案的落盘位置。
 
-    与工程目录**同级**而不是放在里面：模板是跨工程资产，塞进某个工程目录里，
+    与工程目录**同级**而不是放在里面：方案是跨工程资产，塞进某个工程目录里，
     删掉那个工程就把用户攒的全部配色一起删了。
     """
     return default_root().parent / "palettes.json"
 
 
-def _palette(
-    name: str, unsung_fill: str, unsung_outline: str, sung_fill: str, sung_outline: str
-) -> PaletteDTO:
-    """一个声部的四色。
+def _rgb(hex_rgb: str) -> str:
+    """`#RRGGBB` → ASS 的 `&H00BBGGRR&`。
 
-    四个而不是一个：描边跟着填充一起翻色（双层 clip 方案），未唱层与已唱层
-    各需一组填充/描边。颜色是 ASS 的 `&HAABBGGRR&`，**BGR 序，与直觉的 RGB 相反**。
+    **ASS 是 BGR 序，与直觉的 RGB 相反**——手写 ASS 十六进制串写反了不会报错，
+    只会得到一个红蓝对调的配色，而配色表恰恰是最容易看走眼的那种代码。
+    所以内置配色一律从 `#RRGGBB` 生成：表里的字面量与取色器、CSS、设计稿
+    是同一套写法，肉眼就能核。
     """
-    return PaletteDTO(
+    cleaned = hex_rgb.lstrip("#")
+    if len(cleaned) != 6:
+        msg = f"不是 #RRGGBB 形式的颜色：{hex_rgb}"
+        raise ValueError(msg)
+    red, green, blue = cleaned[0:2], cleaned[2:4], cleaned[4:6]
+    # alpha 恒为 00：ASS 里 00 = 完全不透明（与 CSS 相反），内置方案不带透明度
+    return f"&H00{blue}{green}{red}&".upper()
+
+
+def _scheme(
+    name: str,
+    description: str,
+    *,
+    unsung: tuple[str, str],
+    sung: tuple[str, str],
+) -> PaletteScheme:
+    """一套内置配色方案。两个参数都是 `(填充, 描边)` 的 `#RRGGBB` 二元组。
+
+    **方案不带声部**：写给哪个声部由界面决定（详见 `schemas.PaletteScheme` 的
+    文档，那里记着"把声部名焊进方案"这个错误建模造成过什么）。
+
+    原先挂在这里的两条观察仍然成立，只是换成不依赖声部名的说法：
+
+    1. **同一家族内共享未唱色**。同屏两个声部在开唱之前应当看起来是同一首歌的
+       歌词，所以给不同声部选方案时要选同一家族的不同变体（列表里靠 `家族 · 变体`
+       的命名摆在一起），而不是随便挑两套。这件事只能由用户决定——只有他知道
+       自己建了几个声部、分别叫什么。
+    2. **已唱色要在家族内就分得开**。家族里的两个变体是给对唱的两位歌手准备的，
+       它们的已唱色差得不够，分色就白做了（`tests/test_palette_schemes.py` 卡这条）。
+    """
+    return PaletteScheme(
         name=name,
-        unsung_fill=unsung_fill,
-        unsung_outline=unsung_outline,
-        sung_fill=sung_fill,
-        sung_outline=sung_outline,
+        description=description,
+        builtin=True,
+        colors=PaletteDTO(
+            name="",
+            unsung_fill=_rgb(unsung[0]),
+            unsung_outline=_rgb(unsung[1]),
+            sung_fill=_rgb(sung[0]),
+            sung_outline=_rgb(sung[1]),
+        ),
     )
 
 
-def builtin_palette_templates() -> list[PaletteTemplate]:
-    """内置配色模板。每次调用都重新构造，调用方改坏了也污染不到下一次。
+def builtin_palette_schemes() -> list[PaletteScheme]:
+    """内置配色方案。每次调用都重新构造，调用方改坏了也污染不到下一次。
 
-    每套都给齐 `main` / `duet_a` / `duet_b` / `chorus` 四个声部——只给 main
-    的话用户一碰对唱就得自己配色，模板也就白给了。未唱色在同一套模板内保持一致，
-    只有已唱色分声部，这样同屏两个声部在唱之前看起来是同一首歌的歌词。
+    ## 选这些方案的判据
+
+    卡拉OK 字幕压的是 **MV 画面**，不是纯色底——所以"好看"不是第一判据，
+    **压在任意画面上仍读得清**才是。落到可检验的两条（`tests/test_palette_schemes.py`
+    按这两条逐项验，改表时会被挡住）：
+
+    - **填充与描边的 WCAG 对比度 ≥ 4.5**。字之所以能从画面里跳出来靠的是描边，
+      描边与填充亮度接近时整个字会糊成一团，此时背景再乱就彻底读不出
+    - **未唱与已唱的填充色要差得开**（RGB 欧氏距离 ≥ 90）。差得不够，
+      扫色走到哪一个字看不出来，走字字幕就退化成静态字幕
+
+    ## 为什么是"家族 · 变体"这种命名
+
+    对唱曲要给两个声部选两套**能分辨、但看起来是一首歌**的配色。方案不带声部，
+    所以这件事得靠列表本身提供成组的选择：每个家族共享未唱色，只有已唱色不同，
+    用户给一个声部选家族里的一个变体、另一个声部选另一个变体即可。
+    三个以上声部时可以跨家族取第三套，未唱色会略有差异——色板上看得见，
+    由用户判断是否接受。
+
+    六个家族覆盖的是**不同的画面类型**而不是同一套的深浅变体：亮画面要有深字方案
+    （白字在雪景/白背景上会消失），暖画面要有暖方案（冷色压在暖底上发脏）。
+    CLAUDE.md §5.8 记着默认那套「白字黑边 → 红字白边」的来历，也记着它
+    **不是日本业界标准、只是同人圈一位博主的实践总结**——所以这里不做它的变体集。
     """
+    classic = ("#FFFFFF", "#202020")
+    contrast = ("#FFFFFF", "#000000")
+    machine = ("#FFFFFF", "#101010")
+    inverted = ("#141414", "#FFFFFF")
+    warm = ("#FFF4E1", "#2A1400")
+    night = ("#E6ECFF", "#16223C")
     return [
-        PaletteTemplate(
-            name="NicoKara 经典白蓝",
-            description="未唱白字近黑描边，已唱亮蓝配深蓝描边。同人 nicokara 的常见配色，默认起点。",
-            builtin=True,
-            palettes={
-                "main": _palette("main", "&H00FFFFFF&", "&H00202020&", "&H00FF9010&", "&H00501800&"),
-                "duet_a": _palette(
-                    "duet_a", "&H00FFFFFF&", "&H00202020&", "&H00FF9010&", "&H00501800&"
-                ),
-                "duet_b": _palette(
-                    "duet_b", "&H00FFFFFF&", "&H00202020&", "&H00B060FF&", "&H00320A50&"
-                ),
-                "chorus": _palette(
-                    "chorus", "&H00FFFFFF&", "&H00202020&", "&H0028C8FF&", "&H00003048&"
-                ),
-            },
+        _scheme(
+            "NicoKara · 蓝",
+            "白字近黑描边，已唱转亮蓝。同人 nicokara 的常见配色，通用起点。",
+            unsung=classic,
+            sung=("#1090FF", "#001850"),
         ),
-        PaletteTemplate(
-            name="高对比黄黑",
-            description="纯黑描边配高亮度填充。投影、老电视、弱视场景下压在任何画面上都读得出。",
-            builtin=True,
-            palettes={
-                "main": _palette("main", "&H00FFFFFF&", "&H00000000&", "&H0000DDFF&", "&H00000000&"),
-                "duet_a": _palette(
-                    "duet_a", "&H00FFFFFF&", "&H00000000&", "&H0000DDFF&", "&H00000000&"
-                ),
-                "duet_b": _palette(
-                    "duet_b", "&H00FFFFFF&", "&H00000000&", "&H00FFFF00&", "&H00000000&"
-                ),
-                "chorus": _palette(
-                    "chorus", "&H00FFFFFF&", "&H00000000&", "&H0000FF00&", "&H00000000&"
-                ),
-            },
+        _scheme(
+            "NicoKara · 粉",
+            "与「NicoKara · 蓝」同底，已唱转粉。对唱时与蓝配成一对。",
+            unsung=classic,
+            sung=("#FF60B0", "#500A32"),
         ),
-        PaletteTemplate(
-            name="柔和粉白",
-            description="米白配灰紫描边，已唱转粉。适合暖色调 MV，不与画面抢眼。",
-            builtin=True,
-            palettes={
-                "main": _palette("main", "&H00F5F5FA&", "&H005A465A&", "&H00BE96FF&", "&H00461E78&"),
-                "duet_a": _palette(
-                    "duet_a", "&H00F5F5FA&", "&H005A465A&", "&H00BE96FF&", "&H00461E78&"
-                ),
-                "duet_b": _palette(
-                    "duet_b", "&H00F5F5FA&", "&H005A465A&", "&H00FF96BE&", "&H006E1E3C&"
-                ),
-                "chorus": _palette(
-                    "chorus", "&H00F5F5FA&", "&H005A465A&", "&H0096D7FF&", "&H0014506E&"
-                ),
-            },
+        _scheme(
+            "高对比 · 黄",
+            "纯黑描边配高亮填充。投影、老电视、弱视场景下压在任何画面上都读得出。",
+            unsung=contrast,
+            sung=("#FFDD00", "#000000"),
+        ),
+        _scheme(
+            "高对比 · 青",
+            "与「高对比 · 黄」同底，已唱转青。对唱时与黄配成一对。",
+            unsung=contrast,
+            sung=("#00FFFF", "#000000"),
+        ),
+        _scheme(
+            "机型红白 · 红",
+            "白字黑边翻成红字白边，描边一起反色。最接近 DAM / JOY 点唱机的观感。",
+            unsung=machine,
+            sung=("#C80000", "#FFFFFF"),
+        ),
+        _scheme(
+            "机型红白 · 蓝",
+            "与「机型红白 · 红」同底，已唱转蓝。对唱时与红配成一对。",
+            unsung=machine,
+            sung=("#1030C8", "#FFFFFF"),
+        ),
+        _scheme(
+            "反相 · 红",
+            "深字白描边。给雪景、白背景、逆光这类亮画面——白字在这种底上会整片消失。",
+            unsung=inverted,
+            sung=("#C81E00", "#FFFFFF"),
+        ),
+        _scheme(
+            "反相 · 蓝",
+            "与「反相 · 红」同底，已唱转深蓝。对唱时与红配成一对。",
+            unsung=inverted,
+            sung=("#0A2896", "#FFFFFF"),
+        ),
+        _scheme(
+            "暖调 · 橙",
+            "奶白字配深褐描边，已唱转橙。夕阳、灯光、暖调实拍 MV 用它不发脏。",
+            unsung=warm,
+            sung=("#FF8C1E", "#4B1E00"),
+        ),
+        _scheme(
+            "暖调 · 珊瑚",
+            "与「暖调 · 橙」同底，已唱转珊瑚红。对唱时与橙配成一对。",
+            unsung=warm,
+            sung=("#FF5A82", "#3C0614"),
+        ),
+        _scheme(
+            "夜景 · 薄荷",
+            "冷白字配墨蓝描边，已唱转薄荷绿。城市夜景、蓝调、清爽夏日曲。",
+            unsung=night,
+            sung=("#14E6C8", "#05463C"),
+        ),
+        _scheme(
+            "夜景 · 洋红",
+            "与「夜景 · 薄荷」同底，已唱转霓虹洋红。对唱时与薄荷配成一对。",
+            unsung=night,
+            sung=("#FF32C8", "#3C0A2D"),
         ),
     ]
 
 
-def _read_user_templates(path: Path) -> list[PaletteTemplate]:
-    """读用户模板。文件不存在或读不动时当作"还没存过模板"。
+def _read_user_schemes(path: Path) -> list[PaletteScheme]:
+    """读用户方案。文件不存在或读不动时当作"还没存过方案"。
 
     损坏时降级而不是抛错：配色是锦上添花的功能，不该因为一个坏文件让整个样式
     面板打不开（§2.5：失败要降级、不能终止）。但**必须留下日志**——静默吞掉
-    之后用户会以为模板凭空消失了，而没有任何线索可查。
+    之后用户会以为方案凭空消失了，而没有任何线索可查。
+
+    文件里混着旧版（按声部索引的整套配色）的条目时，校验失败会走同一条降级路径。
+    这在本项目里不是问题：旧格式从未有过用户数据，用户方案文件当时是空的。
     """
     if not path.exists():
         return []
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-        items = raw["templates"] if isinstance(raw, dict) else raw
-        out = [PaletteTemplate.model_validate(it) for it in items]
+        items = raw["schemes"] if isinstance(raw, dict) else raw
+        out = [PaletteScheme.model_validate(it) for it in items]
     except (OSError, ValueError, KeyError, TypeError) as exc:
-        _log.warning("配色模板文件无法解析，已忽略全部用户模板：%s（%s）", path, exc)
+        _log.warning("配色方案文件无法解析，已忽略全部用户方案：%s（%s）", path, exc)
         return []
-    for tpl in out:
-        tpl.builtin = False
+    for scheme in out:
+        scheme.builtin = False
     return out
 
 
-def _write_templates(path: Path, templates: Sequence[PaletteTemplate]) -> None:
+def _write_schemes(path: Path, schemes: Sequence[PaletteScheme]) -> None:
     """原子写盘：先写临时文件，再 rename 顶替。
 
     理由与 `api/store.py` 相同——直接覆盖写若在中途崩溃会留下半截 JSON，
-    而半截文件比没有文件更糟：用户以为模板还在，打开才发现全毁。
+    而半截文件比没有文件更糟：用户以为方案还在，打开才发现全毁。
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "version": 1,
+        "version": 2,
         # 内置标记不落盘：它由代码决定，存进文件只会在改版后与代码打架
-        "templates": [tpl.model_dump(exclude={"builtin"}) for tpl in templates],
+        "schemes": [scheme.model_dump(exclude={"builtin"}) for scheme in schemes],
     }
     with tempfile.NamedTemporaryFile(
         "w", encoding="utf-8", dir=path.parent, delete=False, suffix=".tmp"
@@ -2462,70 +2521,111 @@ def _write_templates(path: Path, templates: Sequence[PaletteTemplate]) -> None:
     tmp.replace(path)
 
 
-def load_palette_templates(path: Path | None = None) -> list[PaletteTemplate]:
-    """内置模板 + 用户模板。内置在前，用户模板按名称排序。
+def load_palette_schemes(path: Path | None = None) -> list[PaletteScheme]:
+    """内置方案 + 用户方案。内置在前，用户方案按名称排序。
 
     同名时内置优先——保存接口本来就拒绝占用内置名，这里只是防住手改文件的情况。
     """
-    target = path or default_templates_path()
-    builtin = builtin_palette_templates()
-    reserved = {tpl.name for tpl in builtin}
-    user = sorted(_read_user_templates(target), key=lambda tpl: tpl.name)
-    return [*builtin, *(tpl for tpl in user if tpl.name not in reserved)]
+    target = path or default_schemes_path()
+    builtin = builtin_palette_schemes()
+    reserved = {scheme.name for scheme in builtin}
+    user = sorted(_read_user_schemes(target), key=lambda scheme: scheme.name)
+    return [*builtin, *(s for s in user if s.name not in reserved)]
 
 
-def save_palette_template(
+def _clean_scheme_name(name: str) -> str:
+    """校验并归一化方案名。保存与改名共用，两条路径的规则必须一模一样——
+    否则会出现"存得进去、改不回来"或反过来的名字。
+    """
+    clean = name.strip()
+    if not clean:
+        msg = "方案名不能为空"
+        raise EditError(msg)
+    if len(clean) > 64:
+        msg = f"方案名过长（{len(clean)} 字），上限 64 字"
+        raise EditError(msg)
+    if "/" in clean:
+        # 方案名是 DELETE /api/palettes/schemes/{name} 的路径段，带斜杠就再也删不掉了
+        msg = f"方案名不能包含斜杠：{clean}"
+        raise EditError(msg)
+    if clean in {scheme.name for scheme in builtin_palette_schemes()}:
+        msg = f"「{clean}」是内置配色方案，不能覆盖；请换一个名字"
+        raise EditError(msg)
+    return clean
+
+
+def save_palette_scheme(
     name: str,
-    palettes: dict[str, PaletteDTO],
+    colors: PaletteDTO,
     *,
     description: str = "",
     path: Path | None = None,
-) -> PaletteTemplate:
-    """保存/覆盖一个用户模板。同名的用户模板直接覆盖（"另存"就是这个意思）。"""
-    clean = name.strip()
-    if not clean:
-        msg = "模板名不能为空"
-        raise EditError(msg)
-    if len(clean) > 64:
-        msg = f"模板名过长（{len(clean)} 字），上限 64 字"
-        raise EditError(msg)
-    if "/" in clean:
-        # 模板名是 DELETE /api/palettes/templates/{name} 的路径段，带斜杠就再也删不掉了
-        msg = f"模板名不能包含斜杠：{clean}"
-        raise EditError(msg)
-    if clean in {tpl.name for tpl in builtin_palette_templates()}:
-        msg = f"「{clean}」是内置模板，不能覆盖；请换一个名字"
-        raise EditError(msg)
-    if not palettes:
-        msg = "模板至少要包含一个声部的配色"
-        raise EditError(msg)
+) -> PaletteScheme:
+    """保存/覆盖一个用户方案。同名的用户方案直接覆盖（"另存"就是这个意思）。
 
-    target = path or default_templates_path()
-    tpl = PaletteTemplate(
+    界面的自动保存正是靠这个覆盖语义：从某套方案改出来的第一笔修改新建一条，
+    之后的每一次微调都覆盖同一条，列表因此不会被"自定义 1/2/3…"淹没。
+    """
+    clean = _clean_scheme_name(name)
+
+    target = path or default_schemes_path()
+    scheme = PaletteScheme(
         name=clean,
         description=description,
         builtin=False,
-        palettes={k: v.model_copy(deep=True) for k, v in palettes.items()},
+        colors=colors.model_copy(deep=True),
     )
-    kept = [t for t in _read_user_templates(target) if t.name != clean]
-    kept.append(tpl)
-    kept.sort(key=lambda t: t.name)
-    _write_templates(target, kept)
-    return tpl
+    kept = [s for s in _read_user_schemes(target) if s.name != clean]
+    kept.append(scheme)
+    kept.sort(key=lambda s: s.name)
+    _write_schemes(target, kept)
+    return scheme
 
 
-def delete_palette_template(name: str, *, path: Path | None = None) -> None:
-    """删除一个用户模板。内置模板不可删——删了就再也拿不回来了。
+def rename_palette_scheme(name: str, new_name: str, *, path: Path | None = None) -> PaletteScheme:
+    """给用户配色方案改名。**一次原子写盘**，不是"先删再存"。
 
-    模板不存在时抛 `KeyError`，与 `ProjectStore.get` 保持一致，路由层转 404。
+    为什么不能用 delete + save 拼出来：那是两次写盘，中间崩掉（或进程被杀）就停在
+    "删了还没存上"——用户攒的配色直接消失，而这恰恰是最不该丢的东西。这里
+    读全量 → 在内存里改名 → 一次 `_write_schemes`（临时文件 + rename），
+    要么整份新的、要么整份旧的，没有中间态。顺序也不会乱：写回前统一按名排序。
+
+    改名与保存共用 `_clean_scheme_name`，因此内置名不能被占用；新名撞上**另一个**
+    用户方案时拒绝，而不是悄悄合并掉一套配色。改成自己原来的名字是允许的空操作。
     """
-    if name in {tpl.name for tpl in builtin_palette_templates()}:
-        msg = f"「{name}」是内置模板，不可删除"
+    if name in {scheme.name for scheme in builtin_palette_schemes()}:
+        msg = f"「{name}」是内置配色方案，不能改名"
         raise EditError(msg)
-    target = path or default_templates_path()
-    users = _read_user_templates(target)
-    kept = [tpl for tpl in users if tpl.name != name]
-    if len(kept) == len(users):
-        msg = f"配色模板不存在：{name}"
+    clean = _clean_scheme_name(new_name)
+
+    target = path or default_schemes_path()
+    users = _read_user_schemes(target)
+    hit = next((scheme for scheme in users if scheme.name == name), None)
+    if hit is None:
+        msg = f"配色方案不存在：{name}"
         raise KeyError(msg)
-    _write_templates(target, kept)
+    if clean != name and any(scheme.name == clean for scheme in users):
+        msg = f"已经有一套叫「{clean}」的配色方案了；请换一个名字"
+        raise EditError(msg)
+
+    hit.name = clean
+    users.sort(key=lambda scheme: scheme.name)
+    _write_schemes(target, users)
+    return hit
+
+
+def delete_palette_scheme(name: str, *, path: Path | None = None) -> None:
+    """删除一个用户方案。内置不可删——删了就再也拿不回来了。
+
+    方案不存在时抛 `KeyError`，与 `ProjectStore.get` 保持一致，路由层转 404。
+    """
+    if name in {scheme.name for scheme in builtin_palette_schemes()}:
+        msg = f"「{name}」是内置配色方案，不可删除"
+        raise EditError(msg)
+    target = path or default_schemes_path()
+    users = _read_user_schemes(target)
+    kept = [scheme for scheme in users if scheme.name != name]
+    if len(kept) == len(users):
+        msg = f"配色方案不存在：{name}"
+        raise KeyError(msg)
+    _write_schemes(target, kept)

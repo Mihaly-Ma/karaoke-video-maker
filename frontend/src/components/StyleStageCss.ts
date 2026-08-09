@@ -321,21 +321,78 @@ export const STYLE_STAGE_CSS = `
 }
 .sty-color__hex--bad { border-color: var(--danger); }
 
-.sty-tpls { display: flex; flex-direction: column; gap: var(--sp-1); }
-.sty-tpl {
+/* ---- 配色方案列表 ----
+ *
+ * 一条一行：色板（未唱填充/未唱描边/已唱填充/已唱描边四个点）+ 名字 + 用户方案的
+ * 改名/删除。**一列而不是两列网格**：内置 12 套加上用户自存的，两列摆下来名字会被
+ * 截断到看不出是哪个变体（「NicoKara · 蓝」和「NicoKara · 粉」只差最后一个字）。
+ * 高度封顶后内部滚动，与字体列表同一套形态——那个形态在这个 360px 的栏里已验证可用。
+ */
+
+.sty-schemes__head {
+  margin-top: var(--sp-3);
+  margin-bottom: var(--sp-2);
+  font-size: var(--fs-xs);
+  color: var(--fg-3);
+}
+
+.sty-schemes {
+  max-height: 260px;
+  overflow-y: auto;
+  border: var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--bg-surface);
+}
+
+.sty-scheme {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding-right: var(--sp-1);
+  border-bottom: 1px solid var(--stroke);
+}
+.sty-scheme:last-child { border-bottom: none; }
+.sty-scheme:hover { background: var(--bg-raise); }
+.sty-scheme--on { background: var(--accent-weak); }
+
+/* 点击区域是整行左侧：色板与名字一起点，命中面积够大 */
+.sty-scheme__main {
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: var(--sp-2);
   padding: var(--sp-1) var(--sp-2);
-  background: var(--bg-surface);
-  border: var(--hairline);
-  border-radius: var(--r-md);
+  background: transparent;
+  border: none;
+  border-radius: 0;
   color: var(--fg-2);
   font-size: var(--fs-sm);
   text-align: left;
 }
-.sty-tpl:hover:not(:disabled) { border-color: var(--accent); color: var(--fg); }
-.sty-tpl__swatch { display: inline-flex; gap: 2px; flex: 0 0 auto; }
-.sty-tpl__dot { width: 12px; height: 12px; border-radius: 3px; border: var(--hairline-strong); }
-.sty-tpl__name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sty-scheme--on .sty-scheme__main { color: var(--fg); font-weight: 600; }
+
+.sty-scheme__swatch { display: inline-flex; gap: 2px; flex: 0 0 auto; }
+.sty-scheme__dot { width: 12px; height: 12px; border-radius: 3px; border: var(--hairline-strong); }
+.sty-scheme__name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.sty-scheme__act {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: var(--r-sm);
+  color: var(--fg-3);
+  font-size: var(--fs-xs);
+}
+.sty-scheme__act:hover:not(:disabled) { background: var(--bg-panel); color: var(--fg); }
+
+.sty-scheme--editing { padding: var(--sp-1) var(--sp-2); }
+.sty-scheme__input {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--fs-sm);
+}
 `

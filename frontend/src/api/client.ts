@@ -16,7 +16,7 @@ import type {
   LyricPreview,
   LyricSearchResponse,
   Palette,
-  PaletteTemplate,
+  PaletteScheme,
   Project,
   ProjectSummary,
   ProxyStatus,
@@ -270,34 +270,52 @@ export const updatePalettes = (
   replace = false,
 ) => post<Project>(`/projects/${projectId}/palettes`, { palettes, replace })
 
-/** 套用一套配色模板。与 `updatePalettes` 同一端点，仍是一步操作、一格撤销。 */
-export const applyPaletteTemplate = (projectId: string, template: string) =>
-  post<Project>(`/projects/${projectId}/palettes`, { template })
+/**
+ * 把一套配色方案施加到**一个声部**。与 `updatePalettes` 同一端点，仍是一步操作、一格撤销。
+ *
+ * `applyTo` 是必需的：方案就是一组四色、不带声部（见 `types.PaletteScheme`），
+ * 不说写给谁没有意义。**任意用户自定义的声部名都合法**——声部由用户在编辑舞台
+ * 自由新建与改名，前端后端都不该有声部名白名单。
+ */
+export const applyPaletteScheme = (projectId: string, scheme: string, applyTo: string) =>
+  post<Project>(`/projects/${projectId}/palettes`, { scheme, apply_to: applyTo })
 
-/** 配色模板：内置 + 用户保存的，二者混在同一个列表里，用 PaletteTemplate.builtin 区分 */
-export const listPaletteTemplates = () => req<PaletteTemplate[]>('/palettes/templates')
+/** 配色方案：内置 + 用户保存的，混在同一个列表里，用 `PaletteScheme.builtin` 区分 */
+export const listPaletteSchemes = () => req<PaletteScheme[]>('/palettes/schemes')
 
 /**
- * 把一套配色存成模板。给 `projectId` 就直接取该工程当前的配色（主路径：用户刚调好
- * 颜色，不该为了存个模板再把四组色号抄一遍）；否则用显式给出的 `palettes`。
+ * 把一组四色存成方案。给 `projectId` + `part` 就直接取该声部当前生效的四色
+ * （主路径：用户刚调好颜色，不该为了存个方案再把色号抄一遍）；否则用显式给出的 `colors`。
  *
- * 注意是**按声部索引的一整套** `palettes`，不是单个 `palette`。
+ * 同名直接覆盖——界面的自动保存正是靠这个语义：从某套方案改出来的第一笔修改
+ * 新建一条，之后的每次微调都更新同一条，列表不会被"自定义 1/2/3…"淹没。
  */
-export const savePaletteTemplate = (
+export const savePaletteScheme = (
   name: string,
-  palettes: Record<string, Palette>,
-  options: { description?: string; projectId?: string } = {},
+  colors: Palette,
+  options: { description?: string } = {},
 ) =>
-  post<PaletteTemplate>('/palettes/templates', {
+  post<PaletteScheme>('/palettes/schemes', {
     name,
     description: options.description ?? '',
-    project_id: options.projectId ?? null,
-    palettes,
+    colors,
   })
 
-/** 模板的主键是 `name`，后端没有 id 字段——传 `tpl.id` 只会删到一个叫 undefined 的模板。 */
-export const deletePaletteTemplate = (name: string) =>
-  req<void>(`/palettes/templates/${encodeURIComponent(name)}`, { method: 'DELETE' })
+/**
+ * 给用户方案改名。
+ *
+ * **不要用 delete + save 拼**：那是两次写盘，中间断掉就停在"删了还没存上"，
+ * 用户攒的配色直接消失。后端的 PATCH 落到一次原子写。
+ */
+export const renamePaletteScheme = (name: string, newName: string) =>
+  req<PaletteScheme>(`/palettes/schemes/${encodeURIComponent(name)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ new_name: newName }),
+  })
+
+/** 方案的主键是 `name`，后端没有 id 字段 */
+export const deletePaletteScheme = (name: string) =>
+  req<void>(`/palettes/schemes/${encodeURIComponent(name)}`, { method: 'DELETE' })
 
 // ---- 字体服务 ----
 

@@ -87,4 +87,18 @@ export const style: Record<string, string> = {
   'style.palette.sungOutline': '已唱描边',
   'style.palette.editing': '正在改「{part}」',
   'style.palette.inherited': '「{part}」还没有自己的配色，当前沿用上一级；改动即为它单独设置',
+
+  // 配色方案：一组四色，点一下写给当前声部
+  'style.scheme.applyTo': '方案 · 点一下用到「{part}」',
+  'style.scheme.loadFailed': '方案列表没取到，手工调色不受影响',
+  'style.scheme.rename': '改名',
+  'style.scheme.remove': '删除方案',
+  'style.scheme.renameLabel': '方案名',
+  'style.scheme.renameOk': '确定',
+  'style.scheme.renameCancel': '取消',
+  // 自动存出的自定义方案：名字要一眼看出它从哪来
+  'style.scheme.derivedName': '{from} 改',
+  'style.scheme.defaultName': '自定义配色',
+  'style.scheme.derivedDesc': '由「{from}」改出',
+  'style.scheme.customDesc': '在样式面板里手工调出',
 }

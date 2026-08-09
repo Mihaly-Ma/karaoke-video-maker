@@ -247,19 +247,22 @@ export type LockTarget =
 // ---- 配色 ----
 
 /**
- * 一套可跨工程复用的配色（后端 `PaletteTemplate`）。
+ * 一套可跨工程复用的配色方案（后端 `PaletteScheme`）= **一组四色**。
  *
- * **没有 `id` 字段，主键就是 `name`**（删除走 `DELETE /api/palettes/templates/{name}`），
- * 且带的是**按声部索引的一整套** `palettes`，不是单个 `palette`——一个声部要四个
- * 颜色，模板要覆盖 main / duet_a / duet_b 等多个声部。
+ * **没有 `id` 字段，主键就是 `name`**（删除走 `DELETE /api/palettes/schemes/{name}`）。
+ *
+ * **方案不带声部。** 它此前是 `dict[声部名 → Palette]`，而声部名是用户自定义的
+ * （编辑舞台可新建、可就地改名，连 `main` 都能改）——真实工程里声部叫「男」「女」「合」，
+ * 按名字取色必然落空、全部退到 `main`，每个声部拿到同一组颜色且毫无提示。
+ * 现在写给哪个声部由界面决定（`applyPaletteScheme` 的 `applyTo`），
+ * 色板上看到什么，点下去就是什么。
  */
-export interface PaletteTemplate {
+export interface PaletteScheme {
   name: string
   description: string
-  /** 内置模板不可删除、不可被同名覆盖 */
+  /** 内置方案不可删除、不可改名、不可被同名覆盖 */
   builtin: boolean
-  /** 按声部名索引，如 `main` / `duet_a` / `duet_b` / `chorus` */
-  palettes: Record<string, Palette>
+  colors: Palette
 }
 
 // ---- 字体服务 ----

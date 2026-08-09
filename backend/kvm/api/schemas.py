@@ -698,34 +698,56 @@ class SetVoicePartRequest(BaseModel):
 # ---- 配色 ----
 
 
-class PaletteTemplate(BaseModel):
-    """一套可跨工程复用的配色。
+class PaletteScheme(BaseModel):
+    """一套可跨工程复用的配色方案 = **一组四色**，不带任何声部。
 
-    模板是**全局资源，不属于任何工程**：用户调出一套满意的配色之后，
-    下一首歌还要用同一套，存进工程文件等于每首歌都要重调一遍。
+    方案是**全局资源，不属于任何工程**：用户调出一套满意的配色之后，下一首歌
+    还要用同一套，存进工程文件等于每首歌都要重调一遍。
 
-    每个声部需要**四个颜色**（未唱填充/未唱描边/已唱填充/已唱描边），
-    因为描边跟着填充一起翻色（双层 clip 方案），两层各需一组。
+    ## 为什么这里没有"声部 → 颜色"的字典（这是被真实缺陷换来的）
+
+    本类型此前叫 `PaletteTemplate`，带的是 `dict[声部名 → PaletteDTO]`，
+    内置方案按 `main` / `duet_a` / `duet_b` / `chorus` 四个键写死。
+    **而声部名是用户自定义的**——编辑舞台可以新建任意名字的声部、也可以就地改名
+    （连 `main` 都能改）。真实工程里的声部叫「男」「女」「合」，于是按名字取色
+    必然落空、全部退到 `main`，每个声部拿到同一组颜色，**不报错也不提示**，
+    用户只会觉得"配色方案没什么用"。当时为此写的"该声部 → main → 第一个"
+    三级回退，本身就是这个错误建模的症状：需要三级兜底才能取出颜色，
+    说明这个键根本不该长在方案上。
+
+    第二条同样致命：用户的操作是"选中一个声部，点一个色板"，他期望得到的就是
+    **色板上看到的那组颜色**。方案自带声部键的话，点下去拿到的是方案里那个声部
+    的颜色，与色板显示的未必是同一组——所见不等于所得。
+
+    所以方案只承载一组四色，写给哪个声部由界面决定。**不要再给它加声部维度。**
+
+    四个颜色（未唱填充/未唱描边/已唱填充/已唱描边）而不是一个：描边跟着填充
+    一起翻色（双层 clip 方案，CLAUDE.md §8.5），未唱层与已唱层各需一组。
     """
 
     name: str
     description: str = ""
     builtin: bool = False
-    """内置模板：不可删除、不可被同名覆盖。"""
+    """内置方案：不可删除、不可改名、不可被同名覆盖。"""
 
-    palettes: dict[str, PaletteDTO] = Field(default_factory=dict)
-    """按声部名索引，如 `main` / `duet_a` / `duet_b` / `chorus`。"""
+    colors: PaletteDTO = Field(default_factory=PaletteDTO)
+    """这一套方案的四个颜色。`PaletteDTO.name` 在这里没有意义，序列化时原样带着。"""
 
 
 class PaletteUpdateRequest(BaseModel):
     """更新工程配色。
 
-    `template` 与 `palettes` 可以同时给出：先套模板，再用 `palettes` 覆盖其中几项。
-    这样"套用模板后微调"仍然是一步操作、一格撤销。
+    `scheme` 与 `palettes` 可以同时给出：先施加方案，再用 `palettes` 覆盖其中几项。
+    这样"套用方案后微调"仍然是一步操作、一格撤销。
     """
 
-    template: str | None = None
-    """模板名。给出则先把该模板的配色并进来。"""
+    scheme: str | None = None
+    """方案名。给出时必须同时给 `apply_to`——方案是一组四色，不指定写给谁没有意义。"""
+
+    apply_to: str | None = None
+    """把方案写给哪个声部。**任意用户自定义的声部名都合法**，后端不做白名单校验：
+    声部名来自歌词数据与用户输入，写死一份清单必然与编辑舞台跑偏。
+    """
 
     palettes: dict[str, PaletteDTO] | None = None
 
@@ -733,17 +755,29 @@ class PaletteUpdateRequest(BaseModel):
     """True 表示整体替换（未出现的声部配色被删掉），False 表示按声部合并。"""
 
 
-class PaletteTemplateSaveRequest(BaseModel):
-    """把一套配色保存为模板。
+class PaletteSchemeRenameRequest(BaseModel):
+    """给用户配色方案改名。
 
-    给出 `project_id` 时直接取该工程当前的配色（"保存当前配色为模板"是主路径，
-    用户不该为了存个模板再把颜色抄一遍）；否则用请求体里的 `palettes`。
+    独立成一个端点而不是让前端拼 delete + save：那是两次写盘，中间断掉就把用户
+    攒的配色弄丢了（详见 `ops.rename_palette_scheme`）。
+    """
+
+    new_name: str
+
+
+class PaletteSchemeSaveRequest(BaseModel):
+    """把一组四色保存成方案。
+
+    给出 `project_id` + `part` 时直接取该工程那个声部**当前生效**的四色
+    （"把我现在调的这套存下来"是主路径，用户不该为了存个方案再把色号抄一遍）；
+    否则用请求体里的 `colors`。
     """
 
     name: str
     description: str = ""
     project_id: str | None = None
-    palettes: dict[str, PaletteDTO] = Field(default_factory=dict)
+    part: str | None = None
+    colors: PaletteDTO | None = None
 
 
 # ---- 媒体探测 / 波形峰值 ----

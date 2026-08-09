@@ -136,15 +136,20 @@ with TestClient(app) as c:
     else:
         check("区间声部", False, f"HTTP {r.status_code} {r.text[:200]}")
 
-    print("\n=== 9. 配色模板 ===")
-    r = c.get("/api/palettes/templates")
-    check("列出模板", r.status_code == 200, f"{len(r.json()) if r.status_code==200 else '?'} 套")
+    print("\n=== 9. 配色方案 ===")
+    # 方案 = 一组四色，不带声部（声部名由用户自定义，写死会让取色全部落空）
+    r = c.get("/api/palettes/schemes")
+    check("列出方案", r.status_code == 200, f"{len(r.json()) if r.status_code==200 else '?'} 套")
     if r.status_code == 200 and r.json():
-        pal = r.json()[0].get("palette") or r.json()[0].get("palettes")
-        r = c.post("/api/palettes/templates", json={"name": "我的配色", "palette": pal}
-                   if isinstance(pal, dict) and "unsung_fill" in pal
-                   else {"name": "我的配色", "palettes": pal})
-        check("保存自定义模板", r.status_code in (200, 201), f"HTTP {r.status_code}")
+        first = r.json()[0]
+        r = c.post("/api/palettes/schemes", json={"name": "我的配色", "colors": first["colors"]})
+        check("保存自定义方案", r.status_code in (200, 201), f"HTTP {r.status_code}")
+        # 用一个用户自定义的声部名施加，确认任意名字都取得到色
+        r = c.post(f"/api/projects/{pid}/palettes",
+                   json={"scheme": first["name"], "apply_to": "男"})
+        ok_apply = (r.status_code == 200
+                    and r.json()["palettes"]["男"]["sung_fill"] == first["colors"]["sung_fill"])
+        check("方案施加到自定义声部", ok_apply, f"HTTP {r.status_code}")
 
     print("\n=== 10. 字体服务 ===")
     # 字体扫描是后台异步的（冷启动约 33s，热启动 17ms）——必须等它 ready 再断言，

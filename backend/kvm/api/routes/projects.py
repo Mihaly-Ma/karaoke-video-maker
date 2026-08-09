@@ -1,14 +1,14 @@
 """工程管理路由：创建 / 列表 / 读取 / 删除 / 撤销重做 / 样式 / 配色 / 备份导出，
-外加跨工程的配色模板。
+外加跨工程的配色方案库。
 
 不做任何业务判断，全部委托给 `ProjectStore`（持久化 + undo/redo 见
-`kvm.api.store`）与 `kvm.editing.ops`（配色模板的读写规则）。本文件只负责
+`kvm.api.store`）与 `kvm.editing.ops`（配色方案的读写规则）。本文件只负责
 HTTP 语义（状态码、404）与请求/响应的 DTO 转换。
 
 ## 为什么这里挂了两个前缀不同的子路由
 
-配色模板是**跨工程的全局资源**，挂在 `/api/projects/{id}/...` 下面会暗示它属于
-某个工程，用户删掉那个工程就有理由担心模板也没了。所以它走 `/api/palettes`。
+配色方案是**跨工程的全局资源**，挂在 `/api/projects/{id}/...` 下面会暗示它属于
+某个工程，用户删掉那个工程就有理由担心方案也没了。所以它走 `/api/palettes`。
 本模块导出的 `router` 因此是个空前缀的壳，底下装 `/api/projects` 与
 `/api/palettes` 两个子路由——`app.py` 那边仍然只需 include 一次。
 """
@@ -18,8 +18,9 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from kvm.api.schemas import (
     PaletteDTO,
-    PaletteTemplate,
-    PaletteTemplateSaveRequest,
+    PaletteScheme,
+    PaletteSchemeRenameRequest,
+    PaletteSchemeSaveRequest,
     PaletteUpdateRequest,
     ProjectDTO,
     ProjectSummary,
@@ -182,37 +183,48 @@ def export_project(project_id: str, request: Request) -> Response:
 # ---- 工程配色 ----
 
 
-def _lookup_template(name: str) -> PaletteTemplate:
-    for tpl in ops.load_palette_templates():
-        if tpl.name == name:
-            return tpl
-    raise HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND, detail=f"配色模板不存在：{name}"
-    )
+def _lookup_scheme(name: str) -> PaletteScheme:
+    for scheme in ops.load_palette_schemes():
+        if scheme.name == name:
+            return scheme
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"配色方案不存在：{name}")
 
 
 @projects_router.post("/{project_id}/palettes", response_model=ProjectDTO)
-def update_palettes(
-    project_id: str, body: PaletteUpdateRequest, request: Request
-) -> ProjectDTO:
+def update_palettes(project_id: str, body: PaletteUpdateRequest, request: Request) -> ProjectDTO:
     """更新工程配色，走 `store.mutate()` 以进入撤销栈。
 
     配色此前只能读不能写，用户调完一刷新就回到默认色——样式面板里唯一没有出口
     的一块。走 mutate 而不是直接改对象，是因为调色本来就要反复试，能撤回才敢试。
 
-    `template` 与 `palettes` 同时给出时先套模板、再用 `palettes` 覆盖其中几项，
-    于是"套用模板后微调"仍然是一步操作、一格撤销。
+    `scheme` + `apply_to` 是界面的主路径：**把一套方案的四色写给某一个声部**，
+    别的声部原样不动。方案本身不带声部（见 `schemas.PaletteScheme`），所以
+    `apply_to` 是必需的；`apply_to` 接受**任意用户自定义的声部名**，后端不做白名单，
+    因为声部由用户在编辑舞台自由新建与改名。
+
+    `scheme` 与 `palettes` 同时给出时先施加方案、再用 `palettes` 覆盖，
+    于是"套用方案后微调"仍然是一步操作、一格撤销。
     """
+    if bool(body.scheme) != bool(body.apply_to):
+        # 两个必须成对出现。少一个就静默忽略的话，前端拼错参数会表现成"点了没反应"，
+        # 比直接报错难查得多
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="scheme 与 apply_to 必须成对给出：方案是一组四色，要指明写给哪个声部",
+        )
+
     incoming: dict[str, PaletteDTO] = {}
-    if body.template is not None:
-        tpl = _lookup_template(body.template)
-        incoming.update({k: v.model_copy(deep=True) for k, v in tpl.palettes.items()})
+    if body.scheme and body.apply_to:
+        scheme = _lookup_scheme(body.scheme)
+        one = scheme.colors.model_copy(deep=True)
+        one.name = body.apply_to
+        incoming[body.apply_to] = one
     if body.palettes:
         incoming.update(body.palettes)
     if not incoming and not body.replace:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="请求既没有给出 palettes 也没有指定 template，无事可做",
+            detail="请求既没有给出 palettes 也没有指定 scheme，无事可做",
         )
 
     def _apply(draft: ProjectDTO) -> None:
@@ -220,12 +232,12 @@ def update_palettes(
         # 与一次性的请求对象共享实例迟早会咬人
         fresh = {k: v.model_copy(deep=True) for k, v in incoming.items()}
         if body.replace:
-            # 整体替换：未出现的声部配色被删掉，用于"换一套模板"而非"改一个声部"
+            # 整体替换：未出现的声部配色被删掉，用于"重置整首歌"而非"改一个声部"
             draft.palettes = fresh
         else:
             draft.palettes.update(fresh)
 
-    label = f"套用配色模板「{body.template}」" if body.template else "更新配色"
+    label = f"配色方案「{body.scheme}」→ 声部「{body.apply_to}」" if body.scheme else "更新配色"
     try:
         return _store(request).mutate(project_id, _apply, label=label)
     except KeyError as exc:
@@ -259,51 +271,77 @@ def clear_orphans(project_id: str, request: Request, index: int | None = None) -
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
-# ---- 配色模板（跨工程） ----
+# ---- 配色方案（跨工程的全局资源） ----
+#
+# 方案是**一组四色**，不带声部：声部名由用户自定义（编辑舞台可新建、可改名），
+# 把声部键焊进方案会让"按名字取色"在真实工程里全部落空。详见 `schemas.PaletteScheme`。
 
 
-@palettes_router.get("/templates", response_model=list[PaletteTemplate])
-def list_palette_templates() -> list[PaletteTemplate]:
-    """列出内置 + 用户保存的配色模板，内置在前。
+@palettes_router.get("/schemes", response_model=list[PaletteScheme])
+def list_palette_schemes() -> list[PaletteScheme]:
+    """列出内置 + 用户保存的配色方案，内置在前。
 
-    模板文件损坏时只会少掉用户模板（`ops` 那边降级并记日志），内置的照常返回——
+    方案文件损坏时只会少掉用户方案（`ops` 那边降级并记日志），内置的照常返回——
     样式面板不该因为一个坏文件整个打不开。
     """
-    return ops.load_palette_templates()
+    return ops.load_palette_schemes()
 
 
-@palettes_router.post(
-    "/templates", response_model=PaletteTemplate, status_code=status.HTTP_201_CREATED
-)
-def save_palette_template(body: PaletteTemplateSaveRequest, request: Request) -> PaletteTemplate:
-    """把一套配色存成模板。给出 `project_id` 就直接取该工程当前的配色。
+@palettes_router.post("/schemes", response_model=PaletteScheme, status_code=status.HTTP_201_CREATED)
+def save_palette_scheme(body: PaletteSchemeSaveRequest, request: Request) -> PaletteScheme:
+    """把一组四色存成方案。给出 `project_id` + `part` 就直接取该声部当前生效的四色。
 
-    "保存当前配色为模板"是主路径：用户刚在某个工程里调好颜色，不该为了存个模板
-    再把四组色号抄一遍。
+    "把我现在调的这套存下来"是主路径：用户刚在某个工程里调好颜色，
+    不该为了存个方案再把四个色号抄一遍。
+
+    取色用的是**生效值**（该声部 → main → 默认）而不是"该声部自己的配色"：
+    用户看到的就是生效值，存下来的必须与他看到的一致。
     """
-    palettes = body.palettes
+    colors = body.colors
     if body.project_id:
         try:
             project = _store(request).get(body.project_id)
         except KeyError as exc:
             raise _not_found(exc) from exc
-        palettes = {k: v.model_copy(deep=True) for k, v in project.palettes.items()}
-    if not palettes:
+        part = body.part or "main"
+        picked = project.palettes.get(part) or project.palettes.get("main")
+        if picked is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"工程里声部「{part}」还没有配色可存",
+            )
+        colors = picked.model_copy(deep=True)
+    if colors is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="没有可保存的配色：工程尚未设置配色，请求体里也没有给出 palettes",
+            detail="没有可保存的配色：请求体里既没有 colors，也没有给出 project_id",
         )
     try:
-        return ops.save_palette_template(body.name, palettes, description=body.description)
+        return ops.save_palette_scheme(body.name, colors, description=body.description)
     except ops.EditError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
-@palettes_router.delete("/templates/{name}")
-def delete_palette_template(name: str) -> dict[str, bool]:
-    """删除一个用户模板。内置模板不可删（400），模板不存在返回 404。"""
+@palettes_router.patch("/schemes/{name}", response_model=PaletteScheme)
+def rename_palette_scheme(name: str, body: PaletteSchemeRenameRequest) -> PaletteScheme:
+    """给用户配色方案改名。内置不可改名（400），不存在返回 404。
+
+    单独一个端点而不是让前端拼 delete + save：后者是两次写盘，中间断掉就把用户
+    的配色弄丢了。这里落到 `ops.rename_palette_scheme` 的一次原子写。
+    """
     try:
-        ops.delete_palette_template(name)
+        return ops.rename_palette_scheme(name, body.new_name)
+    except KeyError as exc:
+        raise _not_found(exc) from exc
+    except ops.EditError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@palettes_router.delete("/schemes/{name}")
+def delete_palette_scheme(name: str) -> dict[str, bool]:
+    """删除一个用户方案。内置不可删（400），方案不存在返回 404。"""
+    try:
+        ops.delete_palette_scheme(name)
     except KeyError as exc:
         raise _not_found(exc) from exc
     except ops.EditError as exc:
