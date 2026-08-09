@@ -51,6 +51,18 @@
 
 一律用 `\\an7`（左上）+ 显式 `\\pos`，自己算居中，而不是用 `\\an2` 让 libass 居中。
 因为 clip 用的是**绝对屏幕坐标**，必须由我们掌握行的确切 x 范围。
+
+## 颜色一律由事件 override 决定，Style 行只是兜底
+
+配色是**逐声部**的（`VoicePalette`，四色一组）且用户随时能改，而 `[V4+ Styles]`
+里的一行是**全局唯一**的一份——表达不了"这一段是 duet_b、那一段是 main"。
+所以每个 Dialogue 自带 `\\1c`（填充）与 `\\3c`（描边），Style 行的颜色只是
+"万一没有 override 时"的兜底，且由 `main` 配色填充，不写死字面量。
+
+**曾经踩过的坑**：Title / Credit / Dot 三个样式的颜色直接写死在 Style 行里
+（`&H00FFFFFF&` + `&H00000000&`）。默认配色恰好也是白字深边，所以看起来一切正常，
+**只有用户改了配色才暴露**：歌词整体换了颜色，制作名单和引导点纹丝不动——
+而引导点的全部意义就是"马上要唱这一句"，颜色一旦对不上，这层提示就断了。
 """
 
 from __future__ import annotations
@@ -73,11 +85,11 @@ YCbCr Matrix: TV.709
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Main,{font},{size},&H00FFFFFF&,&H00FFFFFF&,&H00000000&,&H00000000&,{bold},0,0,0,100,100,0,0,1,{outline},{shadow},7,0,0,0,1
-Style: Ruby,{font},{ruby_size},&H00FFFFFF&,&H00FFFFFF&,&H00000000&,&H00000000&,{bold},0,0,0,100,100,0,0,1,{ruby_outline},0,7,0,0,0,1
-Style: Title,{font},{title_size},&H00FFFFFF&,&H00FFFFFF&,&H00000000&,&H00000000&,-1,0,0,0,100,100,0,0,1,{outline},{shadow},8,0,0,0,1
-Style: Credit,{font},{credit_size},&H00FFFFFF&,&H00FFFFFF&,&H00000000&,&H00000000&,0,0,0,0,100,100,0,0,1,{ruby_outline},0,8,0,0,0,1
-Style: Dot,{font},{dot_size},&H00FFFFFF&,&H00FFFFFF&,&H00000000&,&H00000000&,-1,0,0,0,100,100,0,0,1,{ruby_outline},0,7,0,0,0,1
+Style: Main,{font},{size},{unsung_fill},{unsung_fill},{unsung_outline},&H00000000&,{bold},0,0,0,100,100,0,0,1,{outline},{shadow},7,0,0,0,1
+Style: Ruby,{font},{ruby_size},{unsung_fill},{unsung_fill},{unsung_outline},&H00000000&,{bold},0,0,0,100,100,0,0,1,{ruby_outline},0,7,0,0,0,1
+Style: Title,{font},{title_size},{unsung_fill},{unsung_fill},{unsung_outline},&H00000000&,-1,0,0,0,100,100,0,0,1,{outline},{shadow},8,0,0,0,1
+Style: Credit,{font},{credit_size},{unsung_fill},{unsung_fill},{unsung_outline},&H00000000&,0,0,0,0,100,100,0,0,1,{ruby_outline},0,8,0,0,0,1
+Style: Dot,{font},{dot_size},{sung_fill},{sung_fill},{sung_outline},&H00000000&,-1,0,0,0,100,100,0,0,1,{ruby_outline},0,7,0,0,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -125,12 +137,25 @@ class AssBuilder:
         st = p.style
         ruby_size = max(1, int(st.font_size * st.ruby_scale))
 
+        # Style 行的颜色只是"没有 override 时"的兜底，取 main 配色而不是写死字面量：
+        # 写死的话默认配色下看起来一模一样，改了配色才发现兜底值在撒谎。
+        # SecondaryColour 跟 PrimaryColour 取同值——本项目不用 `\k` 走字，
+        # Secondary 本该用不到，取同值还能让 libass #124（行首 `\kf0` 整行卡在
+        # Secondary）即便触发也看不出区别。
+        # BackColour（阴影色）保持不透明黑：阴影没有逐事件的 `\4c` override，
+        # 若让它跟随未唱描边，已唱层的阴影就会一直卡在未唱色上。
+        head_pal = p.palette_for("main")
+
         head = _HEADER_TMPL.format(
             w=p.video_width,
             h=p.video_height,
             font=st.font_name,
             size=st.font_size,
             ruby_size=ruby_size,
+            unsung_fill=head_pal.unsung_fill,
+            unsung_outline=head_pal.unsung_outline,
+            sung_fill=head_pal.sung_fill,
+            sung_outline=head_pal.sung_outline,
             title_size=int(st.font_size * 1.15),
             credit_size=int(st.font_size * 0.55),
             dot_size=int(st.font_size * 0.5),
@@ -347,6 +372,14 @@ class AssBuilder:
 
         熄灭时刻必须踩在**真实拍点**上：固定间隔只是"三个会消失的点"，
         与音乐无关，演唱者跟不进（CLAUDE.md §8.5）。没有节拍网格才退回固定间隔。
+
+        **颜色取它所提示的那句歌词的已唱色**（`sung_fill` / `sung_outline`）。
+        点的语义就是"这一句马上开始"，最后一个点熄灭的瞬间，同一个颜色会从
+        这一句的第一个字开始向右扫过去——同色才让这层因果关系被看见。
+        对唱曲里这还顺带告诉观众"接下来是谁唱"：点就悬在该行自己的左上方，
+        位置本来就不含糊，用该行的颜色只是加强它，不是新增一个要解读的信号；
+        反过来若一律用 main 的颜色，段落由 duet_b 领唱时点会是屏幕上唯一
+        对不上任何人的颜色，读起来像是凭空多了个声部。
         """
         p = self._p
         st = p.style
@@ -381,6 +414,10 @@ class AssBuilder:
         fade_in = max(0, st.fade_in_ms)
         dot_w = int(ruby_size * 1.35)
         y = lo.y - int(ruby_size * 2.4)
+        # 已唱色的填充与描边要**成对**取：双层 clip 方案里描边是跟着填充一起翻色的，
+        # 只改填充会让点顶着一圈未唱色的边，跟它引导的那句对不上
+        pal = p.palette_for(_lead_voice(lo.line))
+        color = f"\\1c{pal.sung_fill}\\3c{pal.sung_outline}"
         out: list[str] = []
         for i in range(n):
             # 自右向左依次熄灭：最右的点先灭，最左的点在开唱瞬间灭掉。
@@ -397,7 +434,7 @@ class AssBuilder:
             fi = min(fade_in, ends[i] - t_begin)
             out.append(
                 f"Dialogue: 0,{_ass_time(t_begin)},{_ass_time(ends[i])},Dot,,0,0,0,,"
-                f"{{\\an7\\pos({x},{y})\\fad({fi},0)}}●\n"
+                f"{{\\an7\\pos({x},{y}){color}\\fad({fi},0)}}●\n"
             )
         return out
 
@@ -407,6 +444,18 @@ class AssBuilder:
         **不能沿用歌词源给的时间**：QRC 把这些行塞在正文里，实测每行只有
         几十毫秒（0/222/355/518/577ms），照搬根本来不及阅读。
         这里改为自行排版——放进第一段屏幕上没有歌词的区间，居画面正中。
+
+        **颜色取未唱色**（`unsung_fill` / `unsung_outline`）：名单不由任何人演唱，
+        用已唱色等于谎报"这一句正在唱"。而未唱色本来就是为"压在任意画面上仍然
+        醒目"定的（§5.8 白填充 + 深描边），正好也是名单的处境。
+
+        取哪个声部：**`main`**。名单没有归属，`main` 是工程的基准声部，
+        也是 `palette_for` 唯一保证存在的一套（缺失时它会回落到 main、再回落到
+        默认配色）。
+
+        代价要写明白：用户把未唱色改成低对比的组合时，名单会跟着变难读。
+        **这是用户自己的选择，不加保护逻辑**——真加了就等于"配色不完全生效"，
+        又回到本模块开头那个坑的另一面。
         """
         p = self._p
         st = p.style
@@ -423,6 +472,9 @@ class AssBuilder:
         ]
         t0, t1 = _ass_time(start_ms), _ass_time(end_ms)
         cx = p.video_width // 2
+        # 填充与描边成对取，理由同引导点：描边是配色的一部分，不是固定的黑边
+        pal = p.palette_for("main")
+        color = f"\\1c{pal.unsung_fill}\\3c{pal.unsung_outline}"
 
         # 整块垂直居中于画面。先量总高再定起点，避免行数变化时偏上或偏下。
         h_title = int(st.font_size * 1.5)
@@ -433,19 +485,19 @@ class AssBuilder:
 
         out = [
             f"Dialogue: 0,{t0},{t1},Title,,0,0,0,,"
-            f"{{\\an8\\pos({cx},{y})\\fad(500,500)}}{_escape(p.title)}\n"
+            f"{{\\an8\\pos({cx},{y}){color}\\fad(500,500)}}{_escape(p.title)}\n"
         ]
         y += h_title
         if p.artist:
             out.append(
                 f"Dialogue: 0,{t0},{t1},Credit,,0,0,0,,"
-                f"{{\\an8\\pos({cx},{y})\\fad(500,500)}}{_escape(p.artist)}\n"
+                f"{{\\an8\\pos({cx},{y}){color}\\fad(500,500)}}{_escape(p.artist)}\n"
             )
             y += h_artist
         for c in credits:
             out.append(
                 f"Dialogue: 0,{t0},{t1},Credit,,0,0,0,,"
-                f"{{\\an8\\pos({cx},{y})\\fad(500,500)}}{_escape(c)}\n"
+                f"{{\\an8\\pos({cx},{y}){color}\\fad(500,500)}}{_escape(c)}\n"
             )
             y += h_credit
         return out
@@ -653,6 +705,16 @@ class AssBuilder:
 def _effective_voice(line: Line, token: Token) -> str:
     """Token 的有效声部：token 级覆盖优先，缺省继承行级（CLAUDE.md §8.5）。"""
     return token.voice_part or line.voice_part
+
+
+def _lead_voice(line: Line) -> str:
+    """本行**第一个 token** 的有效声部——引导点要跟着它上色。
+
+    刻意不用 `line.voice_part`：行级声部只是默认值，token 级可以覆盖（§8.5），
+    而点倒数到的正是第一个 token。首字被覆盖成 duet_b 时若还按行声部上色，
+    点的颜色会和它宣告的那个字对不上。
+    """
+    return _effective_voice(line, line.tokens[0]) if line.tokens else line.voice_part
 
 
 def _voice_segments(line: Line) -> list[tuple[int, int, str]]:

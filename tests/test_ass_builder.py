@@ -646,6 +646,133 @@ def test_credit_window_does_not_collide_with_any_line() -> None:
         assert hide <= c0 or show >= c1, f"制作名单 ({c0},{c1}) 撞上歌词 ({show},{hide})"
 
 
+# ---- 制作名单与引导点的配色 ----
+#
+# 这一组盯的是一个"默认配色下看起来完全正常"的 bug：Title / Credit / Dot 三个
+# 样式的颜色曾经写死在 header 的 Style 行里（白字黑边），而默认配色恰好也是
+# 白字深边——只有用户改了配色才暴露：歌词整体换色，名单和点纹丝不动。
+# 所以每个断言都必须**换一套配色再验一遍**，只测默认配色等于没测。
+
+
+_CUSTOM = {
+    "main": VoicePalette(
+        name="main",
+        unsung_fill="&H0011AA33&",
+        unsung_outline="&H00445566&",
+        sung_fill="&H00778899&",
+        sung_outline="&H00AABBCC&",
+    ),
+}
+
+
+def _credit_song() -> KaraokeProject:
+    """带曲名/歌手、且中段留出足够空档放制作名单的工程。"""
+    project = _song([3000, 6000, 40000, 43000], countdown_dots=0)
+    project.title = "赤春花"
+    project.artist = "sumika"
+    return project
+
+
+def test_credits_use_the_unsung_colours_of_the_main_palette() -> None:
+    """名单不由任何人演唱，用已唱色等于谎报"这一句正在唱"。
+
+    描边必须跟着填充一起取：本项目描边是配色的一部分，不是固定黑边。
+    """
+    ass = _build(_credit_song())
+
+    for event in _dialogues(ass, "Title") + _dialogues(ass, "Credit"):
+        assert "\\1c&H00FFFFFF&\\3c&H00202020&" in event
+
+
+def test_credits_follow_a_changed_palette() -> None:
+    """核心断言：改配色后名单必须跟着变。写死颜色的 bug 只会在这里露出来。"""
+    project = _credit_song()
+    project.palettes = _CUSTOM
+
+    ass = _build(project)
+
+    events = _dialogues(ass, "Title") + _dialogues(ass, "Credit")
+    assert len(events) == 2  # 曲名 + 歌手
+    for event in events:
+        assert "\\1c&H0011AA33&\\3c&H00445566&" in event
+        assert "&H00FFFFFF&" not in event, "旧的写死白色不能再出现在事件里"
+
+
+def test_countdown_dots_use_the_sung_colours() -> None:
+    """点是"这一句马上开始"：最后一个点熄灭的瞬间，同一个颜色会从这句的
+    第一个字开始向右扫过去。同色才让这层因果关系被看见。
+    """
+    dots = _dialogues(_build(_song([12000, 15000], countdown_dots=3)), "Dot")
+
+    assert len(dots) == 3
+    for dot in dots:
+        assert "\\1c&H00FF9010&\\3c&H00501800&" in dot
+
+
+def test_countdown_dots_follow_a_changed_palette() -> None:
+    project = _song([12000, 15000], countdown_dots=3)
+    project.palettes = _CUSTOM
+
+    dots = _dialogues(_build(project), "Dot")
+
+    assert len(dots) == 3
+    for dot in dots:
+        assert "\\1c&H00778899&\\3c&H00AABBCC&" in dot
+        assert "&H00FFFFFF&" not in dot
+
+
+def test_countdown_dots_take_the_palette_of_the_line_they_announce() -> None:
+    """对唱曲里点顺带告诉观众"接下来是谁唱"——它就悬在该行左上方，
+    用该行的颜色只是加强这层关联；一律用 main 的话，duet_b 领唱的段落里
+    点会是屏幕上唯一对不上任何人的颜色。
+    """
+    project = _song([12000, 15000], countdown_dots=3)
+    project.lines[0].voice_part = "duet_b"
+
+    dots = _dialogues(_build(project), "Dot")
+
+    for dot in dots:
+        assert "\\1c&H00FF40C0&\\3c&H00401030&" in dot
+
+
+def test_countdown_dots_follow_a_token_override_on_the_first_word() -> None:
+    """行级声部只是默认值，token 级可以覆盖（§8.5），而点倒数到的正是第一个 token。
+
+    按行声部上色的话，首字被覆盖成别的声部时，点会和它宣告的那个字对不上。
+    """
+    project = _song([12000, 15000], countdown_dots=3)
+    project.lines[0].voice_part = "main"
+    project.lines[0].tokens[0].voice_part = "duet_a"
+
+    dots = _dialogues(_build(project), "Dot")
+
+    for dot in dots:
+        assert "\\1c&H004080FF&\\3c&H00102040&" in dot
+
+
+def test_header_styles_fall_back_to_the_palette_not_to_hardcoded_white() -> None:
+    """Style 行的颜色是"没有 override 时"的兜底，必须由 main 配色填充。
+
+    写死字面量的话默认配色下看不出区别，改了配色兜底值就在撒谎——
+    这正是本组测试要防的那类问题，只是发生在 header 而不是事件里。
+    """
+    project = _song([3000], countdown_dots=0)
+    project.palettes = _CUSTOM
+
+    header = _build(project).split("[Events]")[0]
+    styles = {
+        ln.split(",")[0].removeprefix("Style: "): ln.split(",")
+        for ln in header.splitlines()
+        if ln.startswith("Style: ")
+    }
+
+    # Format 里第 4/5/6 列（从 0 数）= Primary / Secondary / Outline
+    for name in ("Main", "Ruby", "Title", "Credit"):
+        assert styles[name][3:6] == ["&H0011AA33&", "&H0011AA33&", "&H00445566&"]
+    assert styles["Dot"][3:6] == ["&H00778899&", "&H00778899&", "&H00AABBCC&"]
+    assert "&H00FFFFFF&" not in header
+
+
 def test_find_credit_window_uses_the_union_of_line_windows() -> None:
     """行窗口允许互相重叠（同屏两槽位、以及数据结构允许的多声部同唱），
     所以必须先求并集再找空隙；逐对比较会把被后一行覆盖住的"空隙"误判成可用。
