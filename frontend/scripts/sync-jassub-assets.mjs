@@ -1,17 +1,20 @@
 /**
  * 把 jassub 的 worker / wasm 复制进 public/jassub/，让浏览器直接加载这份静态副本。
  *
- * ## 为什么必须绕开 Vite
+ * ## 为什么绕开 Vite 的模块流水线
  *
- * dev server 会往每个**被它转换过**的 worker 文件顶部注入一行
- * `import '/node_modules/vite/dist/client/env.mjs'`。页面处于跨源隔离时 JASSUB 会走
- * emscripten 的 pthread 路径，在 worker 内部再起嵌套 worker，而 WebKit 拒绝加载嵌套
- * worker 里的这个 import（报 "Worker load was blocked by Cross-Origin-Embedder-Policy"），
- * JASSUB 于是一直不就绪、字幕整块不出现。Chromium 不受影响，生产构建也没有这段注入。
+ * 要的是**两端一致**：Vite 对 `public/` 下的文件原样下发、不做任何转换，于是 dev 与
+ * 构建产物加载的是同一份字节、同一组 URL；jassub 的 worker 图（worker.js + 三个渲染器
+ * + emscripten 胶水 + 嵌套 pthread worker）也不会被打包器改写成另一种形状，
+ * 「dev 能跑、打包后不能跑」这类分叉从源头上不存在。
  *
- * Vite 对 `public/` 下的文件原样下发、不做任何转换，注入也就无从谈起 —— 同时
- * COEP 仍是 require-corp、跨源隔离照旧。这一点很关键：修法不是把 COEP 降级换来的，
- * SharedArrayBuffer 与多线程 libass 都还在。
+ * **这里曾经写着另一套因果**：说 dev server 会往被它转换过的 worker 文件顶部注入
+ * `import '/node_modules/vite/dist/client/env.mjs'`，WebKit 在嵌套 worker 里拒绝加载它，
+ * 于是 Safari 上字幕整块不出现。按 jassub 2.5.14 + vite 6 复核，dev server 下发的
+ * `/node_modules/jassub/dist/worker/worker.js` 里**没有这行注入**，该说法至少已不成立。
+ * Safari 上字幕消失的真因是 **WebKit 在 304 响应上丢掉 COEP**，与本脚本无关，
+ * 修在 vite.config.ts 的 `crossOriginIsolationPlugin`（那里有单变量对照实验）。
+ * 不要因为那个 bug 已修就把这份静态副本删掉 —— 它解决的是另一个问题。
  *
  * ## 为什么不是一句 cp
  *
@@ -57,8 +60,8 @@ const FILES = [
   ['jassub/dist/worker/renderers/webgl1-renderer.js', 'worker/renderers/webgl1-renderer.js'],
   ['jassub/dist/worker/renderers/webgl2-renderer.js', 'worker/renderers/webgl2-renderer.js'],
   // --- emscripten 胶水 + 两份 wasm ---
-  // 胶水既被 worker.js 当模块导入，又被自己当作嵌套 pthread worker 起起来，
-  // 所以它这份副本正是本次修复的靶心。
+  // 胶水既被 worker.js 当模块导入，又被自己当作嵌套 pthread worker 起起来 ——
+  // 一个文件两种加载身份，正是最容易被打包器改写坏的那处，所以必须原样复制。
   ['jassub/dist/wasm/jassub-worker.js', 'wasm/jassub-worker.js'],
   ['jassub/dist/wasm/jassub-worker.wasm', 'wasm/jassub-worker.wasm'],
   ['jassub/dist/wasm/jassub-worker-modern.wasm', 'wasm/jassub-worker-modern.wasm'],

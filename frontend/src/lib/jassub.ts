@@ -32,18 +32,23 @@ const READY_TIMEOUT_MS = 20_000
  * worker 与 wasm 一律从 public/jassub/ 下的静态副本加载，而不是包自带的默认路径。
  * 副本由 scripts/sync-jassub-assets.mjs 在 predev / prebuild 时从 node_modules 复制。
  *
- * 起因是一个 WebKit + dev server 专有的死局：Vite 会往每个被它转换过的 worker 文件
- * 顶部注入 `import '/node_modules/vite/dist/client/env.mjs'`；页面跨源隔离时 JASSUB
- * 走 emscripten 的 pthread 路径、在 worker 里再起嵌套 worker，而 WebKit 拒绝加载嵌套
- * worker 里的这个 import，JASSUB 于是超时不就绪、字幕整块不出现。Vite 对 public/
- * 下的文件原样下发，注入不存在，问题随之消失 —— 且 COEP 仍是 require-corp、
- * 跨源隔离与 SharedArrayBuffer 都还在（不是靠降级 COEP 绕过去的）。
+ * 理由是**两端一致**：Vite 对 public/ 下的文件原样下发、不做任何转换，于是 dev 与
+ * 构建产物加载的是同一份字节、同一组 URL，不留「只在一端验证过」的分叉；
+ * jassub 的 worker 图（worker.js + 三个渲染器 + emscripten 胶水 + 嵌套 pthread worker）
+ * 也就不会被打包器改写。
  *
- * dev 与生产走同一份资源，不留「只在一端验证过」的分叉。
+ * **这里曾经写着另一套因果**：说 Vite 会往被它转换过的 worker 文件顶部注入
+ * `import '/node_modules/vite/dist/client/env.mjs'`，WebKit 在嵌套 worker 里拒绝加载
+ * 它，所以字幕不出现。按 jassub 2.5.14 + vite 6 复核，dev server 下发的
+ * `/node_modules/jassub/dist/worker/worker.js` 里**没有这行注入**，该说法至少已不成立。
+ * Safari 上字幕消失的真因是另一件事：**WebKit 在 304 响应上丢掉 COEP**，
+ * 导致页面里第二个 JASSUB 实例的 worker 被 COEP 拒绝加载 ——
+ * 详见 vite.config.ts 的 `crossOriginIsolationPlugin`，那里有单变量对照实验。
+ * 静态副本这套安排与那个 bug 无关，留着是因为上面那条"两端一致"的理由本身成立。
  *
  * 两份 wasm 必须都传：JASSUB 按运行时 SIMD 探测在 modern / legacy 之间二选一
- * （Safari 与 Chromium 的选择结果并不相同），只传一个会让另一条路径悄悄退回包内
- * 默认 URL，变成「有的机器走静态副本、有的机器走 Vite 产物」。
+ * （实测 Chromium 选 modern、WebKit 选 legacy），只传一个会让另一条路径悄悄退回包内
+ * 默认 URL，变成「有的机器走静态副本、有的机器走打包产物」。
  *
  * 路径写成绝对形式，前提是应用挂在站点根下 —— dev、vite preview、Tauri 壳都如此。
  */

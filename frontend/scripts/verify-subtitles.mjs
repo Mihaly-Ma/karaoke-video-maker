@@ -1,53 +1,63 @@
-// 字幕渲染链路的回归验证：**跨源隔离下 libass 真的把字栅格化出了像素**。
+// 字幕渲染链路的回归验证：**跨源隔离下 libass 真的把字栅格化出了像素**，
+// 而且**同一个页面里连开两个实例都能出像素**。
 //
-// ## 被验证的那个 bug
+//   用法：node scripts/verify-subtitles.mjs [chromium|webkit]
+//   环境变量：KVM_APP（默认 http://localhost:5173/，dev server 或 vite preview 都行）
 //
-// 页面跨源隔离后 JASSUB 走 emscripten 的 pthread 路径，在 worker 里再起嵌套 worker；
-// 而 Vite dev server 会往它转换过的每个 worker 文件顶部注入
-// `import '/node_modules/vite/dist/client/env.mjs'`，WebKit 拒绝加载嵌套 worker 里的
-// 这个 import（"Worker load was blocked by Cross-Origin-Embedder-Policy"），JASSUB 于是
-// 超时不就绪 —— 画面有、字幕整块没有。Chromium 不受影响，生产构建也没有这段注入。
-// 修法是把 worker/wasm 挪到 public/jassub/ 让 Vite 原样下发
-// （scripts/sync-jassub-assets.mjs + src/lib/jassub.ts 的 JASSUB_ASSETS）。
+// ## 被验证的那个 bug：WebKit 在 304 上丢掉 COEP
 //
-// ## 为什么测夹具而不是整个编辑器界面
+// 页面跨源隔离（COEP: require-corp）时，worker 脚本自己的响应也必须带 COEP，
+// 否则按 HTML 规范的 "check a global object's embedder policy" 判否。
+// 而 **WebKit 在用 304 合并缓存响应时不会把原来那份 200 上的 COEP 带回来**，
+// worker 的 COEP 被算成 unsafe-none，于是报
+// `Refused to load '…/worker.js' worker because of Cross-Origin-Embedder-Policy`。
 //
-// 这个 bug 完全落在「worker 起不起得来、libass 出不出像素」这一层，与工程、歌词、
-// 系统字体、后端都无关。夹具直接按 jassub.js 的构造协议把 public/jassub/ 下的 worker
-// 拉起来：不依赖后端在线，不受编辑器 UI 迭代影响，dev 与 preview 两种形态跑同一套断言。
-// 应用整体的联调另有 verify-proxy-video.mjs 等脚本。
+// 症状极具迷惑性：**页面里第一个 worker 正常，第二个才起不来**（第一次 200、
+// 第二次才是条件请求），而应用的编辑舞台与样式舞台各要一个 JASSUB 实例，
+// 于是「编辑有字幕、样式一直转圈」。被拒后 WebKit 丢掉缓存条目，第三次又成功 ——
+// 成功/失败逐次交替，看起来像随机时序问题。Chromium 完全不受影响。
 //
-// ## 两个必须知道的取证前提（都是无头浏览器的限制，不是产品问题）
+// 修法见 vite.config.ts 的 `crossOriginIsolationPlugin`：把 COOP/COEP 装进最前面的
+// 中间件，让 304 也带上（Vite 的 `server.headers` / `preview.headers` 由 sirv 的
+// setHeaders 落实，而 sirv 是先判条件请求再调 setHeaders，304 上根本没有这两个头）。
+// 单变量对照实验见 scripts/probe-coep-headers.mjs。
 //
-// 1. **worker 里用 WebGL 画到 OffscreenCanvas，画面到不了占位 canvas。**
-//    实测：worker 里 2D 绘制能传到占位 canvas（200×100 全部采到），换成 WebGL2 清屏
-//    就恒为 0；chromium 加 `headless:false` 后正常，**Playwright 的 WebKit 无论有头
-//    无头都传不过来**。JASSUB 只要 `getContext('webgl2')` 成功就走 WebGL 渲染器，
-//    于是它的输出在这个环境里既截不到图也采不到像素 —— 与字幕本身画没画无关。
-//    所以夹具在 worker 启动前把 OffscreenCanvas 的 webgl/webgl2 上下文屏蔽掉，
-//    逼 JASSUB 退到 Canvas2DRenderer。被换掉的只有最后一步 GPU 上传；
-//    worker 启动、嵌套 pthread worker、wasm 加载、libass 排版与字形栅格化 —— 也就是
-//    本次修复真正牵涉的部分 —— 全部照旧。
-// 2. **同一页面里第二次 `new Worker('/jassub/worker/worker.js')`**，WebKit 会以
-//    "Refused to load ... because of Cross-Origin-Embedder-Policy" 拒掉：同一 URL 先被
-//    当模块 import、再当 worker 用时，它对内存缓存里那份的 COEP 判定会出错。
-//    首次加载一切正常，换新页面即可绕开，所以每轮都开新 page。
+// ## 因此本用例必须建**两个**实例
+//
+// 旧版本只建一个，结构上就抓不到这个 bug —— 它当时是绿的，而 Safari 上样式舞台
+// 一个字都画不出来。「同页面第二个实例」是这条用例存在的主要理由，不要精简掉。
+//
+// ## 关于取证方式
+//
+// 不打任何补丁：直接 `new Worker('/jassub/worker/worker.js', { type: 'module' })`，
+// 与 jassub.js 构造函数里那一行形状完全一致，渲染器由 JASSUB 自己按环境挑
+// （两个引擎在无头下都拿得到 webgl2，走的就是 WebGL2 渲染器）。
+//
+// 早先一版夹具在这里栽过一次，教训值得留着：它先把占位 canvas 设成 1280×720
+// 再 `_resizeCanvas(1280,720,…)`，于是没有构成尺寸变化，而 JASSUB 的 WebGL2 渲染器
+// **只在尺寸变化的分支里设 u_resolution**，结果一个像素都没光栅化。当时的结论是
+// 「无头浏览器下 worker 的 WebGL 画面传不到占位 canvas」，还据此加了
+// 「屏蔽 worker 里的 WebGL 逼它退回 Canvas2D」的取证补丁 —— 补丁掩盖了夹具自身的 bug。
+// 现已实测：WebGL2 与 Canvas2D 两条路径给出的像素数完全一致（5724），
+// **无头、有头、两个引擎都一样**，补丁已删除。
+// 教训与 CLAUDE.md §8.9 那条一致：测量工具必须在**实际工作点**上校准。
+//
+// **读像素要轮询**：worker 画到 OffscreenCanvas 后，内容要过一次合成才到得了占位
+// canvas，只等一两帧会把「慢」误判成「读不到」。轮询只会把假的 0 变成真值，
+// 不会把真的空帧变成非空，所以对「无字时刻应当为空」那条断言仍然安全。
 //
 // ## 判据不是"没报错"
 //
 //   1. crossOriginIsolated 且 SharedArrayBuffer 可用 —— 证明修复不是靠把 COEP 退回
 //      credentialless 换来的（那样 WebKit 会丢掉隔离、退回单线程，等于把问题藏起来）；
-//   2. THREAD_COUNT > 1 —— 多线程启用，也就是会去起嵌套 worker、原来翻车的那条路径；
-//   3. worker 在超时前就绪；
-//   4. 画布上**存在 alpha>0 的像素**且有成片的不透明像素，报出占比与主色分布；
+//   2. THREAD_COUNT > 1 —— 多线程启用，也就是会去起嵌套 pthread worker；
+//   3. **两个**实例都在超时前就绪；
+//   4. 每个实例：有字时刻画布上有成片的不透明像素；
 //   5. 换时间点重绘，像素统计必须变化 —— 字幕跟着时间走，不是一帧糊在那儿；
 //   6. 字幕结束后的时刻近乎全透明 —— 反证前面量到的是字，不是底噪；
 //   7. 两份 wasm：本引擎按 SIMD 探测选中的那份必须能跑出像素，另一份必须能取到
 //      （实测 chromium 选 modern、WebKit 选 legacy —— 少传一个就会有一端拿不到资源）；
 //   8. 控制台没有 COEP / worker 加载类报错。
-//
-//   用法：node scripts/verify-subtitles.mjs [chromium|webkit]
-//   环境变量：KVM_APP（默认 http://localhost:5173/，dev server 或 vite preview 都行）
 
 import { chromium, webkit } from 'playwright'
 
@@ -112,7 +122,7 @@ const SIMD_PROBE = `WebAssembly.validate(Uint8Array.of(
   0x0b))`
 
 /**
- * 在页面里跑起 jassub 的 worker 并采样像素。
+ * 在**同一个页面**里连开 `count` 个 jassub 实例并各自采样像素。
  *
  * 这里手工复刻 jassub.js 构造函数的那几行（worker → abslink.wrap → new Renderer(
  * data, proxy(getFont), transfer(offscreenCanvas))），而不是 import 'jassub' ——
@@ -120,69 +130,13 @@ const SIMD_PROBE = `WebAssembly.validate(Uint8Array.of(
  * 统一的 URL；而 public/jassub/ 下这几个文件两种形态下路径完全一样。
  * 协议随 jassub 2.5.14 锁死，上游改了这里会直接报错，不会假通过。
  */
-const runFixture = (page, wasmUrl) =>
+const runFixture = (page, wasmUrl, count) =>
   page.evaluate(
-    async ([wasmUrl, ass, tA, tB, tEmpty, budget]) => {
-      const t0 = performance.now()
+    async ([wasmUrl, ass, tA, tB, tEmpty, budget, count]) => {
       const [{ proxy, transfer }, { wrap }] = await Promise.all([
         import('/jassub/vendor/abslink/src/abslink.js'),
         import('/jassub/vendor/abslink/adapters/w3c.js'),
       ])
-
-      const canvas = document.createElement('canvas')
-      canvas.width = 1280
-      canvas.height = 720
-      document.body.appendChild(canvas)
-      const ctrl = canvas.transferControlToOffscreen()
-
-      // worker 入口套一层 blob 壳：先屏蔽 OffscreenCanvas 的 WebGL 上下文，再加载真正的
-      // worker。目的见文件头"取证前提 1"：无头环境下 worker 的 WebGL 画面传不到占位 canvas。
-      //
-      // 两处细节都踩过坑：
-      // - 必须是**两个静态 import**。写成 `await import(...)` 会晚一拍：worker.js 求值时
-      //   才调 expose() 装上消息监听，而构造消息此时已经投递过了，于是永远等不到就绪。
-      //   静态依赖图在 worker 事件循环启动前就求值完，顺序也保证补丁先于 worker.js。
-      // - blob: 模块的基准 URL 不透明，`/jassub/...` 这种绝对路径解析不了
-      //   （"does not resolve to a valid URL"），必须把 origin 拼全。
-      //   拼全之后取到的仍是同源资源，跨源隔离照常生效，嵌套 pthread worker 也照样从
-      //   public/ 起 —— 也就是说本次修复要验的那条路径一步没少。
-      // 顺带把 worker 里的 console.error 转播回主线程：jassub 的 ASSRenderer 构造函数
-      // 写的是 `.catch(console.error)`，构造失败会被吞成一个 undefined 返回值，
-      // 主线程只看得到 abslink 的 "Unserializable return value" —— 真正的原因全在 worker
-      // 那一侧。不转播就没法排查。
-      const patchUrl = URL.createObjectURL(
-        new Blob(
-          [
-            `const _get = OffscreenCanvas.prototype.getContext
-             OffscreenCanvas.prototype.getContext = function (id, ...rest) {
-               if (id === 'webgl' || id === 'webgl2' || id === 'webgpu') return null
-               return _get.call(this, id, ...rest)
-             }
-             const _err = console.error
-             console.error = (...a) => {
-               try {
-                 new BroadcastChannel('jassub-verify').postMessage(
-                   a.map((x) => (x && x.stack) || String(x)).join(' | '),
-                 )
-               } catch {}
-               _err(...a)
-             }`,
-          ],
-          { type: 'text/javascript' },
-        ),
-      )
-      const workerUrl = URL.createObjectURL(
-        new Blob(
-          [`import '${patchUrl}'\nimport '${location.origin}/jassub/worker/worker.js'\n`],
-          { type: 'text/javascript' },
-        ),
-      )
-      const worker = new Worker(workerUrl, { name: 'jassub-worker', type: 'module' })
-      const workerErrors = []
-      worker.addEventListener('error', (e) => workerErrors.push(`worker error: ${e.message}`))
-      const relay = new BroadcastChannel('jassub-verify')
-      relay.onmessage = (e) => workerErrors.push(`worker console.error: ${e.data}`)
-      const Renderer = wrap(worker)
 
       // 字体必须**在建轨之前**以字节形式灌进去：libass 的 rawRender 是同步的，
       // "缺字再去 fetch"那条异步补字路径救不回当前这一帧。应用侧同样是预加载。
@@ -190,106 +144,134 @@ const runFixture = (page, wasmUrl) =>
         await fetch('/jassub/default.woff2').then((r) => r.arrayBuffer()),
       )
 
-      const ready = new Renderer(
-        {
-          // 同样因为 blob worker 的基准 URL 不透明：worker.js 会把 globalThis.fetch 换成
-          // 「无论要什么都去取 data.wasmUrl」，而在 blob 上下文里相对路径解析不了，
-          // 会以一个只剩 `fetch@[native code]` 的 TypeError 收场。应用侧 worker 挂在
-          // 正常 http URL 上，传相对路径没有这个问题。
-          wasmUrl: new URL(wasmUrl, location.origin).href,
-          width: 1280,
-          height: 720,
-          subContent: ass,
-          fonts: [fontBytes],
-          // 不联网、不查系统字体：预览与导出必须用同一套字体，测试更要可复现
-          availableFonts: {},
-          defaultFont: 'liberation sans',
-          debug: false,
-          libassMemoryLimit: 0,
-          libassGlyphLimit: 0,
-          queryFonts: false,
-        },
-        proxy(() => undefined),
-        transfer(ctrl, [ctrl]),
-      )
+      const one = async () => {
+        const t0 = performance.now()
+        // 刻意**不**预设宽高，让下面的 `_resizeCanvas` 真的构成一次尺寸变化。
+        // JASSUB 的 WebGL2 渲染器只在「尺寸变了」的分支里设 u_resolution，而
+        // `resizeCanvas` 对同尺寸会早退；夹具若先把画布设成目标尺寸，u_resolution
+        // 恒为 (0,0)，顶点着色器算出 NaN，一个像素都不会被光栅化 ——
+        // 看起来就像「WebGL 的输出传不到占位 canvas」。**这正是早先那版夹具的误判来源**，
+        // 它据此加了「屏蔽 worker 里的 WebGL」的补丁，把一个夹具 bug 当成了环境限制。
+        // 应用里画布是 JASSUB 自己建的默认 300×150 再 resize 到画面尺寸，天然走到那个分支。
+        const canvas = document.createElement('canvas')
+        document.body.appendChild(canvas)
+        const ctrl = canvas.transferControlToOffscreen()
 
-      let renderer
-      let readyMs = -1
-      try {
-        renderer = await Promise.race([
-          ready,
-          new Promise((_, rej) => setTimeout(() => rej(new Error('worker 就绪超时')), budget)),
-        ])
-        readyMs = Math.round(performance.now() - t0)
-      } catch (e) {
-        // 给转播回来的 worker 侧报错一点到达时间，否则失败原因常常是空的
-        await new Promise((res) => setTimeout(res, 300))
-        return { ok: false, readyMs: Math.round(performance.now() - t0), reason: String(e), workerErrors }
-      }
+        // 与 jassub.js 第 58 行同形：同一个 URL、module worker。
+        // 「同一个 URL 连开两次」正是本用例要覆盖的那条路径，不要改成 blob 或加 query。
+        const worker = new Worker('/jassub/worker/worker.js', {
+          name: 'jassub-worker',
+          type: 'module',
+        })
+        const workerErrors = []
+        worker.addEventListener('error', (e) =>
+          workerErrors.push(`worker error: ${e.message || '(空)'}`),
+        )
+        const Renderer = wrap(worker)
 
-      // 走一次真实布局路径：应用侧也是先 _resizeCanvas 再 _draw
-      await renderer._resizeCanvas(1280, 720, 1280, 720)
+        const ready = new Renderer(
+          {
+            wasmUrl,
+            width: 1280,
+            height: 720,
+            subContent: ass,
+            fonts: [fontBytes],
+            // 不联网、不查系统字体：预览与导出必须用同一套字体，测试更要可复现
+            availableFonts: {},
+            defaultFont: 'liberation sans',
+            debug: false,
+            libassMemoryLimit: 0,
+            libassGlyphLimit: 0,
+            queryFonts: false,
+          },
+          proxy(() => undefined),
+          transfer(ctrl, [ctrl]),
+        )
 
-      const probe = document.createElement('canvas')
-      probe.width = 640
-      probe.height = 360
-      const g = probe.getContext('2d', { willReadFrequently: true })
-
-      const readPixels = () => {
-        g.clearRect(0, 0, 640, 360)
-        g.drawImage(canvas, 0, 0, 640, 360)
-        const d = g.getImageData(0, 0, 640, 360).data
-        const total = 640 * 360
-        let opaque = 0
-        let solid = 0
-        const colors = new Map()
-        for (let i = 0; i < d.length; i += 4) {
-          const a = d[i + 3]
-          if (a === 0) continue
-          opaque++
-          if (a > 200) solid++
-          const key = `${d[i] >> 6},${d[i + 1] >> 6},${d[i + 2] >> 6}`
-          colors.set(key, (colors.get(key) ?? 0) + 1)
+        let renderer
+        let readyMs = -1
+        try {
+          renderer = await Promise.race([
+            ready,
+            new Promise((_, rej) => setTimeout(() => rej(new Error('worker 就绪超时')), budget)),
+          ])
+          readyMs = Math.round(performance.now() - t0)
+        } catch (e) {
+          worker.terminate()
+          canvas.remove()
+          return { ok: false, readyMs: Math.round(performance.now() - t0), reason: String(e), workerErrors }
         }
-        return {
-          total,
-          opaque,
-          solid,
-          ratio: opaque / total,
-          top: [...colors.entries()].sort((x, y) => y[1] - x[1]).slice(0, 3),
-        }
-      }
 
-      /**
-       * 画一帧再采样。
-       *
-       * 空结果要重试几次：Canvas2DRenderer 把 resize 推迟到第一次 render 时才执行，
-       * 那一帧会先清空画布，加上 worker→占位 canvas 的推送要过合成，**第一次采样常常
-       * 采到空的**（实测偶发，重画一次必有）。重试只会把假的 0 变成真值，
-       * 不会把真的空帧变成非空，所以对"无字时刻应当为空"那条断言是安全的。
-       */
-      const sampleAt = async (time) => {
-        let last = null
-        for (let attempt = 0; attempt < 4; attempt++) {
+        // 走一次真实布局路径：应用侧也是先 _resizeCanvas 再 _draw
+        await renderer._resizeCanvas(1280, 720, 1280, 720)
+
+        const probe = document.createElement('canvas')
+        probe.width = 640
+        probe.height = 360
+        const g = probe.getContext('2d', { willReadFrequently: true })
+
+        const readPixels = () => {
+          g.clearRect(0, 0, 640, 360)
+          g.drawImage(canvas, 0, 0, 640, 360)
+          const d = g.getImageData(0, 0, 640, 360).data
+          const total = 640 * 360
+          let opaque = 0
+          let solid = 0
+          const colors = new Map()
+          for (let i = 0; i < d.length; i += 4) {
+            const a = d[i + 3]
+            if (a === 0) continue
+            opaque++
+            if (a > 200) solid++
+            const key = `${d[i] >> 6},${d[i + 1] >> 6},${d[i + 2] >> 6}`
+            colors.set(key, (colors.get(key) ?? 0) + 1)
+          }
+          return {
+            total,
+            opaque,
+            solid,
+            ratio: opaque / total,
+            top: [...colors.entries()].sort((x, y) => y[1] - x[1]).slice(0, 3),
+          }
+        }
+
+        /**
+         * 画一帧，**等到画面真的变了**再采样。
+         *
+         * worker 画到 OffscreenCanvas 后要过一次合成才到得了占位 canvas，快的时候
+         * 一次就采到，慢的时候要等几十毫秒。若只等到"有像素"就返回，会把**上一帧的
+         * 残留**当成本帧的结果 —— 于是"换时间点后统计要变化"那条断言永远相等而失效
+         * （实测就这么假过一次：A 与 B 都读出 5724）。所以等的是"与上次读数不同"。
+         *
+         * 超时就把最后一次读数原样交出去，让断言自己失败，不静默放过。
+         */
+        const sig = (s) => `${s.opaque}/${s.solid}`
+        const sampleAfter = async (time, prevSig) => {
           await renderer._draw(time, true)
-          await new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res)))
-          last = readPixels()
-          if (last.opaque > 0) return last
+          let last = null
+          for (let i = 0; i < 40; i++) {
+            await new Promise((res) => setTimeout(res, 50))
+            last = readPixels()
+            if (sig(last) !== prevSig) return last
+          }
+          return last
         }
-        return last
+
+        // 起点是一块空画布，所以第一次"变了"就等于"画出了东西"
+        const a = await sampleAfter(tA, '0/0')
+        const b = await sampleAfter(tB, sig(a))
+        const empty = await sampleAfter(tEmpty, sig(b))
+
+        worker.terminate()
+        canvas.remove()
+        return { ok: true, readyMs, a, b, empty, workerErrors }
       }
 
-      const a = await sampleAt(tA)
-      const b = await sampleAt(tB)
-      const empty = await sampleAt(tEmpty)
-
-      worker.terminate()
-      URL.revokeObjectURL(workerUrl)
-      URL.revokeObjectURL(patchUrl)
-      canvas.remove()
-      return { ok: true, readyMs, a, b, empty, workerErrors }
+      const out = []
+      for (let i = 0; i < count; i++) out.push(await one())
+      return out
     },
-    [wasmUrl, FIXTURE_ASS, T_TEXT_A, T_TEXT_B, T_EMPTY, READY_BUDGET_MS],
+    [wasmUrl, FIXTURE_ASS, T_TEXT_A, T_TEXT_B, T_EMPTY, READY_BUDGET_MS, count],
   )
 
 const fmt = (s) =>
@@ -297,6 +279,9 @@ const fmt = (s) =>
   `　主色 ${s.top.map(([k, n]) => `[${k}]×${n}`).join(' ')}`
 
 // ---------------------------------------------------------------------------
+
+/** 同页面里连开几个实例。应用最多同时/相继用到两个（编辑舞台 + 样式舞台） */
+const INSTANCES = 2
 
 async function runEngine(name) {
   console.log(`\n########## ${name} @ ${APP} ##########`)
@@ -321,7 +306,7 @@ async function runEngine(name) {
   check(iso.isolated, 'crossOriginIsolated === true')
   check(iso.sab, 'SharedArrayBuffer 可用', `hardwareConcurrency=${iso.cores}`)
 
-  // --- 多线程真的启用：这正是会去起嵌套 pthread worker、原来在 WebKit 上翻车的路径 ---
+  // --- 多线程真的启用：这正是会去起嵌套 pthread worker 的路径 ---
   const threads = await page.evaluate(async () => {
     const { THREAD_COUNT } = await import('/jassub/worker/util.js')
     return THREAD_COUNT
@@ -344,27 +329,37 @@ async function runEngine(name) {
     other[1],
   )
   check(otherStatus === 200, `另一份 wasm（${other[0]}）也在位`, `HTTP ${otherStatus}`)
+  await page.close()
 
+  // --- 同一页面里连开 INSTANCES 个实例，每个都要出像素 ---
   const p = await freshPage()
-  const r = await runFixture(p, chosen[1])
+  const results = await runFixture(p, chosen[1], INSTANCES)
   await p.close()
 
-  if (!r.ok) {
-    check(false, `${chosen[0]}: worker 就绪`, `${r.readyMs}ms ${r.reason}`)
-    r.workerErrors.forEach((e) => console.log(`      ${e}`))
-  } else {
-    check(r.readyMs < READY_BUDGET_MS, `${chosen[0]}: worker 就绪`, `${r.readyMs}ms`)
+  results.forEach((r, i) => {
+    const tag = `${chosen[0]} 第 ${i + 1} 个实例`
+    if (!r.ok) {
+      check(false, `${tag}: worker 就绪`, `${r.readyMs}ms ${r.reason}`)
+      r.workerErrors.forEach((e) => console.log(`      ${e}`))
+      return
+    }
+    check(r.readyMs < READY_BUDGET_MS, `${tag}: worker 就绪`, `${r.readyMs}ms`)
     console.log(`      A@${T_TEXT_A}s  ${fmt(r.a)}`)
     console.log(`      B@${T_TEXT_B}s  ${fmt(r.b)}`)
     console.log(`      空@${T_EMPTY}s  ${fmt(r.empty)}`)
-    check(r.a.opaque > 0, '有字时刻画布有非透明像素', `${(r.a.ratio * 100).toFixed(2)}%`)
-    check(r.a.solid > 500, '有成片的不透明像素（不是零星抗锯齿）', `solid=${r.a.solid}`)
-    check(r.b.opaque > r.a.opaque, '换时间点后像素统计变化（字幕跟着时间走）',
-      `${r.a.opaque} → ${r.b.opaque}`)
-    check(r.empty.opaque * 20 < r.a.opaque, '无字时刻近乎全透明（反证量到的是字）',
-      `${r.empty.opaque} ≪ ${r.a.opaque}`)
+    check(r.a.solid > 500, `${tag}: 有成片的不透明像素（不是零星抗锯齿）`, `solid=${r.a.solid}`)
+    check(
+      r.b.opaque > r.a.opaque,
+      `${tag}: 换时间点后像素统计变化（字幕跟着时间走）`,
+      `${r.a.opaque} → ${r.b.opaque}`,
+    )
+    check(
+      r.empty.opaque * 20 < r.a.opaque,
+      `${tag}: 无字时刻近乎全透明（反证量到的是字）`,
+      `${r.empty.opaque} ≪ ${r.a.opaque}`,
+    )
     r.workerErrors.forEach((e) => console.log(`      ⚠️ ${e}`))
-  }
+  })
 
   // --- 控制台 ---
   const coep = errors.filter((e) =>
