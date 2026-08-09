@@ -80,6 +80,25 @@ export const EXPORT_STAGE_CSS = `
 }
 .exp-seg__item:disabled { cursor: not-allowed; opacity: 0.45; }
 
+/*
+ * 长任务前的警告（当前只有字形缺字）。用底色块而不是一行小字：
+ * 它就在导出按钮上方，一次烧录几分钟，必须在按下之前被看到。
+ * 但只是警告——按钮不禁用（CLAUDE.md §2.5 降级不终止）。
+ */
+.exp-warn {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
+  color: var(--warn);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+.exp-warn span { word-break: break-all; }
+
 /* ---- 产物 ---- */
 
 .exp-arts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--sp-2); }

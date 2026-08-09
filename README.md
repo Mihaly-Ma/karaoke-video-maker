@@ -253,37 +253,30 @@ preview; it is never parsed back into the project. This matters because every st
 designed to only overwrite fields that haven't been locked by a manual edit — if ASS were
 round-tripped, that guarantee would be impossible to keep.
 
-```
-YouTube link ──▶ download (yt-dlp) ──▶ extract audio ──▶ proxy video (H.264, editing only)
-                                            │
-                                            ▼
-                                   vocal separation (audio-separator)
-                                            │
-                    ┌───────────────────────┼───────────────────────┐
-                    ▼                       ▼                       ▼
-             lyric source           ( re-anchor timing )       guide melody /
-          (QRC search / paste)      ( to the MV audio   )      beat detection
-                    │               (  — NOT BUILT YET  )            │
-                    │                       ┊                        │
-                    └───────────┬───────────┘                        │
-                                ▼                                    │
-                   Edit: three-tier timing (whole / line / word)     │
-                         + readings + furigana + lyric text          │
-                       — manual is a first-class path,               │
-                         not a fallback                              │
-                                │                                    │
-                                ▼                                    │
-                      layout engine + style ◀───────────────────────┘
-                                │
-                                ▼
-                       ASS serialization
-                                │
-                   ┌────────────┴────────────┐
-                   ▼                         ▼
-          JASSUB preview (WASM libass)   ffmpeg burn-in (same libass build)
+```mermaid
+flowchart TD
+    A["YouTube link"] --> B["download (yt-dlp)"]
+    B --> C["extract audio"]
+    C --> P["proxy video (H.264, editing only)"]
+    C --> D["vocal separation (audio-separator)"]
+
+    D --> L["lyric source (QRC search / paste)"]
+    D -.-> R["re-anchor timing to the MV audio<br/>— NOT BUILT YET —"]
+    D --> G["guide melody / beat detection"]
+
+    L --> E["Edit: three-tier timing (whole / line / word)<br/>+ readings + furigana + lyric text<br/>manual is a first-class path, not a fallback"]
+    R -.-> E
+
+    E --> S["layout engine + style"]
+    G --> S
+    S --> X["ASS serialization"]
+    X --> V["JASSUB preview (WASM libass)"]
+    X --> F["ffmpeg burn-in (same libass build)"]
+
+    style R stroke-dasharray: 5 5
 ```
 
-The dotted box is the one stage in that picture that does not exist yet — see **§ Project
+The dashed box is the one stage in that picture that does not exist yet — see **§ Project
 status**. Everything else is code you can run today.
 
 A few design points worth calling out:
@@ -378,10 +371,13 @@ disagree, the code wins here.
   self-check command (`backend.doctor` doesn't exist yet). Separation and yt-dlp are the
   exceptions: both install/update themselves into an app-private environment on demand.
 - **Bundled fonts** — the style step lets you pick from fonts already installed on your system,
-  it does not ship or auto-fetch any font files itself. Note the picker only flags whether a
-  family is CJK-capable; there is a per-song glyph-coverage endpoint in the backend
-  (`POST /api/fonts/coverage`) but the UI does not call it yet, so **a font missing a rare
-  kanji will not be caught before you export**.
+  it does not ship or auto-fetch any font files itself. Glyph coverage *is* checked before you
+  render: the style step reports whether the selected font covers every character in the song
+  (lyrics, furigana and the credits screen), and the export step repeats the check right above
+  the button. Missing glyphs are a warning, not a block — you can still export. One caveat the
+  check reports separately: the in-app preview feeds libass a *subset* of the font (ASCII, kana
+  and JIS X 0208 kanji), so characters outside that set — `鷗`, `α`, `①` — are blank in the
+  preview while the burned-in video renders them fine.
 - **A persisted phonetic reading layer** — the project model and API do carry a separate
   "how it is actually sung" reading alongside the displayed furigana (particle は → ワ, and so
   on), with a rule-based derivation endpoint. The editor, however, still keeps the phonetic

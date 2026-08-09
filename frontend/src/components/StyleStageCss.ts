@@ -218,6 +218,26 @@ export const STYLE_STAGE_CSS = `
 
 /* ---- 字体 ---- */
 
+/*
+ * 字形覆盖预检的结论。
+ *
+ * 固定占一格高度（min-height）：结论在"正在检查 → 齐全/缺字"之间切换时行高不同，
+ * 不定住的话下面整块字体选择器会跳一下，而用户此刻正要往列表里点。
+ */
+.sty-covbox { min-height: 22px; }
+.sty-cov {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-1);
+  margin-top: var(--sp-2);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+}
+.sty-cov--ok { color: var(--ok); }
+.sty-cov--warn { color: var(--warn); }
+/* 缺字清单本身按原样断行：生僻字连成一片时不换行会把整栏撑宽 */
+.sty-cov span { word-break: break-all; }
+
 .sty-fontgrid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-2); }
 .sty-fontpreset {
   display: flex;

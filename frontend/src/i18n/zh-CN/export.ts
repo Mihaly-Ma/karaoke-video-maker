@@ -11,6 +11,9 @@ export const exportStage: Record<string, string> = {
   'export.withGuideMissing': '工程还没有人声轨，先做人声分离',
   'export.start': '导出',
   'export.running': '导出中',
+  // 字形预检：只警告不阻断，所以第二句要给出可操作的下一步
+  'export.glyphMissing': '字体缺 {n} 个字形：{chars}',
+  'export.glyphHint': '到「样式」换一个字体',
   'export.empty': '还没有导出过',
   'export.excerpt': '片段',
   'export.download': '下载',
@@ -22,6 +25,8 @@ export const exportStage: Record<string, string> = {
   // 预览与成片的两处差异，用状态而非解释的口吻
   'export.previewProxy': '代理画面',
   'export.previewNoGuide': '预览不含引导声',
+  // 预览字体是子集化产物，字符集比系统原字体小：这些字只有预览缺，成片是好的
+  'export.previewGlyphGap': '预览缺 {n} 字',
   'export.cues': '关键位置',
   'export.cuesEmpty': '还没有歌词',
   'export.cueCredits': '制作名单',

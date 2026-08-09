@@ -492,20 +492,70 @@ def list_presets() -> list[PresetInfo]:
 
 class FontCoverage(BaseModel):
     family: str
+
     missing: list[str]
+    """字体本身就没有的字形：**预览与成片都会缺**。"""
+
+    preview_missing: list[str]
+    """字体有、但预览用的子集字体裁掉了的字形：**只有预览缺，成片是好的**。
+
+    预览走 `GET /fonts/subset`，产物按 `default_charset()`（ASCII + 假名 +
+    JIS X 0208 第一/第二水准）裁剪；系统原字体的字符集远大于这个集合。
+    于是「鷗」「𠮷」「α」「①」这类字会出现"预览空白、成片正常"的反向分叉——
+    症状与缺字相反，只报 `missing` 会给出一个假的全绿。
+    """
+
     total_checked: int
 
 
+class FontCoverageRequest(BaseModel):
+    """`POST /fonts/coverage` 的请求体。
+
+    **参数走请求体而不是 query**：调用方要查的是整首歌的字符集，
+    percent-encoding 后每个汉字占 9 字节，几百个不重复字符就逼近 uvicorn
+    对请求行 + 头部的 16 KB 上限——超限时表现为连接被掐断，不是可读的 4xx。
+    调用方仍应先去重（只送不重复字符），两层保险各自独立。
+    """
+
+    family: str
+    text: str
+
+
+_preview_charset: frozenset[str] | None = None
+
+
+def _subset_charset() -> frozenset[str]:
+    """预览子集字体保留的字符集（缓存一份）。
+
+    `default_charset()` 要遍历两万多个码位试 shift_jis 编码，
+    每次请求重算纯属浪费；它在进程生命周期内不会变。
+    """
+    global _preview_charset
+    if _preview_charset is None:
+        from kvm.render.font_subset import default_charset
+
+        _preview_charset = frozenset(default_charset())
+    return _preview_charset
+
+
 @router.post("/coverage", response_model=FontCoverage)
-def check_coverage(family: str = Query(...), text: str = Query(...)) -> FontCoverage:
+def check_coverage(req: FontCoverageRequest) -> FontCoverage:
     """检查字体能否覆盖给定文本的全部字形。
 
-    CLAUDE.md 要求**字体缺字必须在渲染前拦截** —— 预览与导出若因缺字
+    CLAUDE.md §2.6 / §6.3 要求**字体缺字必须在渲染前拦截** —— 预览与导出若因缺字
     fallback 到不同字体，WYSIWYG 就失效了，而这种问题通常到成片才暴露。
+
+    两条渲染链路的字体来源不同，所以要分别回答：
+
+    - 导出走 ffmpeg + 系统 fontconfig，用的是**系统原字体**，判据是它的 cmap；
+    - 预览走 JASSUB（`ASS_FONTPROVIDER_NONE`），吃的是本服务子集化后的字体，
+      判据是 cmap **与** `default_charset()` 的交集。
+
+    因此返回两份清单：`missing`（两边都缺）与 `preview_missing`（只有预览缺）。
 
     扫描尚未覆盖到该字体时返回 503 + 中文进度说明（见 `_require_font`）。
     """
-    match = _require_font(family)
+    match = _require_font(req.family)
 
     try:
         from fontTools.ttLib import TTCollection, TTFont
@@ -518,9 +568,17 @@ def check_coverage(family: str = Query(...), text: str = Query(...)) -> FontCove
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"读取字体失败：{exc}") from exc
 
-    checked = {c for c in text if c.strip()}
+    # 空白字符不计：缺一个空格不影响观感，而全角空格之类算进来只会制造噪声
+    checked = {c for c in req.text if c.strip()}
+    subset = _subset_charset()
     missing = sorted(c for c in checked if ord(c) not in cmap)
-    return FontCoverage(family=family, missing=missing, total_checked=len(checked))
+    preview_missing = sorted(c for c in checked if ord(c) in cmap and c not in subset)
+    return FontCoverage(
+        family=req.family,
+        missing=missing,
+        preview_missing=preview_missing,
+        total_checked=len(checked),
+    )
 
 
 def _probe_fontconfig() -> list[str]:  # pragma: no cover - 仅 Linux 路径

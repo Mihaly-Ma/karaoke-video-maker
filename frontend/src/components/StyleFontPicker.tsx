@@ -8,24 +8,79 @@
  * 某档 `resolved=null` 且非 `pending` 时按钮禁用并说明原因，**绝不悄悄换成别的
  * 字体**：用户选了明朝体却渲染出黑体，比"该档不可用"更糟
  * （backend/kvm/api/routes/fonts.py 的 `PresetInfo` 文档）。
+ *
+ * ## 字形覆盖预检就挂在这里
+ *
+ * 缺字必须在渲染前拦截（CLAUDE.md §2.6 / §6.3）。**选字体的这一刻正是唯一
+ * 能"改"的地方**：换一个字体就是全部的解法，而它就在下面的列表里。
+ * 结果只针对**当前选中的那一个**字体——把列表里几十个字体逐个预检纯属浪费。
+ *
+ * 导出前还有一道同样的预检（`ExportPanel`），走同一个缓存，
+ * 字体与歌词都没变时不会再发一次请求（见 `lib/fontCoverage.ts`）。
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { WarningOutlined } from '@ant-design/icons'
+import { CheckCircleOutlined, WarningOutlined } from '@ant-design/icons'
 
 import * as api from '../api/client'
 import type { FontInfo, FontPreset, FontScanStatus } from '../api/types'
 import { t } from '../i18n'
+import { formatMissing, useFontCoverage } from '../lib/fontCoverage'
 
 /** 扫描状态轮询间隔。太密没意义（后端是秒级推进的），太疏用户等得难受 */
 const POLL_INTERVAL_MS = 1500
 
 export interface StyleFontPickerProps {
   value: string
+  /** 成片上会出现的全部字符（去重排序，由 `renderedCharset` 产出），供字形预检 */
+  charset: string
   onPick: (family: string) => void
 }
 
-export default function StyleFontPicker({ value, onPick }: StyleFontPickerProps) {
+/**
+ * 当前字体的字形覆盖结论。
+ *
+ * **齐全时也要显式说一句**：预检默默通过与预检根本没跑，在界面上长得一模一样，
+ * 而这个接口此前就是死代码——一句"字形齐全"是这条拦截确实在跑的唯一凭据。
+ */
+function CoverageNote({ family, charset }: { family: string; charset: string }) {
+  const state = useFontCoverage(family, charset)
+  if (state.kind === 'idle') return null
+  if (state.kind === 'checking') return <div className="sty-note">{t('style.font.covChecking')}</div>
+  if (state.kind === 'failed') {
+    return <div className="sty-note">{t('style.font.covFailed', { detail: state.detail })}</div>
+  }
+
+  const { missing, preview_missing: previewMissing, total_checked: total } = state.result
+  return (
+    <>
+      {missing.length > 0 ? (
+        <div className="sty-cov sty-cov--warn">
+          <WarningOutlined />
+          <span>
+            {t('style.font.covMissing', { n: missing.length, chars: formatMissing(missing) })}
+          </span>
+        </div>
+      ) : (
+        <div className="sty-cov sty-cov--ok">
+          <CheckCircleOutlined />
+          <span>{t('style.font.covOk', { n: total })}</span>
+        </div>
+      )}
+      {/* 字体有、预览子集没有：换字体解决不了，所以与上面那条分开说 */}
+      {previewMissing.length > 0 && (
+        <div className="sty-note">
+          {t('style.font.covPreviewGap', {
+            n: previewMissing.length,
+            chars: formatMissing(previewMissing),
+          })}
+        </div>
+      )}
+    </>
+  )
+}
+
+export default function StyleFontPicker({ value, charset, onPick }: StyleFontPickerProps) {
   const [status, setStatus] = useState<FontScanStatus | null>(null)
   const [presets, setPresets] = useState<FontPreset[]>([])
   const [fonts, setFonts] = useState<FontInfo[]>([])
@@ -100,6 +155,11 @@ export default function StyleFontPicker({ value, onPick }: StyleFontPickerProps)
         <div className="sty-note">{status.message}</div>
       )}
       {loadError && <div className="sty-err">{t('style.font.loadFailed', { detail: loadError })}</div>}
+
+      {/* 结论说的是**当前**字体，所以排在选择控件之前：先看现状，再决定换不换 */}
+      <div className="sty-covbox" data-testid="font-coverage">
+        <CoverageNote family={value} charset={charset} />
+      </div>
 
       <div className="sty-fontgrid">
         {presets.map((p) => {

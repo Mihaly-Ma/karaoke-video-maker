@@ -24,6 +24,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import type { Palette, Style } from '../api/types'
 import { t } from '../i18n'
+import { renderedCharset } from '../lib/fontCoverage'
 import { useProject } from '../state/projectStore'
 import PalettePicker, { effectivePalette, type PaletteColors } from './PalettePicker'
 import { CountdownControls, LayoutControls, TimingControls } from './StyleControls'
@@ -174,6 +175,13 @@ export default function StylePanel() {
     [project?.lines, palettes],
   )
 
+  /**
+   * 字形预检要查的字符集。**必须 memo**：它是 `useFontCoverage` 的依赖，
+   * 每次渲染都新算一条串的话，引用虽变但内容相同——内容相同就命中缓存不会重发请求，
+   * 但仍会白白跑一遍全曲遍历。歌词没变时这里一次都不重算。
+   */
+  const charset = useMemo(() => renderedCharset(project), [project])
+
   useEffect(() => {
     if (!parts.includes(activePart)) setActivePart(parts[0] ?? 'main')
   }, [parts, activePart])
@@ -206,7 +214,11 @@ export default function StylePanel() {
 
         <section className="sty-sec">
           <div className="sty-sec__head">{t('style.section.font')}</div>
-          <StyleFontPicker value={draft.font_name} onPick={(f) => setNow('font_name', f)} />
+          <StyleFontPicker
+            value={draft.font_name}
+            charset={charset}
+            onPick={(f) => setNow('font_name', f)}
+          />
         </section>
 
         <section className="sty-sec">

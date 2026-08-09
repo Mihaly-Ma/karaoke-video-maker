@@ -313,7 +313,15 @@ export interface FontPreset {
 
 export interface FontCoverageResult {
   family: string
-  /** 未覆盖到的字符列表，为空即完全覆盖 */
+  /** 字体本身就没有的字形：**预览与成片都会缺**。为空即字体完全覆盖 */
   missing: string[]
+  /**
+   * 字体有、但预览用的子集字体裁掉了的字形：**只有预览缺，成片是好的**。
+   *
+   * 预览走 `GET /api/fonts/subset`，产物按 ASCII + 假名 + JIS X 0208 第一/第二
+   * 水准裁剪，系统原字体的字符集远大于它。「鷗」「𠮷」「α」「①」这类字会命中，
+   * 症状与缺字相反——预览空白而成片正常，所以必须与 `missing` 分开显示。
+   */
+  preview_missing: string[]
   total_checked: number
 }

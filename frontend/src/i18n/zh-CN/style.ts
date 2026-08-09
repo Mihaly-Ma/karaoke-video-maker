@@ -72,6 +72,14 @@ export const style: Record<string, string> = {
   'style.font.current': '当前：{family}（不在上面的列表里）',
   'style.font.loadFailed': '取字体信息失败：{detail}',
 
+  // 字形覆盖预检。齐全时也要说一句——预检默默通过与预检没跑长得一模一样
+  'style.font.covChecking': '正在检查字形',
+  'style.font.covOk': '字形齐全 · 已查 {n} 字',
+  'style.font.covMissing': '缺 {n} 个字形：{chars}',
+  // 只有预览缺、成片是好的，所以说"预览缺"而不是"缺字"
+  'style.font.covPreviewGap': '预览缺 {n} 字，成片不缺：{chars}',
+  'style.font.covFailed': '字形检查未完成：{detail}',
+
   // 配色
   'style.palette.unsungFill': '未唱填充',
   'style.palette.unsungOutline': '未唱描边',

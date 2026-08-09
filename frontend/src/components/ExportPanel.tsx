@@ -5,12 +5,14 @@ import {
   PlaySquareOutlined,
   SettingOutlined,
   VideoCameraOutlined,
+  WarningOutlined,
 } from '@ant-design/icons'
 import { useEffect, useMemo, useState } from 'react'
 
 import * as api from '../api/client'
 import type { ExportArtifact } from '../api/types'
 import { t } from '../i18n'
+import { formatMissing, renderedCharset, useFontCoverage } from '../lib/fontCoverage'
 import { formatMs } from '../lib/timeScale'
 import { useProject } from '../state/projectStore'
 import ExportCueRail, { buildCues } from './ExportCueRail'
@@ -47,6 +49,17 @@ import Preview from './Preview'
  * 预览画面用的是编辑用代理（540p H.264），导出一律烧在原始素材上
  * （CLAUDE.md §5.11.5），所以两者是**感知等价**而非像素一致（§5.12）——
  * 画面清晰度不同属预期，字幕的位置与配色才是这里要确认的东西。
+ *
+ * ## 字形预检为什么也放在这一步
+ *
+ * 缺字必须在渲染前拦截（CLAUDE.md §2.6 / §6.3），而"渲染"发生在两处：
+ * 选字体时（样式舞台已有一道）与**这里**。这一道拦的是另一件事——
+ * 用户在样式舞台之后又改了歌词、或换了工程，字体没动而字符集变了。
+ * 长任务前的最后一道检查点本来就是这块面板存在的理由，字形属于同一类问题。
+ *
+ * **拦而不断**：缺字只是警告，导出按钮照常可用（§2.5 失败要降级、不能终止）。
+ * 缺的可能只是一个用户根本不在乎的符号，为它锁死整条导出路径就是本末倒置。
+ * 走的是与样式舞台同一个缓存，字体与歌词都没变时不会再发一次请求。
  */
 
 interface ExportPanelProps {
@@ -131,6 +144,12 @@ export default function ExportPanel({ exportJobId, onExportStart, exportResult }
   const useInstrumental = audioMode === 'instrumental' && hasInstrumental
 
   const cues = useMemo(() => buildCues(project), [project])
+
+  // 字形预检：查的是成片上会出现的全部字符（含制作名单），只查当前字体
+  const charset = useMemo(() => renderedCharset(project), [project])
+  const coverage = useFontCoverage(project?.style.font_name ?? '', charset)
+  const missing = coverage.kind === 'done' ? coverage.result.missing : []
+  const previewMissing = coverage.kind === 'done' ? coverage.result.preview_missing : []
 
   // 导出跑完（App 轮询到 done 后才会写 exportResult）重新拉一次清单。
   // 后端在把任务标 done **之前**就登记好了产物，所以这一拉必定拿得到。
@@ -220,6 +239,24 @@ export default function ExportPanel({ exportJobId, onExportStart, exportResult }
             {t('export.withGuide')}
           </label>
 
+          {/*
+            缺字警告紧贴导出按钮：一次烧录几分钟，这条必须在按下之前被看到。
+            **不禁用按钮**——缺的可能只是一个用户不在乎的符号（§2.5 降级不终止）。
+          */}
+          {missing.length > 0 && (
+            <p className="exp-warn" data-testid="export-glyph-warn">
+              <WarningOutlined />
+              <span>
+                {t('export.glyphMissing', {
+                  n: missing.length,
+                  chars: formatMissing(missing, 12),
+                })}
+                <br />
+                {t('export.glyphHint')}
+              </span>
+            </p>
+          )}
+
           <button type="button" className="primary" onClick={() => void start()} disabled={!!exportJobId}>
             {exportJobId ? <LoadingOutlined /> : <ExportOutlined />}{' '}
             {exportJobId ? t('export.running') : t('export.start')}
@@ -248,9 +285,19 @@ export default function ExportPanel({ exportJobId, onExportStart, exportResult }
           <PlaySquareOutlined />
           <span className="exp-head__title">{t('export.preview')}</span>
           <span className="exp-head__spacer" />
-          {/* 预览与成片的两处差异如实标出，不让用户以为看到的就是最终画面 */}
+          {/* 预览与成片的差异如实标出，不让用户以为看到的就是最终画面 */}
           {project.proxy_video_path && <span className="badge">{t('export.previewProxy')}</span>}
           {withGuide && <span className="badge exp-tag--warn">{t('export.previewNoGuide')}</span>}
+          {/*
+            第三处差异：预览字体是子集化产物，字符集比系统原字体小得多，
+            这些字**只有预览缺、成片是好的**。不标出来的话用户会以为成片也坏了，
+            回头去换字体——而换字体解决不了这个方向的分叉。
+          */}
+          {previewMissing.length > 0 && (
+            <span className="badge exp-tag--warn" title={previewMissing.join(' ')} data-testid="export-preview-gap">
+              {t('export.previewGlyphGap', { n: previewMissing.length })}
+            </span>
+          )}
         </div>
 
         <div className="exp-viewport">
