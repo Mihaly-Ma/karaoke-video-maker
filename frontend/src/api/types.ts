@@ -77,6 +77,31 @@ export interface Style {
 }
 
 /**
+ * 一条已导出的成片记录（后端 `ExportArtifactDTO`）。
+ *
+ * 由 `GET /api/render/exports/{project_id}` 返回，该接口只列**文件仍在磁盘上**的
+ * 产物。工程 JSON 里那份 `exports` 是持久化存储，用户随时会把成片挪走或删掉，
+ * 拿它判断"现在能不能用"会给出一个点开必然报错的入口。
+ */
+export interface ExportArtifact {
+  /** 取自生成它的那次导出任务的 job_id，便于把记录与任务日志对上 */
+  id: string
+  path: string
+  /** Unix 时间戳（**秒**，不是毫秒）——直接喂 `new Date()` 会得到 1970 年 */
+  created_at: number
+  size_bytes: number
+  /** 成片实际时长（后端 ffprobe 实测） */
+  duration_ms: number
+  with_guide: boolean
+  /** true = OFF VOCAL（伴奏轨），false = ON VOCAL */
+  use_instrumental: boolean
+  /** 片段试渲染，不是整首成片。两者在文件上无从分辨，必须标出来 */
+  is_excerpt: boolean
+  /** 后端由上面三个布尔位派生的中文变体名，如「OFF VOCAL + 引导声」，可直接显示 */
+  variant_label: string
+}
+
+/**
  * 一条无法重新绑定的手工修改（CLAUDE.md §4.4：重绑失败的锁定项不得静默丢弃，
  * 要浮到界面上让用户确认）。
  */
@@ -121,6 +146,15 @@ export interface Project {
   audio_format_id: string
   /** 重绑失败的手工修改，等待用户确认 */
   orphans: OrphanedEdit[]
+  /**
+   * 已导出的成片。
+   *
+   * **前端这份的含义与后端字段不同**：后端 `ProjectDTO.exports` 是持久化存储
+   * （可能含文件已被删掉的记录），而这里只放 `GET /api/render/exports/{id}`
+   * 核对过、文件确实还在的那批（见 `projectStore` 的 `loadExports`）。
+   * 编辑响应里带回来的原值一律被丢弃，不让未核对的记录混进来。
+   */
+  exports: ExportArtifact[]
 }
 
 export interface ProjectSummary {
@@ -189,32 +223,43 @@ export interface ProxyStatus {
 
 // ---- 编辑：批量改时间 / 锁定 ----
 //
-// 对应新端点 POST /api/editor/timings、POST /api/editor/lock（后端由另一 agent
-// 并行实现中，schemas.py 落地前暂缺权威定义）。字段命名沿用 schemas.py 里
-// SetTimingRequest / RubySpanDTO 已有的风格；后端落地后如有出入以 schemas.py 为准。
+// 两个端点都收 `items` 数组，整批算**一个**撤销单元（CLAUDE.md §8）。
+// 名字与 schemas.py 的 TimingItem / LockItem 对齐，别再另起一套。
 
-/** 批量时间编辑里的单条改动，整批只作为一次 POST /api/editor/timings 请求 */
-export interface TimingEdit {
+/** 批量调轴里的一项（后端 `TimingItem`）。`start_ms` 与 `dur_ms` 至少要给一个。 */
+export interface TimingItem {
   line_id: string
   token_index: number
   start_ms: number | null
   dur_ms: number | null
 }
 
-/** POST /api/editor/lock 的请求体（不含 project_id，由 client 补上） */
+/**
+ * 一条锁定变更（后端 `LockItem`），`project_id` 由 client 补上。
+ *
+ * 注音锁给的是 `ruby_range: [start, end]` **一个二元组**，不是拆开的两个字段——
+ * 后端按元组校验，且必须与已有注音的字符区间完全一致。
+ */
 export type LockTarget =
   | { target: 'timing'; line_id: string; token_index: number; locked: boolean }
-  | { target: 'ruby'; line_id: string; ruby_start: number; ruby_end: number; locked: boolean }
+  | { target: 'ruby'; line_id: string; ruby_range: [number, number]; locked: boolean }
 
 // ---- 配色 ----
 
-/** 配色模板：内置预设或用户保存的，POST /api/projects/{id}/palettes 用同一套 Palette 形状 */
+/**
+ * 一套可跨工程复用的配色（后端 `PaletteTemplate`）。
+ *
+ * **没有 `id` 字段，主键就是 `name`**（删除走 `DELETE /api/palettes/templates/{name}`），
+ * 且带的是**按声部索引的一整套** `palettes`，不是单个 `palette`——一个声部要四个
+ * 颜色，模板要覆盖 main / duet_a / duet_b 等多个声部。
+ */
 export interface PaletteTemplate {
-  id: string
   name: string
-  /** 内置模板不可删除 */
+  description: string
+  /** 内置模板不可删除、不可被同名覆盖 */
   builtin: boolean
-  palette: Palette
+  /** 按声部名索引，如 `main` / `duet_a` / `duet_b` / `chorus` */
+  palettes: Record<string, Palette>
 }
 
 // ---- 字体服务 ----

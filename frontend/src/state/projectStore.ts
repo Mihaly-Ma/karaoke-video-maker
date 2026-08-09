@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import * as api from '../api/client'
-import type { Line, LockTarget, Palette, Project, Token, TimingEdit } from '../api/types'
+import type { Line, LockTarget, Palette, Project, Token, TimingItem } from '../api/types'
 
 /**
  * 编辑器状态层。
@@ -61,6 +61,14 @@ interface ProjectState {
   load: (id: string) => Promise<void>
   create: (title?: string, artist?: string) => Promise<string>
   refresh: () => Promise<void>
+  /**
+   * 重新核对导出产物清单。
+   *
+   * 打开工程时拉一次（步骤条据此把「导出」标成已完成，刷新页面也不会退回未完成），
+   * 每次导出跑完再拉一次——后端在把任务标 `done` **之前**就登记好了产物，
+   * 所以轮询到 done 时这一拉必定拿得到。
+   */
+  loadExports: () => Promise<void>
 
   setPlayhead: (ms: number) => void
   setPlaying: (v: boolean) => void
@@ -78,9 +86,15 @@ interface ProjectState {
    * 批量改时间，整批作为一个 undo 单元——打完一首歌的打轴结果应走这个，
    * 而不是循环调用 setTiming（后者会占掉同样多的撤销步数）。
    */
-  setTimings: (edits: TimingEdit[]) => Promise<void>
-  /** 设置/清除 locked_timing 或 ruby 的 locked */
-  setLock: (target: LockTarget) => Promise<void>
+  setTimings: (items: TimingItem[]) => Promise<void>
+  /**
+   * 设置/清除 locked_timing 或 ruby 的 locked。
+   *
+   * 收单条或一批：后端本来就是批量接口，一批算一格撤销。**锁定操作要走这里**
+   * 而不是自己打后端——store 每次写入后会重新拉一次历史深度，
+   * 绕过去会让撤销/重做按钮的可用状态滞后一拍。
+   */
+  setLock: (target: LockTarget | LockTarget[]) => Promise<void>
   setRuby: (lineId: string, start: number, end: number, text: string) => Promise<void>
   splitLine: (lineId: string, tokenIndex: number) => Promise<void>
   mergeLine: (lineId: string) => Promise<void>
@@ -94,7 +108,15 @@ interface ProjectState {
 }
 
 export const useProject = create<ProjectState>((set, get) => {
-  const apply = (p: Project) => set({ project: p, error: null })
+  /**
+   * 把后端返回的工程装进 store。
+   *
+   * `exports` 一律沿用客户端已核对过的那份，**丢弃响应里带回来的持久化原值**：
+   * 后端那个字段是存储，可能含文件已被用户删掉的记录，而界面上"有没有可用产物"
+   * 只由 `loadExports()`（会核对文件是否还在）说了算。
+   */
+  const apply = (p: Project) =>
+    set((s) => ({ project: { ...p, exports: s.project?.exports ?? [] }, error: null }))
 
   const withProject = async (fn: (id: string) => Promise<Project>) => {
     const p = get().project
@@ -123,9 +145,13 @@ export const useProject = create<ProjectState>((set, get) => {
     load: async (id) => {
       set({ loading: true })
       try {
-        apply(await api.getProject(id))
+        const p = await api.getProject(id)
+        // 换工程时先把产物清单清空再由 loadExports 填回来：留着上一个工程的清单，
+        // 步骤条会在新工程上错误地显示「导出」已完成
+        set({ project: { ...p, exports: [] }, error: null })
         const h = await api.history(id)
         set({ canUndo: h.undo > 0, canRedo: h.redo > 0 })
+        await get().loadExports()
       } catch (e) {
         set({ error: e instanceof Error ? e.message : String(e) })
       } finally {
@@ -135,13 +161,26 @@ export const useProject = create<ProjectState>((set, get) => {
 
     create: async (title, artist) => {
       const p = await api.createProject(title, artist)
-      apply(p)
+      // 新工程必然没有产物；不显式清空会沿用上一个工程的清单（见 apply 的说明）
+      set({ project: { ...p, exports: [] }, error: null })
       return p.id
     },
 
     refresh: async () => {
       const p = get().project
       if (p) apply(await api.getProject(p.id))
+    },
+
+    loadExports: async () => {
+      const p = get().project
+      if (!p) return
+      try {
+        const list = await api.listExports(p.id)
+        // 只更新当前仍打开着的那个工程：这是个异步请求，返回时用户可能已经切走了
+        set((s) => (s.project?.id === p.id ? { project: { ...s.project, exports: list } } : {}))
+      } catch {
+        // 产物清单取不到不该影响编辑：保持现有清单，让用户继续干活
+      }
     },
 
     setPlayhead: (ms) => set({ playheadMs: ms }),
@@ -177,9 +216,10 @@ export const useProject = create<ProjectState>((set, get) => {
         }),
       ),
 
-    setTimings: async (edits) => withProject((id) => api.setTimings(id, edits)),
+    setTimings: async (items) => withProject((id) => api.setTimings(id, items)),
 
-    setLock: async (target) => withProject((id) => api.setLock(id, target)),
+    setLock: async (target) =>
+      withProject((id) => api.setLock(id, Array.isArray(target) ? target : [target])),
 
     setRuby: async (lineId, start, end, text) =>
       withProject((id) => api.setRuby({ project_id: id, line_id: lineId, start, end, text })),

@@ -60,10 +60,13 @@ function isDone(step: StepKey, project: Project | null, exported: boolean): bool
     // 不用 style 字段判定——它一建工程就带全套默认值，拿它判会全部误判为已完成。
     case 'style':
       return Object.keys(project.palettes).length > 0
-    // 工程文件里没有任何导出产物的记录（后端也没给字段），只能靠本次会话的导出结果。
-    // 于是刷新页面后这一格会退回未完成——需要后端补一个"最近产物"字段才能修。
+    // `project.exports` 在前端只装 `GET /api/render/exports/{id}` 核对过、文件确实
+    // 还在的那批（见 projectStore 的 loadExports），**不是**工程 JSON 里的持久化原值——
+    // 后者可能留着用户已经删掉的成片，据此打勾就是在说一件不成立的事。
+    // 有它之后刷新页面这一格不再退回未完成；`exported` 仍保留，用于本次会话刚导完、
+    // 清单还没拉回来的那一小段时间。
     case 'export':
-      return exported
+      return exported || project.exports.length > 0
   }
 }
 
