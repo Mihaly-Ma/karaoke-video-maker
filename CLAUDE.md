@@ -380,15 +380,29 @@ Provider 清单（**优先级未最终裁决，见 §9**）：
 
 **`audio-separator`**（PyPI `audio-separator`，当前 0.44.5，MIT，Nomad Karaoke 维护），不要直接封装 `demucs`。它把 MDX / VR / MDXC-Roformer / Demucs 四种架构收敛到一个 `Separator` 类和一套模型文件名命名空间。
 
-默认模型：`model_bs_roformer_ep_317_sdr_12.9755.ckpt`（639 MB，原生 2-stem）。
+档位（暴露给用户三档）。**前后端一律传档位 id，不传模型文件名**——文件名属于
+audio-separator 的命名空间，换模型不该逼前端跟着改。档位表由后端
+`kvm.media.separate.MODEL_TIERS` 单点定义，经 `GET /api/media/separate/models` 下发：
 
-档位（暴露给用户三档）：
-
-| 档 | 模型 | 用途 |
+| 档位 id | 模型 | 用途 |
 |---|---|---|
-| 快速 | `htdemucs`（84 MB） | 首次导入立刻出个能听的伴奏，让用户开始调轴 |
-| 标准（默认） | `mel_band_roformer_kim_ft_unwa.ckpt` | 比 BS-Roformer 快约 2.3x，SDR 仅低 0.1 |
-| 最佳 | `model_bs_roformer_ep_317_sdr_12.9755.ckpt` | 最慢 |
+| `fast` | `htdemucs.yaml`（84 MB） | 首次导入立刻出个能听的伴奏，让用户开始调轴；4 声部，顺带产出鼓轨供节拍检测 |
+| `standard`（默认） | `mel_band_roformer_kim_ft_unwa.ckpt` | 比 BS-Roformer 快约 2.3x，SDR 仅低 0.1 |
+| `best` | `model_bs_roformer_ep_317_sdr_12.9755.ckpt` | 639 MB，质量最高，最慢 |
+
+已实测（2026-08-09，赤春花 60s 真实素材，macOS arm64 / MPS）：扣掉固定开销后每 30s
+音频的推理成本约 **2.0s / 4.0s / 10.1s**，standard 约为 best 的 2.4 倍速，与上表的
+"快约 2.3x"吻合。三档 corr(原混音, 各声部之和) = 0.991 / 0.9996 / 0.998。
+
+三条会咬人的实测事实：
+
+- **声部命名三种约定并存**，消费端必须归一化后再判类型：htdemucs 给 `(Vocals)/(Bass)/(Drums)/(Other)`，
+  BS-Roformer 给 `(Vocals)/(Instrumental)`，而 **MelBand 给小写 `(vocals)/(other)`——
+  它的 `other` 就是完整伴奏，不是 4 声部里的那个 other**。判据要看有没有 Drums/Bass，不能看键名
+- **audio-separator 一律把输出重采样到 44.1kHz**（源是 48kHz 时也一样），下游混音要留意
+- **绝不用合成信号测分离模型**：BS-Roformer 在人工合成的 `synth_mix` 上输出数字静音
+  （mean = max = −91.0 dB），同一模型在真实音乐上是正常的 −17.0 dB。曾据此误判"BS-Roformer
+  在本机不可用"，差点写进契约。测试素材必须是真实音乐
 
 设备策略（**已定**）：
 

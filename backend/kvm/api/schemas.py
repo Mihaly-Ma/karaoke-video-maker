@@ -251,7 +251,39 @@ class DownloadRequest(BaseModel):
 
 class SeparateRequest(BaseModel):
     project_id: str
-    model: str = "htdemucs"
+    model: str = "standard"
+    """人声分离档位 id（`fast` / `standard` / `best`，见 `SeparateModelTier`）。
+
+    默认值必须与 `MODEL_TIERS` 里标了 `recommended` 的那档一致，否则不带 `model`
+    字段的 API 直调会跑出与 UI 默认不同的档位。
+
+    **传档位名而不是模型文件名**：模型文件名属于 audio-separator 的命名空间，
+    换模型时不该逼前端跟着改。为兼容高级用户与历史调用，后端也接受字面模型
+    文件名（甚至不带扩展名的写法），由 `kvm.media.separate` 的子进程在
+    audio-separator 的受支持列表里做一次容错匹配。
+    """
+
+
+class SeparateModelTier(BaseModel):
+    """一个人声分离档位（CLAUDE.md §5.4 的三档）。
+
+    由 `GET /api/media/separate/models` 返回，让前端不必硬编码模型文件名——
+    前端只认 `id`，展示用 `label` / `hint`，换模型只改后端一处。
+    """
+
+    id: str
+    """前后端约定的传输值，也就是 `SeparateRequest.model` 该填的东西。"""
+
+    label: str
+    model_filename: str
+    """实际传给 audio-separator 的文件名，仅供展示/排查，前端不要拿它当传输值。"""
+
+    hint: str
+    recommended: bool = False
+    """默认选中的档位。同一时刻只应有一个档位为真。"""
+
+    warning: str = ""
+    """已知问题提示（本机实测有问题的档位），为空表示没有已知问题。"""
 
 
 class JobStatus(BaseModel):

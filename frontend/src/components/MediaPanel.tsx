@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import * as api from '../api/client'
 import { useProject } from '../state/projectStore'
 import type { Project } from '../api/types'
@@ -13,12 +13,29 @@ import type { Project } from '../api/types'
  * state——这样切换到其它工作流步骤时，任务栏里的进度条不会跟着卸载消失。
  */
 
-type SeparateModel = 'htdemucs' | 'mel_band_roformer_kim_ft_unwa' | 'model_bs_roformer_ep_317_sdr_12.9755'
+/**
+ * 一个人声分离档位，对应后端 `SeparateModelTier`
+ * （`GET /api/media/separate/models`）。
+ */
+interface SeparateTier {
+  id: string
+  label: string
+  model_filename: string
+  hint: string
+  recommended: boolean
+  warning: string
+}
 
-const SEPARATE_MODELS: { value: SeparateModel; label: string; hint: string }[] = [
-  { value: 'htdemucs', label: '快速', hint: '84MB，先出个能听的伴奏，立刻开始调轴' },
-  { value: 'mel_band_roformer_kim_ft_unwa', label: '标准（推荐）', hint: '质量接近最佳档，速度快约 2.3 倍' },
-  { value: 'model_bs_roformer_ep_317_sdr_12.9755', label: '最佳', hint: '质量最高，最慢' },
+/**
+ * 后端不可达时的兜底档位。**只写档位 id，不写模型文件名**——模型文件名属于
+ * audio-separator 的命名空间，前端硬编码它正是此前"标准"和"最佳"两档一点就报
+ * `Model file ... not found in supported model files` 的根因：前端传去掉扩展名的
+ * 文件名，后端按档位名建别名表，两边压根对不上。现在传输值统一为档位 id。
+ */
+const FALLBACK_TIERS: SeparateTier[] = [
+  { id: 'fast', label: '快速', model_filename: '', hint: '先出个能听的伴奏，立刻开始调轴', recommended: true, warning: '' },
+  { id: 'standard', label: '标准', model_filename: '', hint: '质量与速度平衡', recommended: false, warning: '' },
+  { id: 'best', label: '最佳', model_filename: '', hint: '质量最高，最慢', recommended: false, warning: '' },
 ]
 
 /**
@@ -76,7 +93,10 @@ export default function MediaPanel({
   const [url, setUrl] = useState('')
   const [downloadError, setDownloadError] = useState<string | null>(null)
 
-  const [model, setModel] = useState<SeparateModel>('mel_band_roformer_kim_ft_unwa')
+  const [tiers, setTiers] = useState<SeparateTier[]>(FALLBACK_TIERS)
+  const [tiersFallback, setTiersFallback] = useState(false)
+  /** null 表示"用户还没选"，此时跟随后端标记的推荐档，避免异步拿到档位表时把用户的选择顶掉。 */
+  const [model, setModel] = useState<string | null>(null)
   const [separateError, setSeparateError] = useState<string | null>(null)
 
   const [importError, setImportError] = useState<string | null>(null)
@@ -99,6 +119,25 @@ export default function MediaPanel({
 
   const projectId = project?.id
 
+  // 档位表由后端给（唯一真相来源），前端只认 id。取不到就退回内置 id 列表——
+  // 那些 id 后端一样认，分离仍然可用，只是提示文案没那么准。
+  useEffect(() => {
+    let alive = true
+    fetch('/api/media/separate/models')
+      .then((resp) => (resp.ok ? (resp.json() as Promise<SeparateTier[]>) : Promise.reject()))
+      .then((list) => {
+        if (alive && list.length > 0) setTiers(list)
+      })
+      .catch(() => {
+        if (alive) setTiersFallback(true)
+      })
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  const selectedModel = model ?? tiers.find((t) => t.recommended)?.id ?? tiers[0]?.id ?? 'fast'
+
   const startDownload = async () => {
     if (!projectId || !url.trim()) return
     setDownloadError(null)
@@ -114,7 +153,7 @@ export default function MediaPanel({
     if (!projectId) return
     setSeparateError(null)
     try {
-      const job = await api.separate(projectId, model)
+      const job = await api.separate(projectId, selectedModel)
       onSeparateStart(job.job_id)
     } catch (e) {
       setSeparateError(e instanceof Error ? e.message : String(e))
@@ -222,20 +261,27 @@ export default function MediaPanel({
         </div>
 
         <div className="media-panel__models">
-          {SEPARATE_MODELS.map((m) => (
-            <label key={m.value} className="media-panel__model">
+          {tiers.map((t) => (
+            <label key={t.id} className="media-panel__model">
               <input
                 type="radio"
                 name="separate-model"
-                value={m.value}
-                checked={model === m.value}
-                onChange={() => setModel(m.value)}
+                value={t.id}
+                checked={selectedModel === t.id}
+                onChange={() => setModel(t.id)}
               />
-              <span className="media-panel__model-label">{m.label}</span>
-              <span className="muted">{m.hint}</span>
+              <span className="media-panel__model-label">
+                {t.label}
+                {t.recommended ? '（推荐）' : ''}
+              </span>
+              <span className="muted">{t.hint}</span>
+              {t.warning && <span className="error">{t.warning}</span>}
             </label>
           ))}
         </div>
+        {tiersFallback && (
+          <p className="hint">读取不到后端的档位列表，正在用内置档位，提示文案可能不准。</p>
+        )}
 
         <button
           type="button"

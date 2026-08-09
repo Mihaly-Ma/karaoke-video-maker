@@ -17,7 +17,13 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from starlette.responses import FileResponse
 
-from kvm.api.schemas import DownloadRequest, JobStatus, ProjectDTO, SeparateRequest
+from kvm.api.schemas import (
+    DownloadRequest,
+    JobStatus,
+    ProjectDTO,
+    SeparateModelTier,
+    SeparateRequest,
+)
 from kvm.api.store import ProjectStore
 from kvm.jobs import job_manager
 from kvm.media import download as download_module
@@ -104,6 +110,19 @@ def import_media(
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/separate/models", response_model=list[SeparateModelTier])
+def list_separate_models() -> list[SeparateModelTier]:
+    """列出可用的人声分离档位（CLAUDE.md §5.4 的三档）。
+
+    前端据此渲染选项并把 `id` 原样回传给 `POST /separate`，**不再硬编码模型
+    文件名**——此前前端传的是去掉扩展名的模型文件名，与后端的档位别名表对不上，
+    "标准"和"最佳"两档必然报错。换模型/调档位现在只改 `kvm.media.separate` 一处。
+
+    纯常量，不读磁盘也不联网，因此不需要走长任务。
+    """
+    return list(separate_module.MODEL_TIERS)
 
 
 @router.post("/separate", response_model=JobStatus)
