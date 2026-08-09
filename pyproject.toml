@@ -29,11 +29,20 @@ fonts = [
 ]
 # 节拍检测与引导声。librosa 会拉入 numba/llvmlite，必须约束版本：
 # 不约束时会解析到不兼容 Python 3.12 的 numba 0.53 并编译失败。
+#
+# torchcrepe 是引导声的音高提取后端（MIT）。选它而非 librosa 自带的 pyin，是因为
+# pyin 是自相关域的**单音**跟踪器：本曲男女对唱的和声段它整段判无音高，基频弱时
+# 还会锁到次谐波（实测把 415Hz 报成 103.8Hz，低两个八度）。CREPE 是波形上的 CNN，
+# 不依赖自相关，且默认 Viterbi 解码会结构性排除倍频/半频错误。详见 guide_melody 模块文档。
+# 权重（full 89MB / tiny 2MB）随 wheel 分发，无需运行时下载、无需联网。
+# torch 本来就是本项目的既定依赖（人声分离与强制对齐），而引导声的输入正是分离产物，
+# 所以这条不引入新的安装负担。
 audio = [
     "librosa>=0.11",
     "numba>=0.61",
     "llvmlite>=0.44",
     "soundfile>=0.12",
+    "torchcrepe>=0.0.23",
 ]
 # 人声分离。audio-separator 不会自动带上 onnxruntime，必须显式声明。
 separate = [

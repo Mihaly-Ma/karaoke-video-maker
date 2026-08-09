@@ -6,7 +6,8 @@
 
 流程全部本地：
 
-    vocals stem → pYIN 提取基频 → 帧级切音符 → 半音量化 → 合并/桥接 → 合成 → 混入伴奏
+    vocals stem → 能量判发声 + pYIN 提取基频 → 帧级切音符 → 半音量化
+                → 合并/桥接 → 合成 → 混入伴奏
 
 ## 为什么要"量化 + 桥接"而不是照搬实测基频
 
@@ -23,6 +24,57 @@
 
 对应的三步处理：量化到半音 → 合并量化后同高的相邻音符（顺带吃掉颤音碎片）→
 把短于阈值的清音间隙桥接成 legato（延长前一个音符），只有真正的休止才断开。
+
+## 为什么音高提取用 CREPE 而不是 pYIN
+
+第三类问题是用户在成片里听出来的：**整段整段的引导声消失**，以及
+「桜舞って宙を…」第一个「宙」听着是空的。查下来是同一个根因的两副面孔——
+**pYIN 是自相关域的单音基频跟踪器**，而我们要它做的事超出了它的适用范围：
+
+| 现象 | pYIN 的机制性原因 | 实测证据（本曲 60–90s） |
+|---|---|---|
+| 和声段整段无音高 | 双声部同时发声 → 差分函数没有唯一的谷 → 判"无音高" | 14.72–16.02s、21.97–23.85s 能量均值 −7.5/−7.1dB（唱得很响），`voiced_flag` 却是 0% |
+| 音高掉到低两个八度 | 基频弱、泛音强时自相关会锁到**次谐波** | 「宙」14.30–14.48s 报 103.8Hz，而 103.8Hz 处的频谱能量比 4×（415.2Hz）低 **48dB** |
+| 起音晚进来 | 自相关要攒够几个周期才锁得住 | 起音段实测晚 93–140ms |
+
+这三条都不该靠打补丁去修（补空洞、持音、纠正次谐波……那是在为错误的工具擦屁股）。
+换成 **CREPE**（`torchcrepe`，MIT）之后三条同时消失，因为它的机制本就不同：
+
+- 它是直接在波形上做音高分类的 CNN，**不依赖自相关**，所以"基频弱/缺失"不会把它
+  引向次谐波——这正是 pYIN 在「宙」上栽的地方；
+- 默认的 **Viterbi 解码**对大幅跳变加惩罚，倍频/半频错误由解码器结构性地排除；
+- 每一帧都给出音高与置信度，不存在"罢工"帧，因此不需要任何补洞逻辑。
+
+实测（真值取自频谱谐波列实测，不是猜的）：
+
+| 区间 | 真基频 | pYIN | CREPE |
+|---|---|---|---|
+| 「宙」前半 14.30–14.48s | 415.2 Hz | 104.3 ✗ | 418.3 ✓ |
+| 「宙」后半 14.50–14.73s | 392.4 Hz | 131.5 ✗ | 391.9 ✓ |
+| 对照 13.70–13.90s | 394.0 Hz | 394.0 ✓ | 392.4 ✓ |
+
+音高直方图上，pYIN 产生的 MIDI 44（G#2）次谐波离群簇在 CREPE 下**完全消失**。
+
+## 发声判定为什么仍然用能量，而不是 CREPE 的置信度
+
+CREPE 每帧都给音高，所以"在不在唱"必须另外判定。这里用**人声 stem 的帧能量**：
+输入本来就是分离好的人声轨，能量是最直接且与复音无关的证据。
+
+不用 CREPE 的 `periodicity` 置信度，是有实测依据的：「宙」前半那一段
+CREPE 的音高是对的（418.3Hz），置信度却只有 **0.32**——若按常见的 0.5 阈值去卡，
+恰好会把用户投诉的那个音再次抹掉。置信度低不等于没在唱，只等于"不像单一周期信号"，
+而和声段本来就不是。
+
+## 一条已知性质：结果不是逐比特可复现的
+
+torch 的推理在同一进程内重复跑也不是 bit-exact（CPU 单线程也一样），实测原始 f0
+两次之间最大差 **37.6 音分、没有任何一帧差超过 50 音分**。经半音量化后，两次结果
+逐帧同高的比例约 **94.7%**，差 1 个半音的 2.9% 落在"本来就唱在两个半音正中间"的音上
+——本曲实测演唱音高偏离半音格的中位数就有 14–16 音分，这类音谁来量化都是二选一。
+
+结论是不去和它较劲：音准与旋律走向不受影响，且按 CLAUDE.md §5.13，
+引导声本就按 `(输入哈希, 参数, 版本)` 缓存，同一个工程只会生成一次。
+真要逐比特复现，应当在作业层缓存产物，而不是在这里追求推理确定性。
 
 ## 音色
 
@@ -85,12 +137,40 @@ class GuideConfig:
     `min_note_s`）都取自赤春花全曲 vocals stem 的实测间隙分布，不是拍脑袋。
     """
 
-    # —— 基频提取 ——
-    sr_analysis: int = 22050
-    """pYIN 的分析采样率。22050 足够覆盖人声基频，比 44100 快一倍。"""
+    # —— 音高提取（CREPE）——
+    sr_analysis: int = 16000
+    """CREPE 的原生采样率。喂别的采样率只会多一次重采样，不会更准。"""
 
-    fmin: float = 65.0
+    hop_s: float = 0.01
+    """帧步长。10ms 比之前 pYIN 的 23.2ms 细一倍多，音符边界因此更准；
+    CREPE 是批量前向，帧数翻倍的代价可以接受（实测见 `extract_notes`）。"""
+
+    fmin: float = 80.0
+    """音高搜索下界。80Hz（≈E2）已在男声演唱音域之下。
+
+    注：pYIN 时代曾把"全曲最低音落在 MIDI 44（104Hz）"当成男声真实低点写进理由，
+    那是错的——它就是次谐波误判本身。换 CREPE 后本曲实测最低到 MIDI 47（B2）。
+    """
+
     fmax: float = 1200.0
+
+    crepe_model: str = "full"
+    """`full`（89MB）或 `tiny`（2MB）。权重随 wheel 一起分发，无需运行时下载。"""
+
+    device: str | None = None
+    """None 表示自动挑选（CUDA → MPS → CPU）。"""
+
+    voicing_drop_db: float = -24.0
+    """发声判定：帧能量低于"演唱响度基准"这么多分贝就算没在唱。
+
+    基准取帧 RMS 的 p95（不用最大值，避免被单个瞬态带偏）。四个 30 秒片段实测：
+    −24dB 时响亮帧覆盖率 99.7–100%、静音帧误填 0–2.5%；−20dB 会漏掉几处
+    230–300ms 的弱唱尾音，−28dB 起收益停滞而误填上升，−32dB 明显过填（误填 11%）。
+    """
+
+    voicing_floor_dbfs: float = -60.0
+    """发声判定的绝对下限，防止"整轨近乎静音"时 p95 基准塌到本底噪声上，
+    把噪声也当成演唱。正常演唱的帧 RMS 远在此之上。"""
 
     # —— 帧级切音符 ——
     cents_tolerance: float = 80.0
@@ -319,15 +399,80 @@ def frames_to_notes(
     return bridge_gaps(notes, config.legato_gap_s)
 
 
+def energy_voicing(
+    rms: Sequence[float] | np.ndarray, drop_db: float, floor_dbfs: float = -60.0
+) -> np.ndarray:
+    """用人声 stem 的帧能量判定"这一帧在不在唱"。
+
+    输入本来就是分离好的人声轨，能量是最直接、且**与复音无关**的证据。
+    CREPE 每帧都会给出音高，所以"在不在唱"必须由别的信号回答；用它自己的
+    `periodicity` 置信度不行——实测和声段音高正确时置信度也只有 0.32（见模块文档）。
+
+    响度基准取 p95 而不是最大值：最大值会被单个瞬态（爆破音、齿音）抬高，
+    进而把整首歌的门限推得过严。
+    """
+    arr = np.asarray(rms, dtype=np.float64)
+    if arr.size == 0:
+        return np.zeros(0, dtype=bool)
+    ref = float(np.percentile(arr, 95))
+    if ref <= 0.0:
+        return np.zeros(arr.size, dtype=bool)
+    rel_db = 20.0 * np.log10(arr / ref + 1e-12)
+    abs_db = 20.0 * np.log10(arr + 1e-12)
+    return (rel_db > drop_db) & (abs_db > floor_dbfs)
+
+
+def _pick_device(preferred: str | None) -> str:
+    """CUDA → MPS → CPU。CREPE 是小 CNN，CPU 也跑得动，只是慢几倍。"""
+    if preferred:
+        return preferred
+    import torch
+
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
 def extract_notes(vocals_path: Path, config: GuideConfig | None = None) -> list[GuideNote]:
-    """从人声轨提取音符序列。"""
+    """从人声轨提取音符序列。
+
+    音高用 CREPE（Viterbi 解码），发声与否用人声 stem 的帧能量，理由见模块文档。
+    两者必须同帧率，否则门控会整体错位——所以 RMS 用与 CREPE 相同的 hop 计算。
+
+    实测 30 秒片段在 MPS 上约 3.4 秒（`full` 模型、10ms 帧步长）。
+    """
     import librosa
+    import torch
+    import torchcrepe
 
     cfg = config or GuideConfig()
     y, _ = librosa.load(str(vocals_path), sr=cfg.sr_analysis, mono=True)
-    f0, voiced, _ = librosa.pyin(y, fmin=cfg.fmin, fmax=cfg.fmax, sr=cfg.sr_analysis)
-    times = librosa.times_like(f0, sr=cfg.sr_analysis)
-    return frames_to_notes(times, f0, voiced, cfg)
+    hop_length = max(1, round(cfg.hop_s * cfg.sr_analysis))
+
+    f0 = torchcrepe.predict(
+        torch.from_numpy(y)[None],
+        cfg.sr_analysis,
+        hop_length,
+        fmin=cfg.fmin,
+        fmax=cfg.fmax,
+        model=cfg.crepe_model,
+        # Viterbi 解码对大幅跳变加惩罚，倍频/半频错误在这一步被结构性排除；
+        # 换成 argmax 会立刻退回 pYIN 那种次谐波误判
+        decoder=torchcrepe.decode.viterbi,
+        batch_size=512,
+        device=_pick_device(cfg.device),
+    )[0].cpu().numpy()
+
+    # 能量窗取 4 倍 hop：太短会被颤音的波峰波谷带得忽上忽下，太长会糊掉音符边界
+    rms = librosa.feature.rms(
+        y=y, frame_length=max(256, hop_length * 4), hop_length=hop_length
+    )[0]
+    n = min(len(f0), len(rms))
+    times = np.arange(n) * (hop_length / cfg.sr_analysis)
+    voiced = energy_voicing(rms[:n], cfg.voicing_drop_db, cfg.voicing_floor_dbfs)
+    return frames_to_notes(times, np.asarray(f0)[:n], voiced, cfg)
 
 
 # ---------------------------------------------------------------------------

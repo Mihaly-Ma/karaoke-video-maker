@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent))
 
 from kvm.media.ffmpeg import find_ffmpeg_with_libass
 from kvm.models.karaoke import VoicePalette
-from kvm.pipeline.guide_melody import TIMBRES, GuideConfig  # 只取配置与常量，不触发 librosa
+from kvm.pipeline.guide_melody import TIMBRES, GuideConfig  # 只取配置与常量，不触发 torch
 from kvm.pipeline.qrc_import import load_project
 from kvm.render.ass_builder import AssBuilder
 from kvm.render.text_metrics import LibassMetrics
@@ -182,6 +182,16 @@ def main() -> int:
         "--guide-min-note-ms", type=float, default=guide_defaults.min_note_s * 1000,
         help="短于此的音符并入音高最接近的邻居（滑音碎片），而不是丢弃",
     )
+    ap.add_argument(
+        "--guide-voicing-db", type=float, default=guide_defaults.voicing_drop_db,
+        help="发声判定门限：帧能量低于演唱响度基准（p95）这么多 dB 就算没在唱。"
+             "调低会补上更多空洞但可能填进休止，调高相反",
+    )
+    ap.add_argument(
+        "--guide-crepe-model", choices=("full", "tiny"), default=guide_defaults.crepe_model,
+        help="CREPE 音高模型。tiny（2MB）比 full（89MB）快很多但更容易走音，"
+             "纯 CPU 机器上可换",
+    )
     ap.add_argument("--no-beat", action="store_true", help="跳过节拍检测")
     ap.add_argument("--start", type=float, default=None, help="截取起点秒（用于试渲染）")
     ap.add_argument("--duration", type=float, default=None, help="截取时长秒")
@@ -265,9 +275,11 @@ def main() -> int:
             timbre=args.guide_timbre,
             max_harmonics=args.guide_max_harmonics,
             gain=args.guide_gain,
+            voicing_drop_db=args.guide_voicing_db,
+            crepe_model=args.guide_crepe_model,
         )
         guide_path = args.out.with_name("guide_melody.wav")
-        print("合成引导声…（pYIN 提取音高，耗时约为曲长的 1/7）")
+        print(f"合成引导声…（CREPE-{guide_cfg.crepe_model} 提取音高）")
         n_notes = build_guide_track(
             args.guide_vocals, guide_path, info["duration"], config=guide_cfg
         )

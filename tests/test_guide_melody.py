@@ -10,10 +10,18 @@
 3. **每个清音帧都断一次**。pYIN 的清音判定在辅音、换气上很不稳，
    一个持续长音会被切碎。→ 短间隙必须被桥接，只有真正的休止才断开。
 
+4. **音高提取用错了工具**。用户在成片里听到"中间有几段引导声消失"、
+   「桜舞って宙を…」第一个「宙」是空的。根因是 pYIN 属于自相关域的**单音**跟踪器：
+   和声段两条基频并存 → 判无音高；基频弱时锁到**次谐波**（实测把 415Hz 报成 103.8Hz，
+   而 103.8Hz 处能量比 415Hz 低 48dB）。→ 改用 CREPE（波形上的 CNN + Viterbi 解码），
+   三类症状同时消失，不需要任何补洞/纠偏的后处理。
+   → 发声与否仍由**能量**回答：CREPE 每帧都给音高，且其置信度在和声段低到 0.32，
+   按置信度卡阈值恰好会把那个音再次抹掉。
+
 外加一条合成端的硬约束：**带限防混叠**。高音区谐波超过奈奎斯特会折返成
 不成谐的刺耳噪声，而这种问题在低音区试听时完全听不出来，只有断言能挡住。
 
-本文件只测纯函数与合成（不跑 pYIN、不读音频），因此不需要 librosa。
+本文件只测纯函数与合成（不跑 CREPE、不读音频），因此不需要 torch/librosa。
 """
 
 from __future__ import annotations
@@ -36,6 +44,7 @@ from kvm.pipeline.guide_melody import (  # noqa: E402
     GuideNote,
     absorb_short_notes,
     bridge_gaps,
+    energy_voicing,
     frames_to_notes,
     group_phrases,
     harmonic_weights,
@@ -72,7 +81,7 @@ def coverage_s(notes: list[GuideNote]) -> float:
 
 
 def frames(pattern: list[tuple[float, int]], hop: float = 0.01):
-    """把 `[(频率或 0 表示清音, 帧数), ...]` 展开成 pYIN 风格的三元组。"""
+    """把 `[(频率或 0 表示清音, 帧数), ...]` 展开成帧级三元组。"""
     f0: list[float] = []
     voiced: list[bool] = []
     for freq, count in pattern:
@@ -157,7 +166,7 @@ def test_short_note_goes_to_the_closer_pitch() -> None:
 
 
 def test_isolated_short_note_is_dropped() -> None:
-    """两侧都够不着时才丢：孤立的 30ms 多半是 pYIN 在噪声上的误触发。"""
+    """两侧都够不着时才丢：孤立的 30ms 多半是音高跟踪器在噪声上的误触发。"""
     src = [GuideNote(0.0, 0.5, A4), GuideNote(5.0, 5.03, B4)]
     out = absorb_short_notes(src, min_note_s=0.12, max_gap_s=0.20)
     assert len(out) == 1
@@ -250,6 +259,52 @@ def test_group_phrases_splits_on_real_rests_only() -> None:
     ]
     phrases = group_phrases(notes)
     assert [len(p) for p in phrases] == [2, 1]
+
+
+# ---------------------------------------------------------------------------
+# 缺陷 4：发声判定必须来自能量（CREPE 每帧都给音高，不能靠它判发声）
+# ---------------------------------------------------------------------------
+
+
+def test_energy_voicing_marks_loud_frames_and_rejects_silence() -> None:
+    """用户听到的"整段消失"就发生在这种帧上：能量很足，音高跟踪器却说没在唱。"""
+    rms = np.array([0.5] * 40 + [0.0005] * 30 + [0.4] * 40)
+    voiced = energy_voicing(rms, drop_db=-20.0)
+    assert voiced[:40].all()
+    assert not voiced[40:70].any()
+    assert voiced[70:].all()
+
+
+def test_energy_voicing_reference_is_robust_to_a_single_transient() -> None:
+    """基准取 p95 而非最大值：一个爆破音不该把整首歌的门限推高。"""
+    rms = np.array([0.3] * 99 + [30.0])  # 最后一帧比正常演唱高 40dB
+    voiced = energy_voicing(rms, drop_db=-20.0)
+    assert voiced[:99].all(), "单个瞬态把门限抬高，整首歌都会被判成没在唱"
+
+
+def test_energy_voicing_absolute_floor_rejects_near_silent_track() -> None:
+    """整轨近乎静音时，p95 基准会塌到本底噪声上——绝对下限必须兜住这种情况。"""
+    rms = np.full(50, 1e-5)  # 约 −100 dBFS
+    assert not energy_voicing(rms, drop_db=-20.0, floor_dbfs=-60.0).any()
+
+
+def test_energy_voicing_handles_degenerate_input() -> None:
+    assert energy_voicing([], drop_db=-20.0).size == 0
+    assert not energy_voicing(np.zeros(10), drop_db=-20.0).any()
+
+
+def test_voicing_from_energy_fills_a_hole_a_pitch_tracker_would_leave() -> None:
+    """回归：和声段（音高跟踪器判清音、但能量在唱）必须仍然产出连续的引导音。"""
+    # 模拟一整句：中段是单音跟踪器判不出音高的和声区，但能量一直在
+    times, f0, _ = frames([(A4, 30), (A4, 30), (A4, 30)])
+    tracker_voiced = np.array([True] * 30 + [False] * 30 + [True] * 30)
+    energy_voiced = energy_voicing(np.full(90, 0.4), drop_db=-20.0)
+
+    by_tracker = frames_to_notes(times, f0, tracker_voiced, GuideConfig())
+    by_energy = frames_to_notes(times, f0, energy_voiced & np.isfinite(f0), GuideConfig())
+
+    assert coverage_s(by_tracker) < 0.7 * coverage_s(by_energy)
+    assert len(by_energy) == 1  # 整句应当是一个连贯的长音
 
 
 # ---------------------------------------------------------------------------
