@@ -4,9 +4,14 @@
  * 为什么预览必须用 libass、而不是 DOM 或 Canvas 自绘：导出侧的 ffmpeg 也用 libass，
  * 两端同源才谈得上「预览对了导出也对」（CLAUDE.md §5.12 D3/D4）。
  *
- * 本模块只负责「把后端给的 ASS 文本喂给 libass 并画在 <video> 上」。
+ * 本模块只负责「把后端给的 ASS 文本喂给 libass 并画出来」。
  * **前端不生成、也不修改 ASS** —— ASS 的唯一来源是后端 /api/render/ass，
  * 工程文件才是唯一真源（CLAUDE.md §4.1）。
+ *
+ * 字幕层有两种挂法：叠在 `<video>` 上（对轴舞台的预览），或挂在一块自备的
+ * 画布上、由调用方给时钟（样式舞台的成片预览——那一步只确认观感，工程甚至
+ * 可能还没有视频）。两者共用同一份 libass 实例封装与增量更新逻辑，
+ * 只有「帧从哪来」不同，见 `Mount`。
  *
  * 版本要求：jassub@2.5.14（CLAUDE.md §5.9 锁死）。v2 砍掉了 v1.x 的
  * dropAllAnimations / targetFps / onDemandRender / blendMode / useLocalFonts 等选项，
@@ -519,8 +524,7 @@ async function loadFonts(
 // 实例封装
 // ---------------------------------------------------------------------------
 
-export interface OverlayOptions {
-  video: HTMLVideoElement
+interface OverlayCommonOptions {
   /** 初始 ASS 文本，来自后端 /api/render/ass */
   ass: string
   /** 工程使用的字体族名（project.style.font_name），用于挑选默认字体 */
@@ -531,6 +535,42 @@ export interface OverlayOptions {
    */
   fontSources?: PreviewFontSource[]
 }
+
+/**
+ * 叠在真实视频画面上：JASSUB 自己建一块 canvas 插在 `<video>` 之后，用
+ * ResizeObserver 跟随视频尺寸，并挂 rVFC 逐帧重绘。父容器必须 position: relative。
+ */
+export interface VideoOverlayOptions extends OverlayCommonOptions {
+  video: HTMLVideoElement
+  canvas?: undefined
+}
+
+/**
+ * 挂在一块自备画布上，**完全不需要视频元素**。
+ *
+ * 样式舞台要的正是这个：那一步只确认成片观感，而工程可能根本还没有视频
+ * （"先只有音轨、边听边打轴"是本工具最常见的起点，CLAUDE.md §2.5）。
+ * jassub@2.5.14 的构造协议本来就接受 `canvas` 代替 `video`（见 dist/jassub.d.ts
+ * 的 `JASSUBOptions`）；此时它不挂 rVFC 也不改画布的 CSS 尺寸，
+ * **时钟与重绘全部由调用方经 `renderAt` 驱动**。
+ *
+ * `width` / `height` 是画面基准分辨率（工程的 video_width / video_height）：
+ * libass 用它当 storage size，画布的 CSS 宽高比必须与之一致，否则 JASSUB 会
+ * 按这个比例做信箱式内缩、画出来的字幕会被拉伸。
+ */
+export interface CanvasOverlayOptions extends OverlayCommonOptions {
+  canvas: HTMLCanvasElement
+  width: number
+  height: number
+  video?: undefined
+}
+
+export type OverlayOptions = VideoOverlayOptions | CanvasOverlayOptions
+
+/** 实例挂在哪里。画布模式没有视频元素，帧元数据只能由调用方给的时钟合成。 */
+type Mount =
+  | { kind: 'video'; video: HTMLVideoElement }
+  | { kind: 'canvas'; width: number; height: number }
 
 export function describeError(e: unknown): string {
   if (e instanceof Error) return e.message
@@ -552,10 +592,7 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, message: string):
 }
 
 /**
- * 挂在 <video> 上的字幕层。
- *
- * JASSUB 会自己建一个绝对定位的 canvas 插在 <video> 之后，并用 ResizeObserver
- * 跟随视频尺寸，所以父容器必须是 position: relative。
+ * 一层 libass 字幕。两种挂法见 `VideoOverlayOptions` / `CanvasOverlayOptions`。
  */
 export class SubtitleOverlay {
   private destroyed = false
@@ -564,6 +601,12 @@ export class SubtitleOverlay {
   private flushing = false
   private scheduled = 0
   private lastFrame: FrameMeta | null = null
+  /** 画布模式的播放位置（秒）。视频模式下不用它，那边的时钟是 rVFC 的 mediaTime */
+  private clockSec = 0
+  /** 正在绘制中；并发进来的请求只登记意图，见 `paint` */
+  private painting = false
+  /** 绘制期间又来了一次强制重绘，空闲后必须补上 */
+  private pendingForce = false
 
   /** 最近一次字幕更新的耗时（毫秒），用于判断增量接口够不够快 */
   lastUpdateMs = 0
@@ -572,7 +615,7 @@ export class SubtitleOverlay {
 
   private constructor(
     private readonly instance: JASSUB,
-    private readonly video: HTMLVideoElement,
+    private readonly mount: Mount,
     private parsed: ParsedAss,
     readonly warnings: PreviewIssue[],
   ) {}
@@ -595,21 +638,38 @@ export class SubtitleOverlay {
       })
     }
 
+    const common = {
+      ...JASSUB_ASSETS,
+      subContent: opts.ass,
+      // 预加载：worker 在建轨之前就把字体灌进 libass，避免首帧无字形
+      fonts: fonts.map((f) => f.data),
+      ...(fallback ? { defaultFont: fallback.family } : {}),
+      // 不查系统字体（Chromium 独有、需用户授权、破坏渲染确定性），
+      // 也不联网拉 Google Fonts（会让预览与导出各用各的字体）
+      queryFonts: false as const,
+    }
+
     let instance: JASSUB
     try {
-      instance = new JASSUB({
-        ...JASSUB_ASSETS,
-        video: opts.video,
-        subContent: opts.ass,
-        // 预加载：worker 在建轨之前就把字体灌进 libass，避免首帧无字形
-        fonts: fonts.map((f) => f.data),
-        ...(fallback ? { defaultFont: fallback.family } : {}),
-        // 不查系统字体（Chromium 独有、需用户授权、破坏渲染确定性），
-        // 也不联网拉 Google Fonts（会让预览与导出各用各的字体）
-        queryFonts: false,
-      })
+      instance = opts.video
+        ? new JASSUB({ ...common, video: opts.video })
+        : new JASSUB({ ...common, canvas: opts.canvas })
     } catch (e) {
       throw new Error(`JASSUB 初始化失败：${describeError(e)}`)
+    }
+
+    if (!opts.video) {
+      /*
+       * 画布模式必须先把画面基准尺寸告诉实例，**否则第一次 ResizeObserver 回调会算出 NaN**：
+       * JASSUB 的 `resize()` 用 `_videoWidth / _videoHeight` 当宽高比，而它们初值是 0，
+       * 0/0 = NaN 一路传染到 `_resizeCanvas(NaN, NaN, …)`。构造函数里 RO 回调 `await this.ready`
+       * 之后才跑，所以这里同步赋值必定先于它。
+       *
+       * 这两个字段在 jassub 的 .d.ts 里是公开成员（`_videoWidth: number`），
+       * 上游哪天改掉会在 tsc 阶段直接报错，不会静默失效。
+       */
+      instance._videoWidth = opts.width
+      instance._videoHeight = opts.height
     }
 
     try {
@@ -626,7 +686,10 @@ export class SubtitleOverlay {
       throw e instanceof Error ? e : new Error(describeError(e))
     }
 
-    return new SubtitleOverlay(instance, opts.video, parseAss(opts.ass), warnings)
+    const mount: Mount = opts.video
+      ? { kind: 'video', video: opts.video }
+      : { kind: 'canvas', width: opts.width, height: opts.height }
+    return new SubtitleOverlay(instance, mount, parseAss(opts.ass), warnings)
   }
 
   /** 播放循环每帧回调进来，供暂停时重绘复用最后一帧的元数据 */
@@ -729,18 +792,71 @@ export class SubtitleOverlay {
    * 暂停时改了字幕不显式重绘，画面就一直是旧的（CLAUDE.md §5.9）。
    */
   async repaint(): Promise<void> {
+    await this.paint(true)
+  }
+
+  /**
+   * 画布模式：把字幕画到指定时刻。
+   *
+   * 这是画布模式**唯一的时钟入口** —— 没有 `<video>` 就没有 rVFC，libass 不会
+   * 自己动。播放一句时逐帧调它（`force = false`，时间变了 libass 自然重排）；
+   * 改了样式、换了句子、拖了进度条则要 `force = true` 强制重绘，
+   * 否则时间没变、画面就一直是旧的（CLAUDE.md §5.9）。
+   *
+   * 视频模式下调用无效果：那边的时间由播放器决定，凭空改时钟只会和 rVFC 打架。
+   */
+  async renderAt(ms: number, force = false): Promise<void> {
+    if (this.mount.kind !== 'canvas') return
+    this.clockSec = Math.max(0, ms / 1000)
+    await this.paint(force)
+  }
+
+  /**
+   * 真正下笔的地方，**自己排队，绝不并发调用 `manualRender`**。
+   *
+   * JASSUB 对并发绘制的处理是"忙就丢，闲下来补一帧"，而补的那一帧
+   * `repaint` 恒为 false（jassub.js 的 `_demandRender`：busy → `_skipped = true`，
+   * 之后 `await this._demandRender()` 不带参数）。于是**强制重绘会被静默降级**：
+   * 改完样式那次 `repaint()` 撞上正在进行的绘制，画面就停在旧的一帧上，
+   * 表现为"改了看不见"，而且时序相关、时好时坏。
+   *
+   * 这里只保留最后一次请求，并把"欠一次强制重绘"记下来在空闲时补上：
+   * 播放时丢中间帧是对的（下一帧马上就来），但强制重绘一次都不能丢。
+   */
+  private async paint(force: boolean): Promise<void> {
     if (this.destroyed) return
-    const meta = this.frameMeta()
-    if (!meta) return
+    if (this.painting) {
+      this.pendingForce ||= force
+      return
+    }
+    this.painting = true
     try {
-      await this.instance.manualRender(meta, true)
+      let wanted = force
+      do {
+        wanted = wanted || this.pendingForce
+        this.pendingForce = false
+        const meta = this.frameMeta()
+        if (!meta) return
+        await this.instance.manualRender(meta, wanted)
+        wanted = false
+      } while (this.pendingForce && !this.destroyed)
     } catch {
       /* 销毁竞态，忽略 */
+    } finally {
+      this.painting = false
     }
   }
 
   private frameMeta(): FrameMeta | null {
-    const v = this.video
+    if (this.mount.kind === 'canvas') {
+      return {
+        mediaTime: this.clockSec,
+        expectedDisplayTime: performance.now(),
+        width: this.mount.width,
+        height: this.mount.height,
+      }
+    }
+    const v = this.mount.video
     if (!v.videoWidth || !v.videoHeight) return null
     // 优先复用真实帧的元数据；还没有帧时按当前播放位置合成一个
     if (this.lastFrame && this.lastFrame.width === v.videoWidth) return { ...this.lastFrame }
