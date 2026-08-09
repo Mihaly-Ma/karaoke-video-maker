@@ -38,6 +38,12 @@
  * **意图**写回 store。波形层曾经自带一份时钟并把结果写回 store，与预览层互相追时间，
  * 表现为播放头抖动 —— 不要恢复那条路。
  *
+ * **走带控件（播放/暂停按钮、时钟、进度条）也不在这里**：docs/ui-redesign.md §五
+ * 要求同一时刻界面上只存在一个 transport，而对轴舞台的那一个在 `Preview` 上 ——
+ * 它是完整走带（播放 + 时钟 + 拖动进度 + 原声/伴奏 + 音量），也正是执行者本身。
+ * 这里只保留预览层没有、但打轴离不开的**变速**（§5.10：0.5~0.75x 打点）。
+ * 空格键仍然由本组件独占，见下方 `keyRef`。
+ *
  * ## 跟手
  *
  * 编辑要往后端发请求，因此拖动全程只改本地预览状态，**松手才提交**；
@@ -46,11 +52,23 @@
  * 后到的旧响应会把新改动覆盖掉。
  */
 
+import {
+  FieldTimeOutlined,
+  LinkOutlined,
+  LockOutlined,
+  MergeCellsOutlined,
+  RedoOutlined,
+  ScissorOutlined,
+  UndoOutlined,
+  ZoomInOutlined,
+  ZoomOutOutlined,
+} from '@ant-design/icons'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
 
 import * as api from '../api/client'
 import type { Line, Token } from '../api/types'
+import { t } from '../i18n'
 import { locate, useProject } from '../state/projectStore'
 import {
   buildTicks,
@@ -96,9 +114,11 @@ const NUDGE_FRAME_MS = 33
 const NUDGE_FINE_MS = 1
 
 interface SourceMeta {
-  label: string
+  /** 文案键。存键而不是存句子：模块级常量在 import 时求值，存句子等于把语言钉死 */
+  labelKey: string
+  hintKey: string
+  /** 全部取自 styles.css 的 `--src-*` 语义色，是界面上唯一允许的高饱和用法（§7.4） */
   color: string
-  hint: string
   /** 斜纹填充，用来标「算出来的、不可信的」 */
   hatch: boolean
   /** 虚线边框，用来标「这里还是空的」 */
@@ -108,73 +128,86 @@ interface SourceMeta {
 /**
  * `unset` 排在最前面：它不是一种「时间来源」，而是**还没有时间**。
  * 纯文本导入后整首歌都是这个状态，正是 tap-to-time 的目标，
- * 所以给中性灰 + 虚线边框（看着就像个待填的空框），图例里还带未打轴字数。
- * 不要复用 `manual` 的紫色 —— 那表示用户确实调过，混用会让人以为这个 0 是他认可的。
+ * 所以给弱文字灰 + 虚线边框（看着就像个待填的空框），图例里还带未打轴字数。
+ *
+ * 另外四种**必须**分别用 `--src-provider` / `--src-aligned` / `--src-interp` /
+ * `--src-manual`：这四个 token 是全应用共享的来源语义色，注音舞台、歌词舞台读的
+ * 是同一份。这里另起一套色相，就等于同一个「插值」在两个界面上是两个颜色。
+ * 也不要给 `unset` 复用 `manual` 的紫色 —— 那表示用户确实调过，
+ * 混用会让人以为这个 0 是他认可的。
  */
 const SOURCE_META: Record<Token['timing_source'], SourceMeta> = {
   unset: {
-    label: '未打轴',
-    color: '#94a3b8',
-    hint: '尚未打轴，等待手工设定：这些字还没有真实时间，请按 T 进入打轴模式逐字打点',
+    labelKey: 'align.sourceUnset',
+    color: 'var(--fg-3)',
+    hintKey: 'align.hintUnset',
     hatch: false,
     dashed: true,
   },
   provider: {
-    label: '歌词源',
-    color: '#3b82f6',
-    hint: '歌词源自带的逐字轴（QRC/KRC），通常最可信',
+    labelKey: 'source.provider',
+    color: 'var(--src-provider)',
+    hintKey: 'align.hintProvider',
     hatch: false,
     dashed: false,
   },
   aligned: {
-    label: '自动对齐',
-    color: '#22c55e',
-    hint: '强制对齐算出来的，误差预期 50–150ms',
+    labelKey: 'source.aligned',
+    color: 'var(--src-aligned)',
+    hintKey: 'align.hintAligned',
     hatch: false,
     dashed: false,
   },
   interpolated: {
-    label: '插值推算',
-    color: '#f59e0b',
-    hint: '由更粗的粒度等分推算而来，最不可信，请优先复核',
+    labelKey: 'source.interpolated',
+    color: 'var(--src-interp)',
+    hintKey: 'align.hintInterpolated',
     hatch: true,
     dashed: false,
   },
   manual: {
-    label: '手工',
-    color: '#a855f7',
-    hint: '你自己改过的，自动重算不会覆盖它',
+    labelKey: 'source.manual',
+    color: 'var(--src-manual)',
+    hintKey: 'align.hintManual',
     hatch: false,
     dashed: false,
   },
 }
 
+/**
+ * 本组件的局部 CSS。
+ *
+ * **不再重复定义按钮/输入框的皮肤** —— `styles.css` 已经给 `button` / `select` /
+ * `input` 定了一套，这里只留时间轴独有的东西（绝对定位的块、拖拽把手、脉冲动画）。
+ * 原先那份 `.kvm-tl button { background:#243244 … }` 正是 docs/ui-redesign.md §六点五
+ * 说的「六套并行样式系统」之一：它让工具条按钮和外壳按钮长得不一样，且各自维护。
+ */
 const CSS = `
-.kvm-tl { color:#dbe4ee; font:12px/1.5 system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif; user-select:none; }
-.kvm-tl button { font:inherit; color:#dbe4ee; background:#243244; border:1px solid #3b4d64;
-  border-radius:5px; padding:3px 9px; cursor:pointer; }
-.kvm-tl button:hover:not(:disabled) { background:#2f4157; }
-.kvm-tl button:disabled { opacity:.38; cursor:default; }
-.kvm-tl button[data-on="1"] { background:#2563eb; border-color:#3b82f6; color:#fff; }
-.kvm-tl input[type=number] { font:inherit; color:#dbe4ee; background:#1a2432; border:1px solid #3b4d64;
-  border-radius:5px; padding:2px 6px; width:74px; }
-.kvm-tl-tok { position:absolute; box-sizing:border-box; border-radius:3px; overflow:hidden;
+.kvm-tl { color:var(--fg); font-size:var(--fs-sm); user-select:none; }
+/* 只覆盖尺寸与图标对齐，配色一律继承 styles.css 的 button 规则 */
+.kvm-tl button { display:inline-flex; align-items:center; gap:var(--sp-1);
+  padding:var(--sp-1) var(--sp-2); border-radius:var(--r-sm); }
+.kvm-tl button[data-on="1"] { background:var(--accent-weak); border-color:var(--accent); color:var(--fg); }
+.kvm-tl select { padding:2px var(--sp-1); border-radius:var(--r-sm); }
+.kvm-tl input[type=number] { width:74px; padding:2px var(--sp-2); border-radius:var(--r-sm);
+  font-variant-numeric:tabular-nums; }
+.kvm-tl-tok { position:absolute; box-sizing:border-box; border-radius:var(--r-sm); overflow:hidden;
   cursor:grab; display:flex; align-items:center; justify-content:center; }
 .kvm-tl-tok:hover { filter:brightness(1.3); }
 .kvm-tl-tok:active { cursor:grabbing; }
 .kvm-tl-hnd { position:absolute; top:0; bottom:0; width:9px; cursor:ew-resize; z-index:2; }
-.kvm-tl-hnd:hover { background:rgba(255,255,255,.45); }
-.kvm-tl-line { position:absolute; box-sizing:border-box; border-radius:3px; cursor:grab;
-  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; padding:0 4px; }
+.kvm-tl-hnd:hover { background:color-mix(in srgb, var(--fg) 45%, transparent); }
+.kvm-tl-line { position:absolute; box-sizing:border-box; border-radius:var(--r-sm); cursor:grab;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; padding:0 var(--sp-1); }
 .kvm-tl-line:hover { filter:brightness(1.3); }
 .kvm-tl-next { animation:kvm-tl-pulse 1.1s ease-in-out infinite; }
 @keyframes kvm-tl-pulse {
-  0%,100% { box-shadow:0 0 0 0 rgba(255,209,71,.85); }
-  50%     { box-shadow:0 0 0 7px rgba(255,209,71,0); }
+  0%,100% { box-shadow:0 0 0 0 color-mix(in srgb, var(--warn) 85%, transparent); }
+  50%     { box-shadow:0 0 0 var(--sp-2) transparent; }
 }
-.kvm-tl-chip { border:1px solid #3b4d64; background:#1d2836; border-radius:6px;
-  padding:4px 8px; min-width:32px; text-align:center; cursor:pointer; }
-.kvm-tl-chip:hover { background:#2a3a4d; }
+.kvm-tl-chip { border:var(--hairline-strong); background:var(--bg-surface); border-radius:var(--r-md);
+  padding:var(--sp-1) var(--sp-2); min-width:32px; text-align:center; cursor:pointer; }
+.kvm-tl-chip:hover { background:var(--bg-raise); }
 `
 
 // ---------------------------------------------------------------- 小工具
@@ -216,16 +249,24 @@ function lineText(line: Line): string {
 }
 
 /**
+ * 半透明化。来源色现在是 `var(--src-*)`，拼 `#rrggbb` + alpha 后缀那一套失效了
+ * （变量的值在 JS 侧不可见），改用 `color-mix` —— styles.css 本身也用它。
+ */
+const tint = (color: string, pct: number): string =>
+  `color-mix(in srgb, ${color} ${pct}%, transparent)`
+
+/**
  * token 底色。插值推算加斜纹：只靠色相区分，扫一眼很容易漏掉最不可信的那一类；
  * 未打轴的填色压到最淡，配上虚线边框读起来就是「一个还没填的空框」。
+ * 斜纹的 5px/10px 是图案几何，不是间距，因此不走 `--sp-*`。
  */
 function blockBg(meta: SourceMeta, drafted: boolean): string {
   const { color } = meta
   if (meta.hatch && !drafted) {
-    return `repeating-linear-gradient(45deg, ${color}66 0 5px, ${color}1f 5px 10px)`
+    return `repeating-linear-gradient(45deg, ${tint(color, 40)} 0 5px, ${tint(color, 12)} 5px 10px)`
   }
-  if (meta.dashed && !drafted) return `${color}1f`
-  return `${color}${drafted ? '77' : '55'}`
+  if (meta.dashed && !drafted) return tint(color, 12)
+  return tint(color, drafted ? 46 : 32)
 }
 
 // ---------------------------------------------------------------- 组件
@@ -1061,9 +1102,9 @@ export function Timeline() {
 
   if (!project) {
     return (
-      <div className="kvm-tl" style={{ padding: 16, color: '#8ea2b8' }}>
+      <div className="kvm-tl" style={{ padding: 'var(--sp-4)', color: 'var(--fg-2)' }}>
         <style>{CSS}</style>
-        尚未打开工程。
+        {t('align.noProject')}
       </div>
     )
   }
@@ -1090,11 +1131,33 @@ export function Timeline() {
 
       {/* ------------------------------------------------ 工具栏 */}
       <div style={S.bar}>
-        {/* 播放与变速都只是意图：真正在放的是预览层（唯一时钟，CLAUDE.md D15） */}
-        <button onClick={() => setPlaying(!playing)}>{playing ? '⏸ 暂停' : '▶ 播放'}</button>
-        <label style={S.dim} title="变速试听由预览层执行；Web Audio 变速会同时改变音高">
-          速率
-          <select value={rate} onChange={(e) => setRate(Number(e.target.value))} style={S.select}>
+        {/*
+         * tap-to-time 排在工具条第一位（CLAUDE.md §2.5：它是一等公民，不是降级方案）。
+         * 播放/暂停按钮此前也在这一排，已经去掉 —— 走带归 Preview，见文件头。
+         */}
+        <button
+          data-role="tap"
+          data-on={tapMode ? '1' : '0'}
+          onClick={() => (tapMode ? exitTapMode() : enterTapMode())}
+          title={tapMode ? t('align.tapExit') : t('align.tapEnter')}
+        >
+          <FieldTimeOutlined />
+          {tapMode ? t('align.tapOn') : t('align.tap')}
+        </button>
+        {/* 还剩多少字没打轴要能一眼看到：它直接决定「这首歌还差多远能用」，
+            所以贴着打轴按钮放，而不是塞进底部图例 */}
+        {unsetCount > 0 && (
+          <span style={S.todo} className="num">
+            {t('align.untimed', { n: unsetCount, total: totalTokens })}
+          </span>
+        )}
+
+        <span style={S.sep} />
+
+        {/* 变速是打点的必需品（§5.10 建议 0.5~0.75x），且预览层没有这个控件 */}
+        <label style={S.dim} title={t('align.rateHint')}>
+          {t('align.rate')}
+          <select value={rate} onChange={(e) => setRate(Number(e.target.value))}>
             <option value={0.5}>0.5x</option>
             <option value={0.75}>0.75x</option>
             <option value={1}>1.0x</option>
@@ -1103,34 +1166,20 @@ export function Timeline() {
         <button
           data-on={follow ? '1' : '0'}
           onClick={() => setFollow((v) => !v)}
-          title="播放时自动跟随播放头滚动"
+          title={t('align.followHint')}
         >
-          跟随
+          {t('align.follow')}
         </button>
-
-        <span style={S.sep} />
-
-        <button
-          data-on={tapMode ? '1' : '0'}
-          onClick={() => (tapMode ? exitTapMode() : enterTapMode())}
-        >
-          {tapMode ? '● 打轴中（Esc 退出）' : '✚ 手工打轴 (T)'}
-        </button>
-        {/* 还剩多少字没打轴要能一眼看到：它直接决定「这首歌还差多远能用」，
-            所以贴着打轴按钮放，而不是塞进底部图例 */}
-        {unsetCount > 0 && (
-          <span style={S.todo} title="这些字还没有真实时间，等待手工设定">
-            尚未打轴 {unsetCount}/{totalTokens} 字
-          </span>
-        )}
 
         <span style={S.sep} />
 
         <button onClick={() => void enqueue(undo)} disabled={!canUndo} title="Cmd/Ctrl+Z">
-          ↶ 撤销
+          <UndoOutlined />
+          {t('common.undo')}
         </button>
         <button onClick={() => void enqueue(redo)} disabled={!canRedo} title="Cmd/Ctrl+Shift+Z">
-          ↷ 重做
+          <RedoOutlined />
+          {t('common.redo')}
         </button>
 
         <span style={S.sep} />
@@ -1138,12 +1187,18 @@ export function Timeline() {
         <button
           onClick={doSplit}
           disabled={selection.kind !== 'token' || selection.tokenIndex <= 0}
-          title="在选中的字之前把这一行拆成两行"
+          title={t('align.splitHint')}
         >
-          ✂ 拆行
+          <ScissorOutlined />
+          {t('align.split')}
         </button>
-        <button onClick={doMerge} disabled={selection.kind === 'none'} title="把选中行与下一行合并">
-          ⇥ 合并行
+        <button
+          onClick={doMerge}
+          disabled={selection.kind === 'none'}
+          title={t('align.mergeHint')}
+        >
+          <MergeCellsOutlined />
+          {t('align.merge')}
         </button>
 
         <span style={S.sep} />
@@ -1151,31 +1206,31 @@ export function Timeline() {
         <button
           data-on={linkNeighbor ? '1' : '0'}
           onClick={() => setLinkNeighbor((v) => !v)}
-          title="开启后拖边界会同时改相邻的字，保持首尾相接；关闭则只改当前这个字"
+          title={t('align.linkHint')}
         >
-          边界联动
+          <LinkOutlined />
+          {t('align.link')}
         </button>
 
         <span style={{ marginLeft: 'auto' }} />
 
         <label style={S.dim}>
-          试听
+          {t('align.audio')}
           <select
             value={audioMode}
             onChange={(e) =>
               setAudioMode(e.target.value === 'instrumental' ? 'instrumental' : 'original')
             }
-            style={S.select}
           >
-            <option value="instrumental">伴奏</option>
-            <option value="original">原声</option>
+            <option value="instrumental">{t('align.audioInstrumental')}</option>
+            <option value="original">{t('align.audioOriginal')}</option>
           </select>
         </label>
-        <button onClick={() => zoomBy(-1)} title="缩小 (-)">
-          −
+        <button onClick={() => zoomBy(-1)} title={t('align.zoomOut')} aria-label={t('align.zoomOut')}>
+          <ZoomOutOutlined />
         </button>
-        <button onClick={() => zoomBy(1)} title="放大 (+)">
-          ＋
+        <button onClick={() => zoomBy(1)} title={t('align.zoomIn')} aria-label={t('align.zoomIn')}>
+          <ZoomInOutlined />
         </button>
         <button
           onClick={() => {
@@ -1183,17 +1238,23 @@ export function Timeline() {
             waveRef.current?.setScrollPx(0)
             handleScrollPx(0)
           }}
-          title="缩到整曲铺满"
+          title={t('align.fitHint')}
         >
-          整曲
+          {t('align.fit')}
         </button>
       </div>
 
       {/* ------------------------------------------------ 整体调轴 */}
       <div style={S.bar}>
-        <strong style={{ color: '#9fb4cc' }}>整体偏移</strong>
-        <button onClick={() => nudgeOffset(-100)}>−100ms</button>
-        <button onClick={() => nudgeOffset(-10)}>−10ms</button>
+        <strong style={{ color: 'var(--fg-2)' }} title={t('align.offsetHint')}>
+          {t('align.offset')}
+        </strong>
+        <button className="num" onClick={() => nudgeOffset(-100)}>
+          −100ms
+        </button>
+        <button className="num" onClick={() => nudgeOffset(-10)}>
+          −10ms
+        </button>
         <input
           type="range"
           min={-10000}
@@ -1206,8 +1267,12 @@ export function Timeline() {
           onBlur={commitOffset}
           style={{ flex: '1 1 240px', maxWidth: 420 }}
         />
-        <button onClick={() => nudgeOffset(10)}>+10ms</button>
-        <button onClick={() => nudgeOffset(100)}>+100ms</button>
+        <button className="num" onClick={() => nudgeOffset(10)}>
+          +10ms
+        </button>
+        <button className="num" onClick={() => nudgeOffset(100)}>
+          +100ms
+        </button>
         <input
           type="number"
           step={10}
@@ -1223,29 +1288,30 @@ export function Timeline() {
           onClick={() => nudgeOffset(-project.global_offset_ms)}
           disabled={!project.global_offset_ms}
         >
-          归零
+          {t('align.reset')}
         </button>
-        <span style={S.dim}>整体偏移只改这一个数，不动逐字时间，随时可以归零重来</span>
       </div>
 
       {/* ------------------------------------------------ 打轴面板 */}
       {tapMode && (
         <div style={S.tapPanel}>
           <div style={S.tapHeadRow}>
-            <span style={{ color: '#ffd147', fontWeight: 600 }}>打轴中</span>
-            <span style={S.dim}>
-              空格/回车 = 打下一个字 ・ Shift+空格 = 结束当前句 ・ 退格 = 回退上一个点 ・
-              点任意字可从那里开始
-            </span>
+            <span style={{ color: 'var(--warn)', fontWeight: 600 }}>{t('align.tapOn')}</span>
+            <span style={S.dim}>{t('align.tapKeys')}</span>
             <span style={{ marginLeft: 'auto' }} />
-            <span style={S.dim}>
-              本次已打 {tappedCount} 字 ・ 进度 {Math.min(tapPos, flat.length)}/{flat.length}
+            <span style={S.dim} className="num">
+              {t('align.tapCount', { n: tappedCount })} ・{' '}
+              {t('align.tapProgress', {
+                pos: Math.min(tapPos, flat.length),
+                total: flat.length,
+              })}
             </span>
             <button onClick={doTapUndo} disabled={!tapStackLen}>
-              ↶ 回退一个点
+              <UndoOutlined />
+              {t('align.tapBack')}
             </button>
             <button onClick={() => void commitTapDraft()} disabled={!tappedCount}>
-              提交
+              {t('align.tapCommit')}
             </button>
           </div>
 
@@ -1263,13 +1329,30 @@ export function Timeline() {
                       className={`kvm-tl-chip${isNext ? ' kvm-tl-next' : ''}`}
                       onClick={() => pos >= 0 && moveTapCursor(pos)}
                       style={{
-                        borderColor: isNext ? '#ffd147' : d ? SOURCE_META.manual.color : '#3b4d64',
-                        background: isNext ? '#3a3115' : d ? '#2b2136' : '#1d2836',
+                        // 「下一个要打的字」用 warn 提示色；已打进草稿的按 manual 语义色，
+                        // 与词轨上同一个字的配色保持一致
+                        borderColor: isNext
+                          ? 'var(--warn)'
+                          : d
+                            ? SOURCE_META.manual.color
+                            : 'var(--stroke-strong)',
+                        background: isNext
+                          ? `color-mix(in srgb, var(--warn) 18%, var(--bg-surface))`
+                          : d
+                            ? `color-mix(in srgb, ${SOURCE_META.manual.color} 18%, var(--bg-surface))`
+                            : 'var(--bg-surface)',
                         opacity: d || isNext ? 1 : 0.72,
                       }}
                     >
-                      <div style={{ fontSize: isNext ? 22 : 16, lineHeight: 1.2 }}>{tk.text}</div>
-                      <div style={{ fontSize: 10, color: '#8ea2b8' }}>
+                      <div
+                        style={{
+                          fontSize: isNext ? 'var(--fs-2xl)' : 'var(--fs-lg)',
+                          lineHeight: 1.2,
+                        }}
+                      >
+                        {tk.text}
+                      </div>
+                      <div className="num" style={{ fontSize: 'var(--fs-xs)', color: 'var(--fg-3)' }}>
                         {d ? formatMs(d.start, true) : '—'}
                       </div>
                     </div>
@@ -1277,30 +1360,31 @@ export function Timeline() {
                 })}
               </div>
               {tapNextLine && (
-                <div style={{ ...S.dim, marginTop: 2 }}>下一句：{lineText(tapNextLine)}</div>
+                <div style={{ ...S.dim, marginTop: 2 }}>
+                  {t('align.tapNextLine', { text: lineText(tapNextLine) })}
+                </div>
               )}
             </>
           ) : (
-            <div style={S.dim}>已经打到最后一个字，按 Esc 退出并提交。</div>
+            <div style={S.dim}>{t('align.tapEnd')}</div>
           )}
 
           {status.kind !== 'ready' && (
-            <div style={{ color: '#f59e0b' }}>
-              音频尚未就绪，打点取不到准确时间 —— 请先导入音频，或等待分离完成。
-            </div>
+            <div style={{ color: 'var(--warn)' }}>{t('align.tapNoAudio')}</div>
           )}
         </div>
       )}
 
       {commit.total > 0 && (
-        <div style={{ ...S.bar, color: '#ffd147' }}>
-          正在提交打轴结果 {commit.done}/{commit.total} …
+        <div className="num" style={{ ...S.bar, color: 'var(--warn)' }}>
+          {t('align.committing', { done: commit.done, total: commit.total })}
         </div>
       )}
 
       {/* ------------------------------------------------ 刻度 + 波形 + 覆盖层 */}
       <div
         ref={hostRef}
+        data-role="wave-host"
         style={S.host}
         onPointerDown={(e) => {
           if (e.button === 0) seekAt(e.clientX)
@@ -1316,7 +1400,7 @@ export function Timeline() {
                   left: tk.px,
                   bottom: 0,
                   height: tk.major ? 10 : 5,
-                  borderLeft: `1px solid ${tk.major ? '#5a748f' : '#33465c'}`,
+                  borderLeft: `1px solid ${tk.major ? 'var(--stroke-strong)' : 'var(--stroke)'}`,
                 }}
               >
                 {tk.label && <span style={S.tickLabel}>{tk.label}</span>}
@@ -1325,7 +1409,7 @@ export function Timeline() {
           </div>
         </div>
 
-        <div style={{ position: 'relative', height: WAVE_H, background: '#111a24' }}>
+        <div style={{ position: 'relative', height: WAVE_H, background: 'var(--bg-canvas)' }}>
           <Waveform
             ref={waveRef}
             sources={sources}
@@ -1347,10 +1431,10 @@ export function Timeline() {
           {status.kind !== 'ready' && (
             <div style={S.waveNotice}>
               {status.kind === 'loading'
-                ? `波形加载中 ${Math.round(status.percent)}%`
+                ? t('align.waveLoading', { percent: Math.round(status.percent) })
                 : status.kind === 'error'
-                  ? `${status.message} —— 仍可继续调轴，只是看不到波形`
-                  : '尚未导入音频'}
+                  ? t('align.waveError', { message: status.message })
+                  : t('align.waveNone')}
             </div>
           )}
 
@@ -1387,18 +1471,18 @@ export function Timeline() {
                       top: row * LINE_ROW_H,
                       height: LINE_ROW_H - 2,
                       lineHeight: `${LINE_ROW_H - 2}px`,
-                      fontSize: 10,
+                      fontSize: 'var(--fs-xs)',
                       background: line.is_metadata
-                        ? 'rgba(140,140,160,.30)'
+                        ? tint('var(--fg-3)', 30)
                         : isActive
-                          ? 'rgba(59,130,246,.46)'
-                          : 'rgba(70,97,127,.34)',
-                      border: `1px solid ${isActive ? '#7fb2ff' : 'rgba(160,190,220,.35)'}`,
-                      color: line.locked ? '#ffd147' : '#dbe4ee',
+                          ? tint('var(--accent)', 40)
+                          : tint('var(--fg-2)', 22),
+                      border: `1px solid ${isActive ? 'var(--accent)' : 'var(--stroke-strong)'}`,
+                      color: line.locked ? 'var(--warn)' : 'var(--fg)',
                       pointerEvents: 'auto',
                     }}
                   >
-                    {line.locked ? '🔒' : ''}
+                    {line.locked && <LockOutlined style={S.lineLock} />}
                     {lineText(line)}
                   </div>
                 )
@@ -1413,7 +1497,7 @@ export function Timeline() {
                     left: scale.msToPx(toAudioMs(effTiming(activeLine, i).start, globalOffset)),
                     top: LINES_STRIP_H,
                     height: TOKEN_STRIP_TOP - LINES_STRIP_H,
-                    borderLeft: '1px dashed rgba(180,205,230,.45)',
+                    borderLeft: `1px dashed ${tint('var(--fg-2)', 55)}`,
                     pointerEvents: 'none',
                   }}
                 />
@@ -1421,7 +1505,8 @@ export function Timeline() {
 
               {/* 词轨（单词级）：只画当前行 —— 一首歌几百个音节全实例化会卡死（§5.10） */}
               {activeLine?.tokens.map((tk, i) => {
-                const t = effTiming(activeLine, i)
+                // 变量名不能再叫 t：那会遮住 i18n 的 t()，本行的 title 正要用它
+                const tm = effTiming(activeLine, i)
                 const meta = SOURCE_META[tk.timing_source]
                 const drafted = !!tapDraft[tokenKey(activeLine.id, i)]
                 const isSel =
@@ -1436,24 +1521,25 @@ export function Timeline() {
                   <div
                     key={i}
                     className={`kvm-tl-tok${isNext ? ' kvm-tl-next' : ''}`}
-                    title={`${tk.text}｜${meta.label}：${meta.hint}\n起点 ${formatMs(t.start, true)}　时长 ${Math.round(t.dur)}ms${
-                      tk.locked_timing ? '\n🔒 已锁定，自动重算不会覆盖' : ''
+                    data-source={drafted ? 'manual' : tk.timing_source}
+                    title={`${tk.text}｜${t(meta.labelKey)}：${t(meta.hintKey)}\n${formatMs(tm.start, true)} + ${Math.round(tm.dur)}ms${
+                      tk.locked_timing ? `\n${t('align.locked')}` : ''
                     }`}
                     onPointerDown={(e) => onTokenPointerDown(e, activeLine, i, 'token-move')}
                     style={{
-                      left: scale.msToPx(toAudioMs(t.start, globalOffset)),
-                      width: scale.durToPx(t.dur, 6),
+                      left: scale.msToPx(toAudioMs(tm.start, globalOffset)),
+                      width: scale.durToPx(tm.dur, 6),
                       top: TOKEN_STRIP_TOP,
                       height: TOKEN_STRIP_H,
                       background: blockBg(shown, drafted),
                       border: `${isSel ? 2 : 1}px ${shown.dashed ? 'dashed' : 'solid'} ${
-                        isSel ? '#ffffff' : shown.color
+                        isSel ? 'var(--fg)' : shown.color
                       }`,
                       pointerEvents: 'auto',
                     }}
                   >
                     <span style={S.tokText}>{tk.text}</span>
-                    {tk.locked_timing && <span style={S.lock}>🔒</span>}
+                    {tk.locked_timing && <LockOutlined style={S.lock} />}
                     <div
                       className="kvm-tl-hnd"
                       style={{ left: 0 }}
@@ -1498,8 +1584,8 @@ export function Timeline() {
                   width: `${Math.max(0.15, (b.dur / durationMs) * 100)}%`,
                   top: 6,
                   height: OVERVIEW_H - 12,
-                  background: l.id === activeLineId ? '#7fb2ff' : 'rgba(150,180,210,.5)',
-                  borderRadius: 2,
+                  background: l.id === activeLineId ? 'var(--accent)' : tint('var(--fg-2)', 50),
+                  borderRadius: 'var(--r-sm)',
                 }}
               />
             )
@@ -1510,39 +1596,51 @@ export function Timeline() {
 
       {/* ------------------------------------------------ 图例 + 状态 */}
       <div style={S.bar}>
-        <span style={S.dim}>时间来源：</span>
+        <span style={S.dim}>{t('align.sources')}</span>
         {(Object.keys(SOURCE_META) as Array<Token['timing_source']>).map((k) => (
-          <span key={k} title={SOURCE_META[k].hint} style={S.legendItem}>
+          <span key={k} title={t(SOURCE_META[k].hintKey)} style={S.legendItem}>
+            {/* data-source 既是给自动化测试的抓手，也让「这一格用的是哪个 --src-* 」
+                在 devtools 里一眼可查 */}
             <span
+              data-source={k}
               style={{
                 width: 14,
                 height: 10,
-                borderRadius: 2,
+                borderRadius: 'var(--r-sm)',
                 border: `1px ${SOURCE_META[k].dashed ? 'dashed' : 'solid'} ${SOURCE_META[k].color}`,
                 background: blockBg(SOURCE_META[k], false),
                 display: 'inline-block',
               }}
             />
-            {SOURCE_META[k].label}
+            {t(SOURCE_META[k].labelKey)}
           </span>
         ))}
-        <span style={S.dim}>🔒 = 已锁定，自动重算不会覆盖</span>
+        <span style={S.dim}>
+          <LockOutlined />
+          {t('align.locked')}
+        </span>
 
         <span style={{ marginLeft: 'auto' }} />
         {selTok ? (
-          <span style={S.dim}>
-            选中「{selTok.text}」 起点 {formatMs(selTok.start_ms, true)} ・ 时长{' '}
-            {Math.round(selTok.dur_ms)}ms ・ 来源 {SOURCE_META[selTok.timing_source].label}
-            {selTok.locked_timing ? ' ・ 已锁定' : ''}
+          <span style={S.dim} className="num">
+            {t('align.selected', {
+              text: selTok.text,
+              start: formatMs(selTok.start_ms, true),
+              dur: Math.round(selTok.dur_ms),
+              source: t(SOURCE_META[selTok.timing_source].labelKey),
+            })}
+            {selTok.locked_timing ? ` ・ ${t('align.locked')}` : ''}
           </span>
         ) : (
-          <span style={S.dim}>
-            方向键 ±{NUDGE_MS}ms ・ Shift 1 帧 ・ Alt ±{NUDGE_FINE_MS}ms ・ Ctrl/Cmd+滚轮 缩放
-          </span>
+          <span style={S.dim}>{t('align.keys', { step: NUDGE_MS, fine: NUDGE_FINE_MS })}</span>
         )}
       </div>
 
-      {storeError && <div style={{ ...S.bar, color: '#ff6b81' }}>后端返回错误：{storeError}</div>}
+      {storeError && (
+        <div style={{ ...S.bar, color: 'var(--danger)' }}>
+          {t('align.backendError', { message: storeError })}
+        </div>
+      )}
 
       {/* 拖动时的数值实时预览 */}
       {dragging && dragRef.current && (
@@ -1566,41 +1664,64 @@ function dragPreviewText(
   if (!line || !line.tokens.length) return formatDeltaMs(delta)
   if (cfg.kind === 'line') {
     const b = eff(line, 0)
-    return `整句平移 ${formatDeltaMs(delta)}　新起点 ${formatMs(b.start, true)}`
+    return t('align.dragLine', {
+      delta: formatDeltaMs(delta),
+      start: formatMs(b.start, true),
+    })
   }
-  const t = eff(line, cfg.index)
-  const text = line.tokens[cfg.index]?.text ?? ''
-  return `${text} ${formatDeltaMs(delta)}　起点 ${formatMs(t.start, true)}　时长 ${Math.round(
-    t.dur,
-  )}ms　终点 ${formatMs(t.start + t.dur, true)}`
+  const timing = eff(line, cfg.index)
+  return t('align.dragToken', {
+    text: line.tokens[cfg.index]?.text ?? '',
+    delta: formatDeltaMs(delta),
+    start: formatMs(timing.start, true),
+    dur: Math.round(timing.dur),
+  })
 }
 
 // ---------------------------------------------------------------- 样式
 
+/**
+ * 内联样式。**颜色 / 间距 / 圆角 / 字号 / 边框一律取 `styles.css` 的 token**，
+ * 不再出现字面量（docs/ui-redesign.md §六点五）。
+ *
+ * 仍是数字的只有轨道几何：`RULER_H` / `WAVE_H` / `TOKEN_STRIP_*` / `OVERVIEW_H`
+ * 以及把手宽度、播放头线宽。它们要和波形 canvas 的像素高度严丝合缝地对上，
+ * 属于结构尺寸而不是间距刻度，套 `--sp-*` 只会让覆盖层和波形错位。
+ */
 const S: Record<string, CSSProperties> = {
-  root: { display: 'flex', flexDirection: 'column', gap: 6, background: '#0e1620', padding: 8 },
-  bar: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
-  sep: { width: 1, height: 18, background: '#2b3b4f', margin: '0 2px' },
-  dim: { color: '#8ea2b8', display: 'inline-flex', alignItems: 'center', gap: 4 },
-  select: {
-    font: 'inherit',
-    color: '#dbe4ee',
-    background: '#1a2432',
-    border: '1px solid #3b4d64',
-    borderRadius: 5,
-    padding: '2px 4px',
+  root: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 'var(--sp-2)',
+    background: 'var(--bg-panel)',
+    padding: 'var(--sp-2)',
   },
+  bar: { display: 'flex', alignItems: 'center', gap: 'var(--sp-2)', flexWrap: 'wrap' },
+  sep: { width: 1, height: 18, background: 'var(--stroke)', margin: '0 var(--sp-1)' },
+  dim: { color: 'var(--fg-2)', display: 'inline-flex', alignItems: 'center', gap: 'var(--sp-1)' },
   host: {
     position: 'relative',
     overflow: 'hidden',
-    border: '1px solid #24344a',
-    borderRadius: 6,
-    background: '#111a24',
+    border: 'var(--hairline)',
+    borderRadius: 'var(--r-md)',
+    background: 'var(--bg-canvas)',
   },
-  rulerClip: { position: 'relative', height: RULER_H, overflow: 'hidden', background: '#0e1620' },
+  rulerClip: {
+    position: 'relative',
+    height: RULER_H,
+    overflow: 'hidden',
+    background: 'var(--bg-panel)',
+  },
   overlayClip: { position: 'absolute', inset: 0, overflow: 'hidden', pointerEvents: 'none' },
   track: { position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, willChange: 'transform' },
-  tickLabel: { position: 'absolute', left: 3, top: -13, color: '#8ea2b8', fontSize: 10 },
+  tickLabel: {
+    position: 'absolute',
+    left: 3,
+    top: -13,
+    color: 'var(--fg-3)',
+    fontSize: 'var(--fs-xs)',
+    fontVariantNumeric: 'tabular-nums',
+  },
   playhead: {
     position: 'absolute',
     left: 0,
@@ -1608,7 +1729,7 @@ const S: Record<string, CSSProperties> = {
     bottom: 0,
     width: 2,
     marginLeft: -1,
-    background: '#ff4d6d',
+    background: 'var(--danger)',
     pointerEvents: 'none',
   },
   waveNotice: {
@@ -1617,22 +1738,30 @@ const S: Record<string, CSSProperties> = {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
-    color: '#8ea2b8',
+    color: 'var(--fg-2)',
     pointerEvents: 'none',
   },
   tokText: {
-    fontSize: 15,
+    fontSize: 'var(--fs-lg)',
     pointerEvents: 'none',
-    textShadow: '0 1px 2px rgba(0,0,0,.9)',
+    textShadow: '0 1px 2px rgb(0 0 0 / 0.9)',
     whiteSpace: 'nowrap',
   },
-  lock: { position: 'absolute', top: 1, right: 2, fontSize: 9, pointerEvents: 'none' },
+  lock: {
+    position: 'absolute',
+    top: 1,
+    right: 2,
+    fontSize: 'var(--fs-xs)',
+    color: 'var(--fg)',
+    pointerEvents: 'none',
+  },
+  lineLock: { marginRight: 2, fontSize: 'var(--fs-xs)' },
   overview: {
     position: 'relative',
     height: OVERVIEW_H,
     overflow: 'hidden',
-    background: '#0b131b',
-    borderTop: '1px solid #24344a',
+    background: 'var(--bg-canvas)',
+    borderTop: 'var(--hairline)',
     cursor: 'pointer',
   },
   overviewBox: {
@@ -1641,40 +1770,48 @@ const S: Record<string, CSSProperties> = {
     width: '100%',
     top: 0,
     bottom: 0,
-    border: '1px solid #ffd147',
-    background: 'rgba(255,209,71,.12)',
-    borderRadius: 2,
+    border: '1px solid var(--accent)',
+    background: 'var(--accent-weak)',
+    borderRadius: 'var(--r-sm)',
     pointerEvents: 'none',
   },
   tapPanel: {
     display: 'flex',
     flexDirection: 'column',
-    gap: 4,
-    padding: 8,
-    border: '1px solid #6b5a1c',
-    borderRadius: 6,
-    background: '#1b1a10',
+    gap: 'var(--sp-1)',
+    padding: 'var(--sp-2)',
+    // 打轴是个模式，需要整块面板被认出来；用 warn 调和面板底色，
+    // 而不是另配一组棕黄，饱和色预算只留给来源徽章（§六）
+    border: '1px solid color-mix(in srgb, var(--warn) 45%, var(--stroke))',
+    borderRadius: 'var(--r-md)',
+    background: 'color-mix(in srgb, var(--warn) 8%, var(--bg-surface))',
   },
-  tapHeadRow: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
-  chipRow: { display: 'flex', gap: 5, overflowX: 'auto', padding: '4px 0' },
-  legendItem: { display: 'inline-flex', alignItems: 'center', gap: 4, color: '#b9c8da' },
+  tapHeadRow: { display: 'flex', alignItems: 'center', gap: 'var(--sp-2)', flexWrap: 'wrap' },
+  chipRow: { display: 'flex', gap: 'var(--sp-1)', overflowX: 'auto', padding: 'var(--sp-1) 0' },
+  legendItem: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 'var(--sp-1)',
+    color: 'var(--fg-2)',
+  },
   todo: {
     display: 'inline-flex',
     alignItems: 'center',
-    padding: '1px 9px',
-    borderRadius: 10,
-    border: '1px dashed #94a3b8',
-    background: 'rgba(148,163,184,.16)',
-    color: '#cbd5e1',
+    padding: '1px var(--sp-2)',
+    borderRadius: 'var(--r-pill)',
+    border: '1px dashed var(--fg-3)',
+    background: 'color-mix(in srgb, var(--fg-3) 16%, transparent)',
+    color: 'var(--fg-2)',
   },
   tip: {
     position: 'fixed',
     zIndex: 50,
-    padding: '4px 8px',
-    background: '#0b131b',
-    border: '1px solid #3b4d64',
-    borderRadius: 5,
-    color: '#ffd147',
+    padding: 'var(--sp-1) var(--sp-2)',
+    background: 'var(--bg-surface)',
+    border: 'var(--hairline-strong)',
+    borderRadius: 'var(--r-sm)',
+    color: 'var(--fg)',
+    boxShadow: 'var(--shadow-1)',
     pointerEvents: 'none',
     whiteSpace: 'nowrap',
   },
