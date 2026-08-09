@@ -1,5 +1,9 @@
 /**
- * 「对轴」舞台文案。由该舞台的实现者维护，其余舞台不要改本文件。
+ * 「编辑」舞台里**与时间有关**的文案（时间轴、逐字轴、整体偏移、检查器的时间栏）。
+ * 读音那一半在 `ruby.ts`，两份合起来才是这一个舞台。
+ *
+ * 键名保留 `align.` 前缀：对轴与注音是合并成一步，不是合并成一件事，
+ * 按前缀仍能一眼看出这条文案说的是时间还是读音。
  *
  * 播放/暂停/撤销/重做/来源徽章走 `common.ts`，这里不重复定义 ——
  * 同一个动作在不同舞台必须是同一个词。
@@ -33,9 +37,23 @@ export const align: Record<string, string> = {
   'align.fit': '整曲',
   'align.fitHint': '缩到整曲铺满',
 
-  // ---- 画面 / 波形分割条 ----
-  'align.paneDivider': '画面与波形分割条',
+  // ---- 歌词 / 波形分割条 ----
+  'align.paneDivider': '歌词与波形分割条',
   'align.paneDividerHint': '拖动调整高度，双击复位',
+
+  // ---- 逐字轴（这一步真正要编辑的东西，所以它是主角）----
+  'align.tokenRail': '逐字轴',
+  'align.tokenRailHint': '块宽 = 该字时长，拖块平移、拖两侧改边界',
+  'align.railEmpty': '点歌词里的字，或按播放键',
+  'align.gap': '空隙 {ms}ms',
+
+  // ---- 检查器的时间栏 ----
+  'align.time': '时间',
+  'align.start': '起点',
+  'align.dur': '时长',
+  'align.shift': '平移',
+  'align.lockTiming': '锁定时间',
+  'align.selectHint': '点歌词或逐字轴里的字',
 
   // ---- 整体偏移（三级调轴的「整体」级）----
   'align.offset': '整体偏移',
@@ -67,7 +85,6 @@ export const align: Record<string, string> = {
   'align.hintInterpolated': '插值推算，优先复核',
   'align.hintManual': '手工，重算不覆盖',
   'align.locked': '已锁定',
-  'align.selected': '{text} ・ {start} ・ {dur}ms ・ {source}',
   'align.keys': '方向键 ±{step}ms ・ Shift 1 帧 ・ Alt ±{fine}ms ・ Ctrl/Cmd+滚轮 缩放',
   'align.noProject': '尚未打开工程',
   'align.backendError': '后端出错：{message}',

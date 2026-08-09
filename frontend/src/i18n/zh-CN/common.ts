@@ -19,10 +19,10 @@ export const common: Record<string, string> = {
   'source.aligned': '对齐',
   'source.interpolated': '插值',
   'source.manual': '手工',
+  // 与 workflow.ts 的 STEP_LABEL 一一对应；对轴与注音已合并为「编辑」
   'step.media': '素材',
   'step.lyrics': '歌词',
-  'step.align': '对轴',
-  'step.ruby': '注音',
+  'step.edit': '编辑',
   'step.style': '样式',
   'step.export': '导出',
 }

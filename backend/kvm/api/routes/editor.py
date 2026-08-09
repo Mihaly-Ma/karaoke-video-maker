@@ -37,6 +37,7 @@ from kvm.api.schemas import (
     DerivePhoneticsRequest,
     MergeLineRequest,
     ProjectDTO,
+    SetLineTextRequest,
     SetLockRequest,
     SetMetadataRequest,
     SetPhoneticRequest,
@@ -166,6 +167,36 @@ def set_lock(req: SetLockRequest, request: Request, response: Response) -> Proje
         req.project_id,
         f"批量锁定（{len(req.items)} 项）",
         lambda draft: ops.set_locks(draft, items=req.items),
+    )
+
+
+@router.post("/line-text", response_model=ProjectDTO)
+def set_line_text(req: SetLineTextRequest, request: Request, response: Response) -> ProjectDTO:
+    """改写一行的书写文本，尽最大可能保住这一行上的时间、注音、发音形与声部。
+
+    §2.5 要求每个自动环节都有等价的手工旁路——歌词文本此前是唯一空着的一档，
+    改一个错字得把整首歌重新粘贴一遍。
+
+    **文本没变就不进撤销栈**：`store.mutate()` 每次调用都压一格历史，
+    而"按一次 Cmd+Z 应该退回到改这一行之前"是这个入口的基本预期；
+    白占一格会让用户按了撤销却什么都没发生。
+    """
+    try:
+        current = _store(request).get(req.project_id)
+    except KeyError:
+        current = None  # 工程不存在交给下面的 _apply 统一报 404
+    if current is not None:
+        line = next((ln for ln in current.lines if ln.id == req.line_id), None)
+        if line is not None and "".join(t.text for t in line.tokens) == req.text.strip():
+            response.headers[_WARNING_HEADER] = "0"
+            return current
+
+    return _apply(
+        request,
+        response,
+        req.project_id,
+        "改写歌词文本",
+        lambda draft: ops.set_line_text(draft, line_id=req.line_id, text=req.text),
     )
 
 

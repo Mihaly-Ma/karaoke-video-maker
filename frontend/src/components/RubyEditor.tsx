@@ -1,15 +1,22 @@
 /**
- * 注音（振り仮名）舞台。
+ * 歌词正文（注音编辑）—— 合并后的「编辑」舞台的上半区。
  *
- * ## 主对象是「逐词的读音」，所以中间整屏就是歌词本身
+ * ## 从独立舞台变成半个舞台
  *
- * 上一版是为竖直窄侧栏设计的：把一行拆成字符条，靠拖选字符区间来指定注音范围。
- * 那套交互在窄栏里成立，在整屏下毫无收益——字符条横向拉长只是变成一条更长的条，
- * 而用户真正要做的事是**在整首歌里找出机器猜错的读音**，那需要同时看到很多行。
+ * 注音原本是独立一步，现在与对轴合并（docs/ui-redesign.md §四）：二者修正的是
+ * **同一个选中词**，一个管何时唱、一个管怎么读；而且读音只能靠耳朵验证
+ * （「運命」在本曲唱 さだめ 还是 うんめい），独立的注音步骤连播放都没有。
  *
- * 现在中间按成片样式渲染整首歌词（真实字体、真实配色、注音排在字上方），
- * 每个词的读音来源用下划线颜色标出（CLAUDE.md §7.4：provider / dict / 推断 / 手工
- * 必须在界面上可见地区分），点词就地改读音，右侧辅助栏放两份读音、候选与锁定。
+ * 所以本文件不再自己当一个舞台，而是拆成三块可组合的东西：
+ *
+ * | 导出 | 作用 | 落在合并舞台的哪 |
+ * |---|---|---|
+ * | `useRubyEditing()` | 全部编辑状态与动作 | 由 `EditStage` 持有，正文与检查器共用同一份 |
+ * | `RubyPaper` | 整屏歌词正文 | 上半区右侧 |
+ * | `RubyStyles` | 本模块的局部 CSS | 由 `EditStage` 挂一次 |
+ *
+ * 检查器（两份读音、候选、锁定）在 `RubyInspector`，现在渲染在舞台底栏里，
+ * 与时间信息并排——「选中词」这一个概念只在界面上出现一次。
  *
  * ## 为什么"点一下"选中的是词而不是字
  *
@@ -19,22 +26,30 @@
  * 已有注音的区间原样成词，其余按汉字块 / 假名串分词，点哪个就是哪个。
  * 需要更细的切分时用「拆送り仮名」，它走 `lib/kana.ts` 的 `alignReading`。
  *
- * ## 不放波形
+ * ## 选中项是双向的
  *
- * 改读音不需要看波形（docs/ui-redesign.md §四）。读音改了会改拍数、进而改时间轴
- * 切分单位，但那是对轴那一步的事，在这里摆一条波形只会抢走屏幕。
+ * 点正文里的词 → 写全局 `selection`（token 级）→ 时间轴上同一个字高亮；
+ * 反过来在逐字轴上点一个字 → `selection` 变化 → 这里落到**覆盖那个 token 的词**上
+ * （`unitOfToken`，粒度换算在那儿）。两边共用 store 里的同一个 `selection`，
+ * 不再各存一份"当前选中"。
  */
 
-import { EyeInvisibleOutlined, EyeOutlined, LockOutlined } from '@ant-design/icons'
+import {
+  EditOutlined,
+  EyeInvisibleOutlined,
+  EyeOutlined,
+  LockOutlined,
+  WarningOutlined,
+} from '@ant-design/icons'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { CSSProperties } from 'react'
+import type { CSSProperties, RefObject } from 'react'
 
-import type { Palette } from '../api/types'
+import type { Palette, Project } from '../api/types'
 import { t } from '../i18n'
 import { assToCssHex } from '../lib/assColor'
 import { alignReading, normalizeKana, toHiragana, validateKana } from '../lib/kana'
 import { useProject } from '../state/projectStore'
-import { RubyInspector, RubyReviewList } from './RubyInspector'
+import { EditLineText, submitLineText } from './EditLineText'
 import {
   buildProjectUnits,
   canAnnotate,
@@ -47,14 +62,51 @@ import {
   SOURCE_LABEL_KEY,
   SOURCE_ORDER,
   unitKey,
+  unitOfToken,
   type RubyUnit,
 } from './RubyModel'
 
-export interface RubyEditorProps {
-  className?: string
+// ---------------------------------------------------------------- 状态
+
+export interface RubyEditing {
+  project: Project | null
+  /** 正文里显示的行（默认不含制作名单行） */
+  lines: Project['lines']
+  lineUnits: Map<string, RubyUnit[]>
+  /** 行 id → 工程原序行号。筛选不重排编号，跳号本身就是"这里还有东西"的提示 */
+  lineNo: Map<string, number>
+  selectedKey: string | null
+  selectedUnit: RubyUnit | null
+  editingKey: string | null
+  editDraft: string
+  busy: boolean
+  notice: string
+  storeError: string | null
+  /** 机器猜的 + 缺注音的，聚合成一份待检查清单 */
+  review: RubyUnit[]
+  stats: { spans: number; locked: number }
+  metadataCount: number
+  showMetadata: boolean
+  paperRef: RefObject<HTMLDivElement>
+  phoneticOf: (unit: RubyUnit) => string
+  /** 正在改写文本的行；null 表示没有行处于改写态 */
+  editingLineId: string | null
+  beginLineEdit: (lineId: string) => void
+  cancelLineEdit: () => void
+  commitLineEdit: (lineId: string, text: string) => void
+  setShowMetadata: (v: boolean) => void
+  setEditDraft: (v: string) => void
+  cancelEdit: () => void
+  pick: (unit: RubyUnit, openEditor: boolean) => void
+  commitInline: (unit: RubyUnit) => void
+  applyReading: (unit: RubyUnit, text: string) => void
+  split: (unit: RubyUnit, reading: string) => void
+  remove: (unit: RubyUnit) => void
+  toggleLock: (unit: RubyUnit) => void
+  setPhonetic: (unit: RubyUnit, value: string) => void
 }
 
-export function RubyEditor({ className }: RubyEditorProps) {
+export function useRubyEditing(): RubyEditing {
   const project = useProject((s) => s.project)
   const selection = useProject((s) => s.selection)
   const select = useProject((s) => s.select)
@@ -69,6 +121,7 @@ export function RubyEditor({ className }: RubyEditorProps) {
   const [notice, setNotice] = useState('')
   const [phonetics, setPhonetics] = useState<Record<string, string>>({})
   const [showMetadata, setShowMetadata] = useState(false)
+  const [editingLineId, setEditingLineId] = useState<string | null>(null)
 
   const paperRef = useRef<HTMLDivElement | null>(null)
   /** Esc 取消时不要让紧随其后的 blur 把草稿写进去 */
@@ -90,18 +143,13 @@ export function RubyEditor({ className }: RubyEditorProps) {
    *
    * 但**不能让它们彻底消失**：`is_metadata` 是自动判定，必然有误判，而被误判的那一行
    * 如果在这一步完全看不见，用户就无从发现（CLAUDE.md §2.5：每个自动环节都要有手工旁路）。
-   * 出口是顶栏那个带数量的开关。
+   * 出口是正文顶栏那个带数量的开关。
    */
-  const visibleLines = useMemo(
+  const lines = useMemo(
     () => (project?.lines ?? []).filter((l) => showMetadata || !l.is_metadata),
     [project, showMetadata],
   )
 
-  /**
-   * 行号按工程原序编，不跟着筛选重排。
-   * 隐藏几行就让编号跳一号，那一跳本身就是"这里还有东西"的提示，
-   * 也让这里的行号与对轴、导出各处说的是同一件事。
-   */
   const lineNo = useMemo(() => {
     const m = new Map<string, number>()
     ;(project?.lines ?? []).forEach((l, i) => m.set(l.id, i + 1))
@@ -109,10 +157,10 @@ export function RubyEditor({ className }: RubyEditorProps) {
   }, [project])
 
   // 统计、待检查、候选读音全部只看可见行，三处与正文永远说同一件事
-  const lineUnits = useMemo(() => buildProjectUnits(visibleLines), [visibleLines])
+  const lineUnits = useMemo(() => buildProjectUnits(lines), [lines])
 
-  // 左侧行列表仍然列出制作名单行。从那里选中一行、正文里却找不到它，
-  // 比多看几行噪音更让人困惑——这种情况下自动把它们显示出来。
+  // 时间轴上选中了制作名单行时自动把它们显示出来：从别处选中一行、正文里却找不到它，
+  // 比多看几行噪音更让人困惑。
   useEffect(() => {
     if (showMetadata || selection.kind === 'none') return
     if (project?.lines.find((l) => l.id === selection.lineId)?.is_metadata) setShowMetadata(true)
@@ -129,11 +177,32 @@ export function RubyEditor({ className }: RubyEditorProps) {
     return list.find((u) => unitKey(u) === selectedKey) ?? null
   }, [selectedKey, lineUnits])
 
-  // 外面（左侧行列表、外壳的自动选行）换了行时，把选中词落到这一行上最该看的那个词
+  /**
+   * 全局选中 → 选中词。
+   *
+   * 时间轴（逐字轴 / 行轨）与正文共用 store 里的同一个 `selection`，所以这里只负责
+   * **粒度换算**：selection 是 token 级，注音挂在词上。
+   *
+   * "当前这个词已经覆盖了选中的 token 就别动"这条判断是必须的：正文里点词时
+   * `pick()` 已经把 selectedKey 设好了，若这里再按 token 反查一次，同一个 token 里
+   * 并排的两个词（「明日／は」在一个 token 里）会被拉回前一个，用户点 B 选中 A。
+   */
   useEffect(() => {
     if (selection.kind === 'none') return
-    if (selectedKey && lineIdOfKey(selectedKey) === selection.lineId) return
     const list = lineUnits.get(selection.lineId) ?? []
+    if (!list.length) return
+
+    if (selection.kind === 'token') {
+      const cur = selectedKey ? list.find((u) => unitKey(u) === selectedKey) : null
+      if (cur && cur.tokenIndex === selection.tokenIndex) return
+      const hit = unitOfToken(list, selection.tokenIndex) ?? list[0]
+      setSelectedKey(unitKey(hit))
+      setEditingKey(null)
+      return
+    }
+
+    // 选中的是整行：落到这一行上最该看的那个词
+    if (selectedKey && lineIdOfKey(selectedKey) === selection.lineId) return
     const first = list.find((u) => u.missing || u.guess) ?? list.find(canAnnotate) ?? list[0]
     setSelectedKey(first ? unitKey(first) : null)
     setEditingKey(null)
@@ -185,6 +254,7 @@ export function RubyEditor({ className }: RubyEditorProps) {
     (u: RubyUnit, openEditor: boolean) => {
       setNotice('')
       setSelectedKey(unitKey(u))
+      // 写的是 token 级选中：时间轴、逐字轴、检查器的时间栏都靠它对齐到同一个字
       select({ kind: 'token', lineId: u.lineId, tokenIndex: u.tokenIndex })
       if (openEditor && canAnnotate(u)) {
         setEditDraft(u.span?.text ?? '')
@@ -196,9 +266,18 @@ export function RubyEditor({ className }: RubyEditorProps) {
     [select],
   )
 
+  const cancelEdit = useCallback(() => {
+    cancelRef.current = true
+    setEditingKey(null)
+  }, [])
+
   /** 就地编辑提交。空串 = 清除该区间的注音（后端 `/editor/ruby` 的约定）。 */
   const commitInline = useCallback(
     (u: RubyUnit) => {
+      if (cancelRef.current) {
+        cancelRef.current = false
+        return
+      }
       setEditingKey(null)
       const text = normalizeKana(editDraft)
       if (text === (u.span?.text ?? '')) return
@@ -214,7 +293,7 @@ export function RubyEditor({ className }: RubyEditorProps) {
     [editDraft, write],
   )
 
-  const handleApply = useCallback(
+  const applyReading = useCallback(
     (u: RubyUnit, text: string) => {
       if (text) {
         const v = validateKana(text)
@@ -229,8 +308,8 @@ export function RubyEditor({ className }: RubyEditorProps) {
     [write],
   )
 
-  const handleSplit = useCallback(
-    async (u: RubyUnit, reading: string) => {
+  const split = useCallback(
+    (u: RubyUnit, reading: string) => {
       const kana = normalizeKana(reading)
       const pieces = alignReading(u.text, kana)
       if (pieces === null) {
@@ -244,25 +323,27 @@ export function RubyEditor({ className }: RubyEditorProps) {
       // 输入里出现片假名就按片假名落库：「本気 → マジ」是原文意图，归一化会毁掉它
       const wantsKatakana = /[ァ-ヺ]/.test(kana)
       setBusy(true)
-      try {
-        // 每次调用都返回完整新工程，必须串行；字符下标不受注音改动影响，可以沿用
-        for (const p of pieces) {
-          await setRubyRemote(
-            u.lineId,
-            u.start + p.start,
-            u.start + p.end,
-            wantsKatakana ? p.text : toHiragana(p.text),
-          )
+      void (async () => {
+        try {
+          // 每次调用都返回完整新工程，必须串行；字符下标不受注音改动影响，可以沿用
+          for (const p of pieces) {
+            await setRubyRemote(
+              u.lineId,
+              u.start + p.start,
+              u.start + p.end,
+              wantsKatakana ? p.text : toHiragana(p.text),
+            )
+          }
+          setNotice(t('ruby.msg.splitDone', { n: pieces.length }))
+        } finally {
+          setBusy(false)
         }
-        setNotice(t('ruby.msg.splitDone', { n: pieces.length }))
-      } finally {
-        setBusy(false)
-      }
+      })()
     },
     [setRubyRemote],
   )
 
-  const handleDelete = useCallback(
+  const remove = useCallback(
     (u: RubyUnit) => {
       setNotice('')
       void write(u, '')
@@ -270,23 +351,25 @@ export function RubyEditor({ className }: RubyEditorProps) {
     [write],
   )
 
-  const handleLock = useCallback(
-    async (u: RubyUnit) => {
+  const toggleLock = useCallback(
+    (u: RubyUnit) => {
       if (!projectId || !u.span) return
       setBusy(true)
-      try {
-        await setRubyLock(projectId, u.lineId, [u.start, u.end], !u.span.locked)
-        await refresh()
-      } catch (e) {
-        setNotice(e instanceof Error ? e.message : String(e))
-      } finally {
-        setBusy(false)
-      }
+      void (async () => {
+        try {
+          await setRubyLock(projectId, u.lineId, [u.start, u.end], !u.span?.locked)
+          await refresh()
+        } catch (e) {
+          setNotice(e instanceof Error ? e.message : String(e))
+        } finally {
+          setBusy(false)
+        }
+      })()
     },
     [projectId, refresh],
   )
 
-  const handlePhonetic = useCallback(
+  const setPhonetic = useCallback(
     (u: RubyUnit, value: string) => {
       if (!projectId) return
       const next = { ...phonetics }
@@ -302,158 +385,279 @@ export function RubyEditor({ className }: RubyEditorProps) {
     [projectId, phonetics],
   )
 
+  const phoneticOf = useCallback((u: RubyUnit) => phonetics[phoneticKey(u)] ?? '', [phonetics])
+
+  // ---- 改写行文本（§2.5 的手工旁路：歌词本身也得能改）----
+
+  const beginLineEdit = useCallback((lineId: string) => {
+    setNotice('')
+    setEditingLineId(lineId)
+  }, [])
+
+  const cancelLineEdit = useCallback(() => setEditingLineId(null), [])
+
+  /**
+   * 提交改写。**改完立刻回报后果**：保住了几个字的时间、几个字的时间是推算的
+   * （逐字轴上是插值色，§7.4）、有没有东西进了「失效修正」清单。
+   * 用户改完一个错字最该知道的就是这个，而不是一句"已保存"。
+   */
+  const commitLineEdit = useCallback(
+    (lineId: string, text: string) => {
+      setEditingLineId(null)
+      const line = project?.lines.find((l) => l.id === lineId)
+      const before = line ? line.tokens.map((tk) => tk.text).join('') : ''
+      if (!projectId || !line || text.trim() === before) return
+      setBusy(true)
+      void (async () => {
+        try {
+          const r = await submitLineText(projectId, lineId, text)
+          setNotice(
+            t('ruby.lineText.done', { kept: r.kept, guessed: r.guessed }) +
+              (r.orphaned > 0 ? t('ruby.lineText.orphaned', { n: r.orphaned }) : ''),
+          )
+        } catch (e) {
+          setNotice(e instanceof Error ? e.message : String(e))
+        } finally {
+          setBusy(false)
+        }
+      })()
+    },
+    [project, projectId],
+  )
+
+  return {
+    project,
+    lines,
+    lineUnits,
+    lineNo,
+    selectedKey,
+    selectedUnit,
+    editingKey,
+    editDraft,
+    busy,
+    notice,
+    storeError,
+    review,
+    stats,
+    metadataCount,
+    showMetadata,
+    paperRef,
+    phoneticOf,
+    editingLineId,
+    beginLineEdit,
+    cancelLineEdit,
+    commitLineEdit,
+    setShowMetadata,
+    setEditDraft,
+    cancelEdit,
+    pick,
+    commitInline,
+    applyReading,
+    split,
+    remove,
+    toggleLock,
+    setPhonetic,
+  }
+}
+
+// ---------------------------------------------------------------- 正文
+
+export interface RubyPaperProps {
+  editing: RubyEditing
+  /** 待检查清单是否展开。清单占横向空间，默认收着，靠这个按钮找回来 */
+  reviewOpen: boolean
+  onToggleReview: () => void
+}
+
+/**
+ * 整屏歌词正文：按成片样式渲染（真实字体、真实配色、注音排在字上方），
+ * 每个词用下划线颜色标出读音来源（CLAUDE.md §7.4），点词就地改读音。
+ */
+export function RubyPaper({ editing, reviewOpen, onToggleReview }: RubyPaperProps) {
+  const {
+    project,
+    lines,
+    lineUnits,
+    lineNo,
+    selectedKey,
+    editingKey,
+    editDraft,
+    busy,
+    notice,
+    storeError,
+    review,
+    stats,
+    metadataCount,
+    showMetadata,
+    paperRef,
+    editingLineId,
+    beginLineEdit,
+    cancelLineEdit,
+    commitLineEdit,
+    setShowMetadata,
+    setEditDraft,
+    cancelEdit,
+    pick,
+    commitInline,
+  } = editing
+
+  const selection = useProject((s) => s.selection)
+  const selLineId = selection.kind === 'none' ? null : selection.lineId
+
   if (!project) {
-    return (
-      <div className={cls(className)}>
-        <RubyStyles />
-        <p className="kvm-ruby__muted">{t('ruby.empty.project')}</p>
-      </div>
-    )
+    return <p className="kvm-ruby__muted">{t('ruby.empty.project')}</p>
   }
 
   return (
-    <div className={cls(className)}>
-      <RubyStyles />
+    <div className="kvm-ruby__canvas">
+      <div className="kvm-ruby__bar">
+        <span className="num">{t('ruby.stat.spans', { n: stats.spans })}</span>
+        {stats.locked > 0 && <span className="num">{t('ruby.stat.locked', { n: stats.locked })}</span>}
 
-      <div className="kvm-ruby__canvas">
-        <div className="kvm-ruby__bar">
-          <span className="num">{t('ruby.stat.spans', { n: stats.spans })}</span>
-          {review.length > 0 && (
-            <span className="num kvm-ruby__warn">{t('ruby.stat.review', { n: review.length })}</span>
-          )}
-          {stats.locked > 0 && <span className="num">{t('ruby.stat.locked', { n: stats.locked })}</span>}
+        <span className="kvm-ruby__legend">
+          <span className="kvm-ruby__label">{t('ruby.legend')}</span>
+          {SOURCE_ORDER.map((s) => (
+            <span key={s} className="kvm-ruby__swatch" data-src={s}>
+              <i />
+              {t(SOURCE_LABEL_KEY[s])}
+            </span>
+          ))}
+        </span>
 
-          <span className="kvm-ruby__legend">
-            <span className="kvm-ruby__label">{t('ruby.legend')}</span>
-            {SOURCE_ORDER.map((s) => (
-              <span key={s} className="kvm-ruby__swatch" data-src={s}>
-                <i />
-                {t(SOURCE_LABEL_KEY[s])}
-              </span>
-            ))}
-          </span>
+        <span className="kvm-ruby__spacer" />
 
-          <span className="kvm-ruby__spacer" />
+        {/* 制作名单行的出口。没有这种行时连按钮都不出现，免得多一个永远点不出东西的开关 */}
+        {metadataCount > 0 && (
+          <button
+            type="button"
+            className="small kvm-ruby__metatoggle"
+            aria-pressed={showMetadata}
+            data-on={showMetadata || undefined}
+            onClick={() => setShowMetadata(!showMetadata)}
+          >
+            {showMetadata ? <EyeOutlined /> : <EyeInvisibleOutlined />}
+            {t('ruby.metadata.toggle', { n: metadataCount })}
+          </button>
+        )}
 
-          {/* 制作名单行的出口。没有这种行时连按钮都不出现，免得多一个永远点不出东西的开关 */}
-          {metadataCount > 0 && (
-            <button
-              type="button"
-              className="small kvm-ruby__metatoggle"
-              aria-pressed={showMetadata}
-              data-on={showMetadata || undefined}
-              onClick={() => setShowMetadata((v) => !v)}
-            >
-              {showMetadata ? <EyeOutlined /> : <EyeInvisibleOutlined />}
-              {t('ruby.metadata.toggle', { n: metadataCount })}
-            </button>
-          )}
+        {/* 待检查清单的开关：数量本身就是这一步还剩多少活的硬指标，所以常驻 */}
+        <button
+          type="button"
+          className="small kvm-ruby__reviewtoggle"
+          aria-pressed={reviewOpen}
+          data-on={reviewOpen || undefined}
+          data-warn={review.length > 0 || undefined}
+          onClick={onToggleReview}
+        >
+          <WarningOutlined />
+          {t('ruby.review.title')} <span className="num">{review.length}</span>
+        </button>
 
-          {notice && <span className="kvm-ruby__notice">{notice}</span>}
-          {storeError && <span className="error">{storeError}</span>}
-        </div>
-
-        <div className="kvm-ruby__paper" ref={paperRef} style={paperFont(project.style.font_name)}>
-          {project.lines.length === 0 && <p className="kvm-ruby__muted">{t('ruby.empty.lines')}</p>}
-          {project.lines.length > 0 && visibleLines.length === 0 && (
-            <p className="kvm-ruby__muted">{t('ruby.empty.allMetadata')}</p>
-          )}
-
-          {visibleLines.map((line) => {
-            const units = lineUnits.get(line.id) ?? []
-            return (
-              <div
-                key={line.id}
-                className="kvm-ruby__line"
-                data-line={line.id}
-                data-meta={line.is_metadata || undefined}
-                data-active={selLineId === line.id || undefined}
-                style={paletteVars(project.palettes[line.voice_part] ?? project.palettes['main'])}
-              >
-                <span className="kvm-ruby__no num">{lineNo.get(line.id)}</span>
-                <span className="kvm-ruby__text">
-                  {units.length === 0 && <span className="kvm-ruby__muted">{t('ruby.empty.line')}</span>}
-                  {units.map((u) => {
-                    const k = unitKey(u)
-                    const rt = u.span?.text ?? ''
-                    return (
-                      <span
-                        key={k}
-                        className="kvm-ruby__unit"
-                        data-src={u.missing ? 'missing' : u.src}
-                        data-selected={k === selectedKey || undefined}
-                        tabIndex={0}
-                        onClick={() => pick(u, true)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') pick(u, true)
-                        }}
-                      >
-                        <ruby>
-                          {u.text}
-                          {rt && <rt className="kvm-ruby__rt">{rt}</rt>}
-                        </ruby>
-                        {u.span?.locked && <LockOutlined className="kvm-ruby__lockmark" />}
-                        {editingKey === k && (
-                          <input
-                            className="kvm-ruby__inline"
-                            type="text"
-                            value={editDraft}
-                            autoFocus
-                            disabled={busy}
-                            placeholder={t('ruby.field.displayPlaceholder')}
-                            onChange={(e) => setEditDraft(e.target.value)}
-                            onClick={(e) => e.stopPropagation()}
-                            onKeyDown={(e) => {
-                              e.stopPropagation()
-                              if (e.key === 'Enter') commitInline(u)
-                              if (e.key === 'Escape') {
-                                cancelRef.current = true
-                                setEditingKey(null)
-                              }
-                            }}
-                            onBlur={() => {
-                              if (cancelRef.current) {
-                                cancelRef.current = false
-                                return
-                              }
-                              commitInline(u)
-                            }}
-                          />
-                        )}
-                      </span>
-                    )
-                  })}
-                </span>
-                {line.is_metadata && <span className="kvm-ruby__tag">{t('ruby.metadata')}</span>}
-              </div>
-            )
-          })}
-        </div>
+        {notice && <span className="kvm-ruby__notice">{notice}</span>}
+        {storeError && <span className="error">{storeError}</span>}
       </div>
 
-      <aside className="kvm-ruby__rail">
-        <RubyInspector
-          unit={selectedUnit}
-          units={lineUnits}
-          busy={busy}
-          phoneticOverride={selectedUnit ? (phonetics[phoneticKey(selectedUnit)] ?? '') : ''}
-          onApplyReading={handleApply}
-          onSplit={(u, r) => void handleSplit(u, r)}
-          onDelete={handleDelete}
-          onToggleLock={(u) => void handleLock(u)}
-          onPhonetic={handlePhonetic}
-        />
-        <RubyReviewList items={review} activeKey={selectedKey} onPick={(u) => pick(u, false)} />
-      </aside>
+      <div className="kvm-ruby__paper" ref={paperRef} style={paperFont(project.style.font_name)}>
+        {project.lines.length === 0 && <p className="kvm-ruby__muted">{t('ruby.empty.lines')}</p>}
+        {project.lines.length > 0 && lines.length === 0 && (
+          <p className="kvm-ruby__muted">{t('ruby.empty.allMetadata')}</p>
+        )}
+
+        {lines.map((line) => {
+          const units = lineUnits.get(line.id) ?? []
+          const lineTextValue = line.tokens.map((tk) => tk.text).join('')
+          if (editingLineId === line.id) {
+            return (
+              <div key={line.id} className="kvm-ruby__line" data-line={line.id} data-editing>
+                <span className="kvm-ruby__no num">{lineNo.get(line.id)}</span>
+                <EditLineText
+                  value={lineTextValue}
+                  busy={busy}
+                  onCommit={(text) => commitLineEdit(line.id, text)}
+                  onCancel={cancelLineEdit}
+                />
+              </div>
+            )
+          }
+          return (
+            <div
+              key={line.id}
+              className="kvm-ruby__line"
+              data-line={line.id}
+              data-meta={line.is_metadata || undefined}
+              data-active={selLineId === line.id || undefined}
+              style={paletteVars(project.palettes[line.voice_part] ?? project.palettes['main'])}
+            >
+              <span className="kvm-ruby__no num">{lineNo.get(line.id)}</span>
+              <span className="kvm-ruby__text">
+                {units.length === 0 && <span className="kvm-ruby__muted">{t('ruby.empty.line')}</span>}
+                {units.map((u) => {
+                  const k = unitKey(u)
+                  const rt = u.span?.text ?? ''
+                  return (
+                    <span
+                      key={k}
+                      className="kvm-ruby__unit"
+                      data-unit={k}
+                      data-src={u.missing ? 'missing' : u.src}
+                      data-selected={k === selectedKey || undefined}
+                      tabIndex={0}
+                      onClick={() => pick(u, true)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') pick(u, true)
+                      }}
+                    >
+                      <ruby>
+                        {u.text}
+                        {rt && <rt className="kvm-ruby__rt">{rt}</rt>}
+                      </ruby>
+                      {u.span?.locked && <LockOutlined className="kvm-ruby__lockmark" />}
+                      {editingKey === k && (
+                        <input
+                          className="kvm-ruby__inline"
+                          type="text"
+                          value={editDraft}
+                          autoFocus
+                          disabled={busy}
+                          placeholder={t('ruby.field.displayPlaceholder')}
+                          onChange={(e) => setEditDraft(e.target.value)}
+                          onClick={(e) => e.stopPropagation()}
+                          onKeyDown={(e) => {
+                            e.stopPropagation()
+                            if (e.key === 'Enter') commitInline(u)
+                            if (e.key === 'Escape') cancelEdit()
+                          }}
+                          onBlur={() => commitInline(u)}
+                        />
+                      )}
+                    </span>
+                  )
+                })}
+              </span>
+              {line.is_metadata && <span className="kvm-ruby__tag">{t('ruby.metadata')}</span>}
+              {/*
+                改写这一行的文字。§2.5 要求每个自动环节都有等价的手工旁路，
+                而歌词文本此前是唯一空着的一档——改一个错字得把整首歌重贴一遍。
+              */}
+              <button
+                type="button"
+                className="iconbtn kvm-ruby__linebtn"
+                data-role="edit-line-text"
+                title={t('ruby.lineText.edit')}
+                aria-label={t('ruby.lineText.edit')}
+                onClick={() => beginLineEdit(line.id)}
+              >
+                <EditOutlined />
+              </button>
+            </div>
+          )
+        })}
+      </div>
     </div>
   )
 }
 
-export default RubyEditor
-
 // ---- 样式 ----
-
-const cls = (extra?: string) => ['kvm-ruby', extra].filter(Boolean).join(' ')
 
 /** 预览用工程自己的字体，这一步的判断（注音挤不挤、字够不够宽）依赖真实字形 */
 const paperFont = (family: string): CSSProperties =>
@@ -480,7 +684,8 @@ function paletteVars(p: Palette | undefined): CSSProperties {
   } as CSSProperties
 }
 
-function RubyStyles() {
+/** 本模块的局部 CSS。由舞台挂一次，正文与检查器共用。 */
+export function RubyStyles() {
   return <style>{CSS}</style>
 }
 
@@ -488,19 +693,14 @@ function RubyStyles() {
  * 取值一律来自 styles.css 的设计 token（docs/ui-redesign.md §六点五）。
  * 唯一的例外是歌词纸的字号与描边比例：那是**成片排版**而不是界面排版，
  * 与界面字号刻度无关，所以按倍率从 --fs-2xl 推出来并集中在本块顶部。
+ *
+ * 倍率从 1.5 降到 1.2：合并之后正文只占舞台上半区的一部分，1.5 倍下一屏只剩
+ * 四五行，"整首歌里找出机器猜错的读音"这件事就退化成逐行翻页。
  */
 const CSS = `
-.kvm-ruby {
-  --paper-fs: calc(var(--fs-2xl) * 1.5);
-  --paper-stroke: 0.055em;
-  --rail-w: 300px;
-  display: flex;
-  gap: var(--sp-4);
-  height: 100%;
-  min-height: 0;
-}
-
 .kvm-ruby__canvas {
+  --paper-fs: calc(var(--fs-2xl) * 1.2);
+  --paper-stroke: 0.05em;
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
@@ -514,15 +714,17 @@ const CSS = `
   align-items: center;
   gap: var(--sp-3);
   flex-wrap: wrap;
-  padding-bottom: var(--sp-3);
+  padding-bottom: var(--sp-2);
   border-bottom: var(--hairline);
   font-size: var(--fs-sm);
   color: var(--fg-2);
 }
 .kvm-ruby__spacer { flex: 1 1 auto; }
-.kvm-ruby__metatoggle { flex: 0 0 auto; }
+.kvm-ruby__metatoggle, .kvm-ruby__reviewtoggle { flex: 0 0 auto; display: inline-flex; align-items: center; gap: var(--sp-1); }
 /* 打开时按"手工干预"着色：这是一次显式的额外显示，不是默认状态 */
 .kvm-ruby__metatoggle[data-on] { color: var(--src-manual); border-color: var(--src-manual); }
+.kvm-ruby__reviewtoggle[data-warn] { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, var(--stroke)); }
+.kvm-ruby__reviewtoggle[data-on] { background: var(--accent-weak); border-color: var(--accent); }
 .kvm-ruby__warn { color: var(--warn); }
 .kvm-ruby__notice { color: var(--ok); }
 .kvm-ruby__muted { color: var(--fg-3); margin: 0; }
@@ -552,8 +754,8 @@ const CSS = `
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
-  margin-top: var(--sp-3);
-  padding: var(--sp-4) var(--sp-3);
+  margin-top: var(--sp-2);
+  padding: var(--sp-3);
   background: var(--bg-canvas);
   border: var(--hairline);
   border-radius: var(--r-lg);
@@ -568,11 +770,26 @@ const CSS = `
   border-radius: var(--r-md);
 }
 .kvm-ruby__line[data-active] { background: var(--accent-weak); }
+.kvm-ruby__line[data-editing] { background: var(--bg-surface); align-items: center; }
+
+/* 改文字的入口：常驻会在每一行右边挂一排图标，喧宾夺主；只在这一行上时露出来 */
+.kvm-ruby__linebtn { flex: 0 0 auto; align-self: center; opacity: 0; }
+.kvm-ruby__line:hover .kvm-ruby__linebtn,
+.kvm-ruby__line[data-active] .kvm-ruby__linebtn,
+.kvm-ruby__linebtn:focus-visible { opacity: 1; }
+
+.edit-linetext { flex: 1 1 auto; display: flex; align-items: center; gap: var(--sp-1); min-width: 0; }
+.edit-linetext__input {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--fs-xl);
+  -webkit-text-stroke-width: 0;
+}
 /* 展开出来的制作名单行压暗：它们在这一步不是工作对象，只是拿来核对判定对不对 */
 .kvm-ruby__line[data-meta] { opacity: 0.6; }
 .kvm-ruby__no {
   flex: 0 0 auto;
-  width: var(--sp-6);
+  width: var(--sp-5);
   text-align: right;
   font-size: var(--fs-sm);
   color: var(--fg-3);
@@ -660,15 +877,8 @@ const CSS = `
   -webkit-text-stroke-width: 0;
 }
 
-/* ---- 右侧辅助栏 ---- */
+/* ---- 检查器与待检查清单共用的盒子 ---- */
 
-.kvm-ruby__rail {
-  flex: 0 0 var(--rail-w);
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-3);
-}
 .kvm-ruby__box {
   display: flex;
   flex-direction: column;
@@ -679,6 +889,26 @@ const CSS = `
   border-radius: var(--r-lg);
 }
 .kvm-ruby__box--grow { flex: 1 1 auto; min-height: 0; }
+/*
+ * 底栏形态：检查器与走带、时间栏同处一条横带，所以字段横排。
+ * 盒子本身不再画边框——它已经坐在底栏那条分隔线上，再套一层框只是噪音。
+ */
+.kvm-ruby__box--bar {
+  flex: 1 1 auto;
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  padding: 0;
+  min-width: 0;
+  background: transparent;
+  border: none;
+}
+.kvm-ruby__box--bar .kvm-ruby__field { flex: 0 1 168px; }
+.kvm-ruby__box--bar .kvm-ruby__field input { font-size: var(--fs-md); }
+.kvm-ruby__box--bar .kvm-ruby__cands { flex: 0 1 auto; min-width: 0; }
+.kvm-ruby__box--bar .kvm-ruby__chips { flex-wrap: nowrap; overflow-x: auto; max-width: 220px; }
+
 .kvm-ruby__boxtitle {
   display: flex;
   align-items: center;
@@ -736,6 +966,7 @@ const CSS = `
   border-radius: var(--r-pill);
   border: var(--hairline);
   color: var(--fg-2);
+  white-space: nowrap;
 }
 .kvm-ruby__chip[data-src=provider] { color: var(--src-provider); border-color: var(--src-provider); }
 .kvm-ruby__chip[data-src=dict] { color: var(--src-aligned); border-color: var(--src-aligned); }

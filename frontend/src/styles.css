@@ -82,6 +82,14 @@
   /* ---- 外壳尺寸 ---- */
   --topbar-h: 48px;
 
+  /*
+   * 编辑舞台的三条固定栏宽。视频**不参与横向空间竞争**——它只用于随时确认观感，
+   * 优先级排在逐字轴、波形、歌词正文之后（docs/ui-redesign.md §四）。
+   */
+  --edit-video-w: 340px;
+  --edit-tools-w: 208px;
+  --edit-review-w: 224px;
+
   /* ==== DEPRECATED：旧变量别名，第二阶段收编五套内联 CSS 后整段删除 ==== */
   --bg-0: var(--bg-canvas);
   --bg-1: var(--bg-panel);
@@ -472,27 +480,188 @@ label.checkbox-row {
   gap: var(--sp-4);
 }
 
-/* 左窄右宽的两栏舞台（注音：左选行、右编辑） */
-.stage--cols {
-  flex-direction: row;
+/* ---- 编辑舞台：上（画面 + 歌词正文）、下（波形 + 逐字轴），底部一条检查器 ---- */
+
+/*
+ * 版面比例按"要改什么"排：**逐字轴 > 波形 > 歌词正文 > 视频**。
+ * 视频只用于随时确认观感，所以给固定窄栏，不参与横向空间的竞争；
+ * 歌词正文吃掉剩余宽度，实际工作发生在下半区。
+ */
+.stage--edit {
   min-height: 0;
 }
-.stage__aside {
-  flex: 0 0 240px;
+
+/* 上半区三栏并排。每一栏都写 min-height:0，否则内部滚动区永远滚不动（§七点五） */
+.edit-top {
+  display: flex;
+  gap: var(--sp-3);
+  padding: var(--sp-3);
+  overflow: hidden;
+}
+
+/* 画面栏。宽度固定 —— "视频小、靠左"是这一步的定位，不是临时观感 */
+.edit-video {
+  flex: 0 0 var(--edit-video-w);
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/*
+ * Preview 的外部约束。Preview 内部全是内联样式且不归本次改动所有，
+ * 所以这里只能按结构选子元素：第一个 div 是画面块（内联写死 16:9），
+ * 第二个 div 是走带控件条，再往后是可选的问题提示列表。
+ *
+ * 画面块按栏宽取 16:9 的自然高度（340px → 191px），**只收缩不拉伸**：
+ * 让它 `flex-grow` 会把 16:9 的画拉进一个瘦长的框里，上下各留一大片黑边——
+ * 那正是这次要修的"视频太大且浪费"。栏子矮到装不下时它自己缩，画面靠
+ * `object-fit: contain` 保持比例。
+ *
+ * 走带控件条固定在本栏底部。**打轴模式下空格是"打点"不是"播放"**
+ * （Timeline 刻意独占了空格），走带被裁掉就等于没有任何办法起播，
+ * 是真正的功能死角，不是观感问题。
+ */
+.edit-preview {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+.edit-preview > div:first-child {
+  flex: 0 1 auto;
+  min-height: 0;
+}
+.edit-preview > div:nth-child(2) {
+  flex: 0 0 auto;
+}
+/* 环境问题提示（缺代理、放不了这个容器…）可能很长，让它自己滚，不许顶走走带 */
+.edit-preview > ul {
+  flex: 0 1 auto;
   min-height: 0;
   overflow-y: auto;
-  border-right: var(--hairline);
-  background: var(--bg-panel);
 }
-.stage__main {
+
+/* 画面右侧的窄控件栏：整体偏移，以及展开后的待检查清单 */
+.edit-tools {
+  flex: 0 0 var(--edit-tools-w);
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  overflow-y: auto;
+}
+
+/* 歌词正文：这一步的第三主角，吃掉剩余宽度 */
+.edit-lyrics {
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
-  overflow-y: auto;
-  padding: var(--sp-5);
+  display: flex;
 }
 
-/* ---- 对轴舞台：上画面、下波形，中间一条可拖分割条 ---- */
+/* 待检查清单，默认收着（它吃横向空间，而正文才是主对象） */
+.edit-review {
+  flex: 0 0 var(--edit-review-w);
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+}
+
+/* 波形轨。高度由分割条给定，内容更高时自己滚（打轴面板展开时就会） */
+.edit-rail {
+  overflow-y: auto;
+  border-top: var(--hairline);
+  background: var(--bg-panel);
+}
+
+/* ---- 整体偏移（三级调轴的「整体」级，紧凑成一张小卡片） ---- */
+
+.edit-offset {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--bg-panel);
+  border: var(--hairline);
+  border-radius: var(--r-lg);
+}
+.edit-offset__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+.edit-offset__title {
+  font-size: var(--fs-sm);
+  color: var(--fg-2);
+}
+.edit-offset__row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+.edit-offset__value {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: right;
+}
+/* 四个档位平分一行：等宽才看得出它们是一组同类动作 */
+.edit-offset__nudge {
+  flex: 1 1 0;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  padding-left: 0;
+  padding-right: 0;
+  justify-content: center;
+}
+.edit-offset__unit {
+  color: var(--fg-3);
+  font-size: var(--fs-xs);
+}
+
+/* ---- 底栏检查器：同一个选中项的时间与读音并排 ---- */
+
+.edit-inspect {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--bg-panel);
+  border-top: var(--hairline);
+  /* 候选一多就换行，但绝不许它把上面的时间轴顶掉 */
+  max-height: 33vh;
+  overflow-y: auto;
+}
+.edit-inspect__timing {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+.edit-inspect__tok {
+  font-size: var(--fs-xl);
+  font-weight: 600;
+}
+.edit-inspect__num {
+  color: var(--fg-2);
+  font-size: var(--fs-sm);
+}
+.edit-inspect__nudges {
+  display: flex;
+  gap: var(--sp-1);
+}
+/* 已锁定的时间：与注音锁同一个"手工"语义色，两把锁不该是两种颜色 */
+.edit-inspect button[data-on] {
+  color: var(--src-manual);
+  border-color: var(--src-manual);
+}
+
+/* ---- 上下分割条（编辑舞台在用） ---- */
 
 /*
  * 分割容器。两栏都是 `flex-basis: 0` + grow 因子，剩余空间严格按比例分；
@@ -561,118 +730,9 @@ label.checkbox-row {
   background: var(--accent);
 }
 
-/*
- * 画面区。
- *
- * 旧版是"居中 + overflow:hidden"，而 Preview 内部把 16:9 画面块和走带控件条
- * 堆在一列里：画面按宽度算出来的高度一旦超过本区高度，控件条就被推到区外裁掉。
- * **打轴模式下空格是"打点"不是"播放"**（Timeline 刻意独占了空格），走带被裁掉
- * 就等于没有任何办法起播，是真正的功能死角，不是观感问题。
- *
- * 改法只能在容器侧：Preview 是全应用唯一的播放时钟，不动它。本区改成纵向 flex，
- * 再由下面的 .stage-preview 规则把画面块设成可收缩、控件条固定，
- * 让控件条永远贴在本区底部。
- *
- * 背景不再涂黑：黑色属于画面本身（Preview 的画面块自带黑底），涂在整区上会让
- * 走带控件条也坐在黑底上，和外壳的低饱和基调打架（§六）。
- */
-.stage__viewport {
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  padding: var(--sp-2);
-  background: var(--bg-canvas);
-}
-
-/*
- * Preview 的外部约束。Preview 内部全是内联样式且不归本次改动所有，
- * 所以这里只能按结构选子元素：第一个 div 是画面块（内联写死 16:9），
- * 第二个 div 是走带控件条，再往后是可选的问题提示列表。
- *
- * 画面块保持 16:9、按**高度**收缩、宽度由比例反推再水平居中，
- * 而不是拉伸铺满：铺满会让画面在宽扁的窗格里 letterbox 出大片黑边，白占地方。
- */
-.stage-preview {
-  width: 100%;
-  height: 100%;
-  min-height: 0;
-}
-.stage-preview > div:first-child {
-  flex: 1 1 auto;
-  min-height: 0;
-  align-self: center;
-  max-width: 100%;
-}
-.stage-preview > div:nth-child(2) {
-  flex: 0 0 auto;
-}
-
-/* 波形轨。高度由分割条给定，内容更高时自己滚（打轴面板展开时就会） */
-.stage__rail {
-  overflow-y: auto;
-  border-top: var(--hairline);
-  background: var(--bg-panel);
-}
-
-.stage-toolbar {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  padding: var(--sp-2) var(--sp-3);
-  background: var(--bg-panel);
-  border-bottom: var(--hairline);
-  font-size: var(--fs-sm);
-  color: var(--fg-2);
-}
-.stage-toolbar__spacer {
-  flex: 1 1 auto;
-}
-
 .stage__empty {
   margin: auto;
   color: var(--fg-3);
-}
-
-/* ---- 行列表（注音舞台选行用；第二阶段的歌词/注音舞台会复用） ---- */
-
-.linelist {
-  display: flex;
-  flex-direction: column;
-  padding: var(--sp-2);
-  gap: 2px;
-}
-.linelist__item {
-  display: flex;
-  align-items: baseline;
-  gap: var(--sp-2);
-  text-align: left;
-  background: transparent;
-  border-color: transparent;
-  color: var(--fg-2);
-  padding: var(--sp-1) var(--sp-2);
-  font-size: var(--fs-sm);
-  overflow: hidden;
-}
-.linelist__item:hover:not(:disabled) {
-  background: var(--bg-surface);
-  color: var(--fg);
-}
-.linelist__item--active {
-  background: var(--accent-weak);
-  color: var(--fg);
-}
-.linelist__no {
-  flex: 0 0 auto;
-  width: 22px;
-  color: var(--fg-3);
-  font-variant-numeric: tabular-nums;
-}
-.linelist__text {
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 /* ---- 首页 ---- */
@@ -753,10 +813,10 @@ label.checkbox-row {
   font-variant-numeric: tabular-nums;
 }
 
-/* 六段进度：与顶栏步骤条同一套判据，卡片上一眼看出这首歌走到哪 */
+/* 分段进度：与顶栏步骤条同一套判据（五步），卡片上一眼看出这首歌走到哪 */
 .pcard__steps {
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 3px;
 }
 .pcard__seg {

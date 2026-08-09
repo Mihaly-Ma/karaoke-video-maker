@@ -1,14 +1,24 @@
 /**
- * 注音舞台的右侧辅助栏：选中词的两份读音、候选、锁定，以及「待检查」清单。
+ * 选中词的读音检查器（两份读音、候选、锁定），以及「待检查」清单。
  *
  * 两份读音必须同时在场（CLAUDE.md §4.2）：
  * **表记读法**是渲染到注音行的形态（助词「は」这里写「は」），
  * **发音形**是喂 G2P / 强制对齐的形态（同一个字这里是「ワ」）。
  * 只存一份的后果是二选一的系统性错误——要么注音行显示错，要么对齐器去找 /h/。
+ *
+ * ## 两种形态，同一份逻辑
+ *
+ * 对轴与注音合并成一步之后，检查器从右侧竖栏挪到了舞台底栏，与**时间**并排——
+ * 「选中「運命」｜起点 1:12.340 ｜注音 サダメ」说的是同一个词的两半。
+ * 竖栏形态（`layout='rail'`）仍然保留，因为待检查清单还挂在侧栏里。
+ *
+ * 两种形态只差排布，校验、拍数、候选、拆分判断全部共用——复制一份"横版检查器"
+ * 意味着假名校验规则要维护两处，那正是这次重做要消灭的东西。
+ * 时间那一半由 `leading` 插槽注入，本组件不认识时间轴。
  */
 
 import { DeleteOutlined, LockOutlined, ScissorOutlined, UnlockOutlined, WarningOutlined } from '@ant-design/icons'
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 
 import { t } from '../i18n'
 import {
@@ -35,6 +45,10 @@ export interface RubyInspectorProps {
   busy: boolean
   /** 已保存的发音形覆盖；为空表示还没人改过，用推导值 */
   phoneticOverride: string
+  /** `bar` = 舞台底栏横排（默认的合并形态），`rail` = 竖栏 */
+  layout?: 'rail' | 'bar'
+  /** 排在读音字段之前的插槽。底栏用它放同一个词的**时间**信息 */
+  leading?: ReactNode
   onApplyReading: (unit: RubyUnit, text: string) => void
   onSplit: (unit: RubyUnit, reading: string) => void
   onDelete: (unit: RubyUnit) => void
@@ -47,6 +61,8 @@ export function RubyInspector({
   units,
   busy,
   phoneticOverride,
+  layout = 'bar',
+  leading,
   onApplyReading,
   onSplit,
   onDelete,
@@ -69,10 +85,13 @@ export function RubyInspector({
     setPhonetic(phoneticOverride || derivePhonetic(saved || (unit?.kind === 'kana' ? unit.text : '')))
   }, [key, saved, phoneticOverride, unit])
 
+  const boxClass = `kvm-ruby__box${layout === 'bar' ? ' kvm-ruby__box--bar' : ''}`
+
   if (!unit) {
     return (
-      <section className="kvm-ruby__box">
-        <h4 className="kvm-ruby__boxtitle">{t('ruby.inspect.title')}</h4>
+      <section className={boxClass}>
+        {layout === 'rail' && <h4 className="kvm-ruby__boxtitle">{t('ruby.inspect.title')}</h4>}
+        {leading}
         <p className="kvm-ruby__muted">{t('ruby.inspect.hint')}</p>
       </section>
     )
@@ -97,11 +116,14 @@ export function RubyInspector({
   }
 
   return (
-    <section className="kvm-ruby__box">
-      <h4 className="kvm-ruby__boxtitle">{t('ruby.inspect.title')}</h4>
+    <section className={boxClass}>
+      {layout === 'rail' && <h4 className="kvm-ruby__boxtitle">{t('ruby.inspect.title')}</h4>}
+      {leading}
 
       <div className="kvm-ruby__word">
-        <span className="kvm-ruby__wordtext">{unit.text}</span>
+        <span className="kvm-ruby__wordtext" data-role="selected-word">
+          {unit.text}
+        </span>
         {/* 纯假名本来就不该有注音，这里不挂徽章；缺注音的汉字才要红牌提醒 */}
         {(unit.span || unit.missing) && (
           <span className="kvm-ruby__chip" data-src={unit.span ? unit.src : 'none'}>
@@ -115,6 +137,7 @@ export function RubyInspector({
         <span className="kvm-ruby__label">{t('ruby.field.display')}</span>
         <input
           type="text"
+          data-field="display"
           value={draft}
           disabled={!annotatable || busy}
           placeholder={annotatable ? t('ruby.field.displayPlaceholder') : t('ruby.field.kanaOnly')}
@@ -155,6 +178,7 @@ export function RubyInspector({
         </span>
         <input
           type="text"
+          data-field="phonetic"
           value={phonetic}
           disabled={busy}
           placeholder={t('ruby.field.derived')}

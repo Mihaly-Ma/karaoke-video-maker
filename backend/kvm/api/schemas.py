@@ -590,6 +590,21 @@ class SetLockRequest(BaseModel):
     items: list[LockItem] = Field(default_factory=list)
 
 
+class SetLineTextRequest(BaseModel):
+    """改写一行的**书写文本**。
+
+    CLAUDE.md §2.5 要求每个自动环节都有等价的手工旁路，歌词文本是最基础的一项：
+    歌词源认错版本、送假名写法不同、当て字被写成别的字都是常态，而在此之前
+    唯一的改法是把整首歌重新粘贴一遍（连带丢掉全部手工成果）。
+
+    `text` 是这一行的完整新文本，不含换行——分行是拆行/并行的事。
+    """
+
+    project_id: str
+    line_id: str
+    text: str
+
+
 class SetRubyRequest(BaseModel):
     project_id: str
     line_id: str

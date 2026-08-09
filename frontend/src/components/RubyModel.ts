@@ -84,6 +84,14 @@ export interface RubyUnit {
   span: RubySpan | null
   /** 首字符所属 token 下标，用于把全局选中同步过去 */
   tokenIndex: number
+  /**
+   * 末字符所属 token 下标 + 1（左闭右开）。
+   *
+   * 有了它，「选中词」才能同时给出**时间**（跨这些 token 的起止）与**读音**——
+   * 合并后的编辑舞台正是靠这一条把两半接在同一个选中项上。只有起点下标的话，
+   * 整词注音的「食べる」在时间栏里只能显示「食」那一拍。
+   */
+  tokenEnd: number
   kind: UnitKind
   /** 该注音的来源档位；没有注音时为 `none` */
   src: SourceKey
@@ -134,6 +142,7 @@ export function buildUnits(line: Line): RubyUnit[] {
       if (last && last.spanIndex < 0 && last.end === g.start && segOfChar[last.end - 1] === segOfChar[g.start]) {
         last.end = g.end
         last.text += g.text
+        last.tokenEnd = (tokenOfChar[g.end - 1] ?? last.tokenIndex) + 1
         continue
       }
     }
@@ -146,6 +155,7 @@ export function buildUnits(line: Line): RubyUnit[] {
       spanIndex: g.spanIndex,
       span,
       tokenIndex: tokenOfChar[g.start] ?? 0,
+      tokenEnd: (tokenOfChar[g.end - 1] ?? tokenOfChar[g.start] ?? 0) + 1,
       kind,
       src: span ? sourceKey(span.source) : 'none',
       missing: !span && containsKanji(g.text),
@@ -170,6 +180,17 @@ export function buildProjectUnits(lines: readonly Line[]): Map<string, RubyUnit[
 
 /** 这个单元能不能挂注音：纯假名挂了会渲染出「あ|あ」这种冗余标注（CLAUDE.md §4.2）。 */
 export const canAnnotate = (u: RubyUnit): boolean => containsKanji(u.text) || u.kind === 'other'
+
+/**
+ * 找出覆盖某个 token 的词。
+ *
+ * 时间轴上选中的是 **token**，而注音挂在**词**（行内字符区间）上，两者粒度不同：
+ * 「明日」两个字共用「あした」时是一个词、两个 token。合并后的编辑舞台要让
+ * "在逐字轴上点一个字，歌词正文与检查器跟着落到同一处"，这一步换算就发生在这里。
+ */
+export function unitOfToken(units: readonly RubyUnit[], tokenIndex: number): RubyUnit | null {
+  return units.find((u) => u.tokenIndex <= tokenIndex && tokenIndex < u.tokenEnd) ?? null
+}
 
 // ---- 表记读法 与 发音形 ----
 

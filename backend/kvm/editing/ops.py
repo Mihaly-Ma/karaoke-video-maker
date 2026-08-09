@@ -1192,6 +1192,352 @@ def merge_line(project: ProjectDTO, *, line_id: str) -> EditOutcome:
     return out
 
 
+# ---- 改行文本 ----
+#
+# 这是 §2.5「每个自动环节都必须有等价的手工旁路」里此前唯一空着的一档：歌词文本
+# 本身。歌词源认错版本、送假名写法不同、当て字被写成别的字——这些都不是罕见情况，
+# 而在此之前唯一的改法是把整首歌重新粘贴一遍（连带丢掉全部手工成果）。
+#
+# 难点不在于换字符串，而在于 **token 是计时单元**：改一个字会让 token 边界变化，
+# 它的时间、注音、发音形、各种 locked 标记必须跟过去。这与"重新导入歌词"是同一个
+# 问题的单行版本，所以下面全程复用那一套（`_build_geometry` / `_map_tokens` /
+# `_map_local_span` / `_place_span`），不另写一套重绑逻辑。
+#
+# §4.4 的两条纪律照旧：行内落点以 tid 为主、字符偏移兜底且要求**严格重合**，
+# 差一个字就宁可不绑；绑不上的手工修改一律进「失效修正」清单，绝不静默丢弃。
+# （改文本这一步 tid 帮不上忙——行文本一变，该行全部 tid 就都变了，
+# 所以这里直接走字符偏移那条兜底，见 `_map_tokens` 的说明。）
+
+
+_UNSET_TIMING = "unset"
+"""「从未定过时」。`TimingSource` 枚举里没有这一档（它描述的是"时间从哪来"，
+而这一档的含义是"还没有时间"），DTO 侧一直用的就是这个字面量。"""
+
+_LINE_GRANULARITY = "line"
+"""时间的权威粒度只到行级。纯文本导入的行就是这一档（见 `lyrics.importer.parse_text`）。"""
+
+
+def _is_ascii_word_char(ch: str) -> bool:
+    return ch.isascii() and (ch.isalnum() or ch in "'’-")
+
+
+def _split_units(text: str) -> list[str]:
+    """把一段新输入切成 token：逐字一个，但**连续的 ASCII 词整块成词**。
+
+    CLAUDE.md §6.2：日语歌词里的英文段落不能按字符切 `\\k`，`sumika` 逐字母
+    扫光是滑稽的，歌词源给出来的也是整块。
+    """
+    units: list[str] = []
+    buf = ""
+    for ch in text:
+        if _is_ascii_word_char(ch):
+            buf += ch
+            continue
+        if buf:
+            units.append(buf)
+            buf = ""
+        units.append(ch)
+    if buf:
+        units.append(buf)
+    return units
+
+
+def _retokenize(old_line: LineDTO, new_text: str) -> list[str]:
+    """新行的 token 切分：**改动之外的地方一律沿用老边界**。
+
+    这是"改一个字、其余全都保住"的前提。`_map_tokens` 要求映射后的字符区间与
+    某个新 token **严格重合**才肯绑（§4.4：差一个字宁可不绑），所以边界只要
+    整体重切一遍，整行的时间与声部就会全部绑不上——明明只改了一个字。
+
+    改动区域没有老边界可依，按逐字（ASCII 词整块）切；整行只有一个 token 的
+    （纯文本导入的行）保持整行一个 token，不要替用户擅自切成逐字。
+    """
+    old_text = _line_text(old_line)
+    if len(old_line.tokens) <= 1:
+        # 整行装在一个 token 里（纯文本 / LRC 导入的行，权威粒度只到行级）：
+        # 保持整行一个 token。替用户擅自切成逐字等于凭空宣称有了逐字权威。
+        return [new_text]
+    starts = set(_token_char_offsets(old_line))
+    matcher = difflib.SequenceMatcher(a=old_text, b=new_text, autojunk=False)
+
+    pieces: list[str] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "delete":
+            continue
+        chunk = new_text[j1:j2]
+        if not chunk:
+            continue
+        if tag != "equal":
+            pieces.extend(_split_units(chunk))
+            continue
+        cut = 0
+        for k in range(1, i2 - i1):
+            if i1 + k in starts:
+                pieces.append(chunk[cut:k])
+                cut = k
+        pieces.append(chunk[cut:])
+    return [p for p in pieces if p]
+
+
+def _carry_edited_token(old: TokenDTO, new: TokenDTO) -> None:
+    """把老 token 的全部时间与声部搬到文本未变的新 token 上。
+
+    与重新导入时的 `_carry_token` 有一处关键不同：**连没锁的时间也搬**。
+    重新导入带来了歌词源自己的逐字轴，没锁的旧值本就该被新值覆盖；而改文本
+    不产生任何新时间，此处没有"新值"可言，只搬锁定项等于把用户已经打好的轴
+    清成一片未打轴。
+
+    `tid` 一并搬过来：tid 只在导入那一刻生成一次（见 `lyrics.importer._assign_tids`），
+    此后拆行/并行都是搬运既有 token，改文本对未变的字也应当如此，
+    将来重新导入歌词时它们才仍有主键可依。
+    """
+    new.start_ms = old.start_ms
+    new.dur_ms = old.dur_ms
+    new.timing_source = old.timing_source
+    new.timing_granularity = old.timing_granularity
+    new.locked_timing = old.locked_timing
+    new.voice_part = old.voice_part
+    new.locked_voice = old.locked_voice
+    new.tid = old.tid
+
+
+def _fill_unbound_timing(
+    line: LineDTO, *, bound: set[int], window: tuple[int, int] | None, out: EditOutcome
+) -> int:
+    """给新打进去的字补时间：在两侧已绑音节之间等分。
+
+    标 `interpolated` 而不是别的（§4.2）：这个字从来没被实测过，标成
+    provider/aligned 就是伪造粒度，界面上"哪些数字可信"这条反馈会随之失效；
+    标成 manual 更糟——用户并没有确认过这个时间。整行原本就没打过轴时
+    （`window is None`）保持 `unset`，那是"从未定过时"，与"算出来的"不是一回事。
+
+    没有空位时（前后都被锁死、且首尾相接）宁可挤在一起并回报，也不动锁定值：
+    §4.4 的底线是自动逻辑绝不覆盖用户锁定的项。
+    """
+    n = len(line.tokens)
+    free = [i for i in range(n) if i not in bound]
+    if not free or window is None:
+        return 0
+
+    filled = 0
+    tight = 0
+    i = 0
+    while i < n:
+        if i in bound:
+            i += 1
+            continue
+        j = i
+        while j < n and j not in bound:
+            j += 1
+        run = list(range(i, j))
+        prev = line.tokens[i - 1] if i > 0 else None
+        nxt = line.tokens[j] if j < n else None
+        lo = prev.start_ms + prev.dur_ms if prev is not None else window[0]
+        hi = nxt.start_ms if nxt is not None else window[1]
+        need = len(run) * MIN_DUR_MS
+
+        # 纯插入（老文本里没有对应的字被删掉）时前后是首尾相接的，空位为 0，
+        # 只能从没锁的邻居那里借一点时长出来
+        if hi - lo < need and prev is not None and not prev.locked_timing:
+            take = min(need - (hi - lo), max(0, prev.dur_ms - MIN_DUR_MS))
+            prev.dur_ms -= take
+            lo -= take
+        if hi - lo < need and nxt is not None and not nxt.locked_timing:
+            take = min(need - (hi - lo), max(0, nxt.dur_ms - MIN_DUR_MS))
+            nxt.start_ms += take
+            nxt.dur_ms -= take
+            hi += take
+
+        lo = max(0, lo)
+        span = hi - lo
+        if span < need:
+            tight += len(run)
+            span = need
+        for k, ti in enumerate(run):
+            tok = line.tokens[ti]
+            start = lo + span * k // len(run)
+            end = lo + span * (k + 1) // len(run)
+            tok.start_ms = start
+            tok.dur_ms = max(MIN_DUR_MS, end - start)
+            tok.timing_source = TimingSource.INTERPOLATED.value
+            tok.locked_timing = False
+            filled += 1
+        i = j
+
+    if tight:
+        out.warnings.append(
+            f"{tight} 个新增音节两侧都被锁定的时间夹住，没有空位，已按最小时长排开，请手工调整"
+        )
+    return filled
+
+
+def set_line_text(project: ProjectDTO, *, line_id: str, text: str) -> EditOutcome:
+    """改写一行的书写文本，尽最大可能保住这一行上的手工成果。
+
+    行为按改动幅度自然分档，不需要用户选：改一个字时其余音节的时间、注音、
+    发音形、声部全部原样跟过来；整行重写时几乎没有东西能对上，那些锁定过的
+    修改会进「失效修正」清单——那正是正确结果，不是失败。
+
+    `text` 不允许为空（要删掉一行请与相邻行合并），也不允许含换行
+    （一次只改一行；分行是拆行/并行的事，两件事混在一个接口里会让撤销粒度失控）。
+    """
+    out = EditOutcome()
+    idx, old_line = _find_line(project, line_id)
+
+    if "\n" in text or "\r" in text:
+        msg = "行文本不能含换行：分行请用拆行"
+        raise EditError(msg)
+    new_text = text.strip()
+    if not new_text:
+        msg = "行文本不能为空：要去掉这一行请与相邻行合并"
+        raise EditError(msg)
+
+    old_text = _line_text(old_line)
+    if new_text == old_text:
+        return out
+
+    granularity = (
+        old_line.tokens[0].timing_granularity if old_line.tokens else _LINE_GRANULARITY
+    )
+    unset_line = bool(old_line.tokens) and all(
+        t.timing_source == _UNSET_TIMING for t in old_line.tokens
+    )
+    window: tuple[int, int] | None = None
+    if old_line.tokens and not unset_line:
+        first, last = old_line.tokens[0], old_line.tokens[-1]
+        window = (first.start_ms, last.start_ms + last.dur_ms)
+
+    new_line = old_line.model_copy(
+        deep=True,
+        update={
+            "tokens": [
+                TokenDTO(
+                    text=piece,
+                    start_ms=0,
+                    dur_ms=0,
+                    timing_source=_UNSET_TIMING,
+                    timing_granularity=granularity,
+                )
+                for piece in _retokenize(old_line, new_text)
+            ],
+            # 注音与发音形先清空，下面按字符区间逐条搬回来：直接留着会用老下标
+            # 指向新文本，「明日」的注音可能落到别的两个字上——绑错比绑不上更糟
+            "ruby": [],
+            "phonetics": [],
+        },
+    )
+
+    # 整曲对齐的单行退化：`_build_geometry` 收的就是行序列，传一行进去得到的
+    # 正是"这一行改了什么"的字符对应关系，无需另写一份
+    geo = _build_geometry([old_line], [new_line])
+    # tid 在这里帮不上忙（行文本一变，该行全部 tid 就都变了），直接走字符偏移兜底
+    token_map = _map_tokens(old_line, 0, 0, {}, geo, new_line)
+
+    if not token_map and len(old_line.tokens) == 1 and len(new_line.tokens) == 1:
+        # 整行一个 token 的行（纯文本 / LRC 导入）：token 就是这一行，它的时间说的是
+        # **这一行**什么时候唱，与写了哪几个字无关。改字不该把它降级成插值，
+        # 更不该把「尚未打轴」变成「算出来的」。
+        token_map = {0: 0}
+    for ti, target in token_map.items():
+        _carry_edited_token(old_line.tokens[ti], new_line.tokens[target])
+
+    lost_ruby: list[RubySpanDTO] = []
+    for sp in old_line.ruby:
+        target_span = _map_local_span(geo, 0, 0, sp.start, sp.end)
+        if target_span is None:
+            lost_ruby.append(sp)
+            continue
+        new_line.ruby = _place_span(new_line.ruby, sp, target_span)
+
+    lost_phonetics: list[PhoneticSpanDTO] = []
+    for sp in old_line.phonetics:
+        target_span = _map_local_span(geo, 0, 0, sp.start, sp.end)
+        if target_span is None:
+            # 没锁的发音形是推导出来的，下面重推一遍就回来了，不算损失
+            if sp.locked:
+                lost_phonetics.append(sp)
+            continue
+        new_line.phonetics = _place_span(new_line.phonetics, sp, target_span)
+
+    filled = _fill_unbound_timing(
+        new_line, bound=set(token_map.values()), window=window, out=out
+    )
+    project.lines[idx] = new_line
+
+    # 改过字的地方读音单元会重新划分，锁定的照旧不动（§4.4）
+    _rederive_phonetics(new_line, materialized=bool(old_line.phonetics))
+
+    _record_retext_orphans(
+        project,
+        out,
+        line_id=line_id,
+        old_text=old_text,
+        ruby=lost_ruby,
+        phonetics=lost_phonetics,
+    )
+    out.warnings.append(
+        f"「{_preview_text(old_text)}」→「{_preview_text(new_text)}」："
+        f"{len(token_map)} 个音节的时间原样保留，{filled} 个新音节的时间由插值推算"
+    )
+    return out
+
+
+def _record_retext_orphans(
+    project: ProjectDTO,
+    out: EditOutcome,
+    *,
+    line_id: str,
+    old_text: str,
+    ruby: Sequence[RubySpanDTO],
+    phonetics: Sequence[PhoneticSpanDTO],
+) -> None:
+    """把改文本后无处安放的注音与发音形逐条记进「失效修正」清单（§4.4）。
+
+    文案带上被注音的**原文**：用户看到「『明日』的注音『あした』」能立刻认出是
+    哪个词，看到"字符区间 3-5"还得回去数。`payload` 留够重新应用所需的原始数据。
+    """
+    for sp in ruby:
+        base = old_text[sp.start : sp.end]
+        _add_orphan(
+            project,
+            out,
+            kind="ruby",
+            detail=(
+                f"「{base}」的注音「{sp.text}」所在的字已被改写，无法迁移，请重新标注"
+                + ("（这条是你手工锁定过的）" if sp.locked else "")
+            ),
+            payload={
+                "line_id": line_id,
+                "start": sp.start,
+                "end": sp.end,
+                "text": sp.text,
+                "source": sp.source,
+                "locked": sp.locked,
+                "base": base,
+            },
+        )
+    for sp in phonetics:
+        base = old_text[sp.start : sp.end]
+        _add_orphan(
+            project,
+            out,
+            kind="phonetic",
+            detail=(
+                f"「{base}」上你锁定过的发音形「{sp.text}」所在的字已被改写，"
+                "无法迁移，请重新填写"
+            ),
+            payload={
+                "line_id": line_id,
+                "start": sp.start,
+                "end": sp.end,
+                "text": sp.text,
+                "source": sp.source,
+                "locked": sp.locked,
+                "base": base,
+            },
+        )
+
+
 # ---- 声部 ----
 
 

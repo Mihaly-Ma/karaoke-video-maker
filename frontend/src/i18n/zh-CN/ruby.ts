@@ -1,4 +1,7 @@
-/** 「注音」舞台文案。由该舞台的实现者维护，其余舞台不要改本文件。 */
+/**
+ * 「编辑」舞台里**与读音有关**的文案（歌词正文、注音、待检查清单、检查器的读音栏）。
+ * 时间那一半在 `align.ts`，两份合起来才是这一个舞台。
+ */
 export const ruby: Record<string, string> = {
   'ruby.empty.project': '还没有打开工程',
   'ruby.empty.lines': '这个工程还没有歌词',
@@ -19,7 +22,8 @@ export const ruby: Record<string, string> = {
 
   // 辅助栏
   'ruby.inspect.title': '选中词',
-  'ruby.inspect.hint': '点歌词里的词开始改',
+  'ruby.inspect.hint': '点歌词或逐字轴里的字',
+  'ruby.reading': '读音',
   'ruby.field.display': '表记读法',
   'ruby.field.phonetic': '发音形',
   'ruby.field.displayPlaceholder': '假名读音',
@@ -42,6 +46,15 @@ export const ruby: Record<string, string> = {
   'ruby.review.title': '待检查',
   'ruby.review.empty': '没有待检查的项',
   'ruby.review.count': '{n} 处',
+
+  // 改写行文本（§2.5 的手工旁路：歌词本身也得能改）
+  'ruby.lineText.edit': '改文字',
+  'ruby.lineText.label': '这一行的歌词',
+  'ruby.lineText.placeholder': '这一行的歌词',
+  'ruby.lineText.save': '保存',
+  // 回执说的是后果，不是"已保存"：推算出来的时间要复核，逐字轴上是插值色
+  'ruby.lineText.done': '已改写：{kept} 字保留原时间，{guessed} 字待复核',
+  'ruby.lineText.orphaned': '，{n} 项进了失效修正',
 
   // 提示与报错
   'ruby.msg.splitFailed': '读音与这个词对不上，无法拆分',

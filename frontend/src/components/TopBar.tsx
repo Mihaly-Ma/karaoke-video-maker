@@ -2,11 +2,10 @@ import {
   AppstoreOutlined,
   BgColorsOutlined,
   CheckOutlined,
+  EditOutlined,
   ExportOutlined,
-  FieldTimeOutlined,
   FileTextOutlined,
   RollbackOutlined,
-  TranslationOutlined,
   VideoCameraOutlined,
 } from '@ant-design/icons'
 import type { ComponentType } from 'react'
@@ -22,11 +21,14 @@ import { STEP_LABEL, STEP_ORDER, type StepKey, type StepStatus } from '../workfl
  * （docs/ui-redesign.md §三），所以它居中、占据视线中心，两侧只放低频操作。
  */
 
+/**
+ * 「编辑」用 EditOutlined 而不是原先对轴的 FieldTimeOutlined：合并后这一步同时管
+ * 时间与读音，钟表只说了一半。
+ */
 const STEP_ICON: Record<StepKey, ComponentType> = {
   media: VideoCameraOutlined,
   lyrics: FileTextOutlined,
-  align: FieldTimeOutlined,
-  ruby: TranslationOutlined,
+  edit: EditOutlined,
   style: BgColorsOutlined,
   export: ExportOutlined,
 }

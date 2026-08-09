@@ -2,19 +2,15 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import type { JobStatus } from './api/types'
 import { useProject } from './state/projectStore'
-import { STEP_ORDER, stepStatus, type StepKey } from './workflow'
+import { normalizeStep, stepStatus, type StepKey } from './workflow'
 
+import EditStage from './components/EditStage'
 import ExportPanel from './components/ExportPanel'
 import HomeView from './components/HomeView'
 import JobProgress from './components/JobProgress'
-import LineList from './components/LineList'
 import LyricPanel from './components/LyricPanel'
 import MediaPanel from './components/MediaPanel'
-import Preview from './components/Preview'
-import RubyEditor from './components/RubyEditor'
-import StageSplit from './components/StageSplit'
 import StylePanel from './components/StylePanel'
-import Timeline from './components/Timeline'
 import TopBar from './components/TopBar'
 
 /**
@@ -28,31 +24,14 @@ import TopBar from './components/TopBar'
  *
  * 核心原则是"中间舞台属于当前步骤的主对象"。此前中间区域被写死成"预览 + 时间轴"，
  * 与在第几步无关，于是搜歌词时最大的一块屏幕摆着一个此刻毫无用处的播放器。
- * 现在预览+时间轴只是**对轴**这一步的舞台形态。
+ * 现在预览+时间轴只是**编辑**这一步的舞台形态。
  *
- * 播放 transport 归舞台所有，全局不设播放器：只有对轴舞台挂了 Preview，
+ * 播放 transport 归舞台所有，全局不设播放器：只有编辑舞台挂了 Preview，
  * 切换步骤即停止播放，"同屏两个播放按钮"结构上不可能出现（§五）。
  */
 
 /** 每个工程各记各的步骤：点卡片进去应该回到它上次所在的那一步（§三点五） */
 const stepKey = (projectId: string) => `kvm.step.${projectId}`
-
-/**
- * 对轴舞台的分割位置。**全工程共用一个键**，不按工程分：
- * 它是"我这块屏幕上画面留多高"的偏好，跟在编哪首歌无关。
- */
-const ALIGN_SPLIT_KEY = 'kvm.split.align'
-
-/**
- * 画面默认占 42%，波形占 58%——契约要求"默认波形占更大比例"（§四 对轴）。
- * 旧布局是画面 62% / 波形 38%，正好反了：实际工作发生在波形上。
- *
- * 58% 这个具体数字不是拍脑袋：1440×900 下它给到波形栏 480px，而时间轴**展开打轴
- * 面板后实测 465px**，正好装得下。于是进出打轴模式不再重排版面——旧布局里波形栏
- * 按内容取高，一进打轴模式画面区就从 531px 掉到 386px，画面跟着跳一下。
- * 打轴是一等公民（CLAUDE.md §2.5），按它的高度定默认值。
- */
-const ALIGN_SPLIT_DEFAULT = 0.42
 
 export default function App() {
   const [view, setView] = useState<'home' | 'editor'>('home')
@@ -78,8 +57,15 @@ export default function App() {
   const openProject = useCallback(
     (id: string) => {
       void load(id)
-      const saved = localStorage.getItem(stepKey(id))
-      setStep(STEP_ORDER.includes(saved as StepKey) ? (saved as StepKey) : 'media')
+      /*
+       * 老工程记下的可能是已经合并掉的 `align` / `ruby`，归一化到 `edit`
+       * （见 workflow.ts 的 normalizeStep）。**顺手把归一化结果写回去**：
+       * 不写回的话每次打开这个工程都要再翻译一次，而下次改步骤集合时
+       * 又得多认一层历史。
+       */
+      const next = normalizeStep(localStorage.getItem(stepKey(id)))
+      localStorage.setItem(stepKey(id), next)
+      setStep(next)
       setView('editor')
     },
     [load],
@@ -107,7 +93,7 @@ export default function App() {
   //
   // 空格只在**拥有 transport 的舞台**上生效：别处按空格会把 playing 置真却没有
   // 任何执行者，表现为"按了没反应，再按也停不下来"。
-  const hasTransport = view === 'editor' && step === 'align'
+  const hasTransport = view === 'editor' && step === 'edit'
   useEffect(() => {
     const isEditableTarget = (el: EventTarget | null) =>
       el instanceof HTMLElement &&
@@ -182,30 +168,10 @@ export default function App() {
             <LyricPanel />
           </main>
         )
-      // 只有这一步挂 Preview——"预览 + 时间轴"是对轴的舞台形态，不是全局外壳
-      case 'align':
-        return (
-          <main className="stage">
-            <AlignToolbar />
-            {/*
-              画面与波形之间是可拖的分割条（§四 对轴）。给 Preview 传 className 是
-              为了从**容器侧**把它的画面块设成可收缩——Preview 是全应用唯一的播放
-              时钟，不能改，而它内部把 16:9 画面块和走带控件条堆在一列里，
-              画面一超高就把走带挤出视口。打轴模式下空格被时间轴占去打点，
-              走带一旦裁掉就没有任何办法起播。样式见 styles.css 的 .stage-preview。
-            */}
-            <StageSplit
-              storageKey={ALIGN_SPLIT_KEY}
-              defaultTop={ALIGN_SPLIT_DEFAULT}
-              topClassName="stage__viewport"
-              bottomClassName="stage__rail"
-              top={<Preview className="stage-preview" />}
-              bottom={<Timeline />}
-            />
-          </main>
-        )
-      case 'ruby':
-        return <RubyStage />
+      // 只有这一步挂 Preview——"预览 + 时间轴"是编辑的舞台形态，不是全局外壳。
+      // 对轴与注音合并在这一个舞台里，版面见 EditStage。
+      case 'edit':
+        return <EditStage />
       case 'style':
         return (
           <main className="stage stage--scroll">
@@ -263,60 +229,11 @@ export default function App() {
   )
 }
 
-/**
- * 对轴舞台的工具条：把选中的行/词整段平移。
+/*
+ * 这里曾有两个只服务于旧划分的组件：
  *
- * 只在选中了行或词时出现——全曲平移时间轴自己已经有一条"整体偏移"，
- * 再摆一份就是这次重做要消灭的"同一操作在多处重复出现"。
+ * - `AlignToolbar`（平移选中行/词的一条横带）—— 现在是底栏检查器里贴着时间的那组
+ *   ±10/±100 按钮。平移的对象就是检查器正在显示的那个字，摆在一起才对得上。
+ * - `RubyStage`（左选行 + 右改读音）—— 整个并进 `EditStage`：选行不再需要一个
+ *   专用列表，时间轴与歌词正文本身就是选行的入口。
  */
-function AlignToolbar() {
-  const selection = useProject((s) => s.selection)
-  const shift = useProject((s) => s.shift)
-
-  if (selection.kind === 'none') return null
-  const scope = selection.kind
-
-  return (
-    <div className="stage-toolbar">
-      <span>平移{scope === 'line' ? '选中行' : '选中词'}</span>
-      <div className="nudges">
-        {[-1000, -100, -10, 10, 100, 1000].map((ms) => (
-          <button key={ms} type="button" className="small" onClick={() => void shift(scope, ms)}>
-            {ms > 0 ? `+${ms}` : ms}
-          </button>
-        ))}
-      </div>
-      <span className="stage-toolbar__spacer" />
-    </div>
-  )
-}
-
-/**
- * 注音舞台：左边选行，右边逐词改读音。
- *
- * 进来时自动选中第一条正文行——RubyEditor 只编辑"当前选中行"，而选中行此前
- * 唯一的来源是时间轴。不自动选，这一步打开就是一句"请先选中一行"的死胡同。
- * 跳过制作名单行（「词：xxx」这类），它们不需要注音。
- */
-function RubyStage() {
-  const project = useProject((s) => s.project)
-  const selection = useProject((s) => s.selection)
-  const select = useProject((s) => s.select)
-
-  useEffect(() => {
-    if (selection.kind !== 'none' || !project) return
-    const first = project.lines.find((l) => !l.is_metadata && l.tokens.length > 0)
-    if (first) select({ kind: 'line', lineId: first.id })
-  }, [project, selection.kind, select])
-
-  return (
-    <main className="stage stage--cols">
-      <aside className="stage__aside">
-        <LineList />
-      </aside>
-      <div className="stage__main">
-        <RubyEditor />
-      </div>
-    </main>
-  )
-}
