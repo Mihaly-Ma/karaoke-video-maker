@@ -16,11 +16,18 @@ export const media: Record<string, string> = {
   'media.preview.noResolution': '分辨率未知',
   'media.preview.usingProxy': '预览用代理',
   'media.preview.usingOriginal': '预览用原始文件',
-  'media.proxy.missing': '还没有编辑代理',
+  // 代理没有音轨（契约 D15），所以画面要配一条音轨才有声音
+  'media.preview.companion': '伴随音轨',
+  'media.preview.companionNone': '静音',
+
+  // ---- 编辑代理 ----
+  'media.proxy.title': '编辑代理',
+  'media.proxy.missing': '未生成',
   'media.proxy.needVideo': '需要先获取视频',
   'media.proxy.build': '生成代理',
   'media.proxy.rebuild': '重新生成',
   'media.proxy.building': '生成编辑代理',
+  'media.proxy.buildingState': '生成中',
 
   // ---- 人声分离 ----
   'media.separate.title': '人声分离',
@@ -48,6 +55,7 @@ export const media: Record<string, string> = {
   'media.track.empty.instrumental': '尚未分离',
   'media.track.empty.drums': '尚未分离',
   'media.track.playError': '试听不可用',
+  'media.track.seek': '拖动跳转',
   'media.track.waveLoading': '生成波形中…',
   'media.track.waveQueued': '等待中…',
   'media.track.waveError': '波形不可用',

@@ -5,7 +5,8 @@ import * as api from '../api/client'
 import { t } from '../i18n'
 import { useProject } from '../state/projectStore'
 import type { Project } from '../api/types'
-import MediaTrackCard, { type TrackKind } from './MediaTrackCard'
+import MediaProxyCard from './MediaProxyCard'
+import MediaTrackCard, { trackPath, type TrackKind } from './MediaTrackCard'
 import MediaVideoPreview from './MediaVideoPreview'
 
 /**
@@ -421,8 +422,11 @@ export default function MediaPanel({
           </section>
         </div>
 
-        {/* ---- 右：画面预览 + 音轨卡片 ---- */}
+        {/* ---- 右：编辑代理 + 画面预览 + 音轨卡片 ---- */}
         <div className="kvm-media__col">
+          {/* 代理排在最上：没有它 Safari 直接没画面，是本步骤的关键产物而不是
+              可选加速项，理由见 MediaProxyCard 头部注释 */}
+          <MediaProxyCard project={project} />
           <MediaVideoPreview project={project} onPlayback={claimPlayback} />
 
           <div className="kvm-media-tracks">
@@ -451,19 +455,6 @@ export default function MediaPanel({
       </div>
     </div>
   )
-}
-
-function trackPath(project: Project, kind: TrackKind): string | null {
-  switch (kind) {
-    case 'audio':
-      return project.audio_path
-    case 'vocals':
-      return project.vocals_path
-    case 'instrumental':
-      return project.instrumental_path
-    case 'drums':
-      return project.drums_path
-  }
 }
 
 const CSS = `
@@ -591,6 +582,54 @@ const CSS = `
   cursor: pointer;
 }
 
+/* ---- 编辑代理（右栏首块，最先进入视线） ---- */
+
+.kvm-media-proxy {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--bg-surface);
+  border: var(--hairline);
+  border-radius: var(--r-lg);
+}
+/* 需要用户动手时才染强调色；就绪后退回中性，避免一张永远高亮的卡片变成噪音 */
+.kvm-media-proxy--action {
+  background: var(--accent-weak);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--stroke));
+}
+.kvm-media-proxy--ready {
+  border-color: color-mix(in srgb, var(--ok) 30%, var(--stroke));
+}
+.kvm-media-proxy__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.kvm-media-proxy__icon {
+  font-size: var(--fs-lg);
+  color: var(--accent);
+  flex: 0 0 auto;
+}
+.kvm-media-proxy__title {
+  font-weight: 600;
+  color: var(--fg);
+}
+.kvm-media-proxy__state {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  margin-left: auto;
+  color: var(--fg-2);
+  font-size: var(--fs-sm);
+}
+.kvm-media-proxy__dot--ok {
+  color: var(--ok);
+}
+.kvm-media-proxy__dot--warn {
+  color: var(--warn);
+}
+
 /* ---- 画面预览 ---- */
 
 .kvm-media-preview {
@@ -628,13 +667,19 @@ const CSS = `
 }
 .kvm-media-preview__meta {
   display: flex;
+  align-items: center;
   gap: var(--sp-1);
   flex-wrap: wrap;
 }
-.kvm-media-preview__proxybar {
-  display: flex;
+.kvm-media-preview__companion {
+  display: inline-flex;
   align-items: center;
-  gap: var(--sp-2);
+  gap: var(--sp-1);
+  margin-left: auto;
+  color: var(--fg-2);
+  font-size: var(--fs-sm);
+}
+.kvm-media-preview__companion select {
   font-size: var(--fs-sm);
 }
 
@@ -695,11 +740,39 @@ const CSS = `
   color: var(--fg-2);
   font-size: var(--fs-sm);
 }
+.kvm-media-track__time {
+  color: var(--fg);
+}
 .kvm-media-track__wave {
+  position: relative;
   height: 44px;
   border-radius: var(--r-sm);
   overflow: hidden;
   background: var(--bg-raise);
+  touch-action: none; /* 指针拖动定位时不要被浏览器当成滚动手势吃掉 */
+}
+.kvm-media-track__wave--seekable {
+  cursor: pointer;
+}
+/* 已播区域与播放头都覆盖在波形之上：Waveform 是纯渲染封装，不改它。
+   z-index 必须显式给：wavesurfer 内部给自己的 canvas 层写了 z-index:2/5，
+   不压过它，播放头会被波形本体盖掉、只在波峰之间的空隙里露一点点。 */
+.kvm-media-track__played {
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 6;
+  background: var(--accent-weak);
+  pointer-events: none;
+}
+.kvm-media-track__playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 7;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--accent);
+  pointer-events: none;
 }
 .kvm-media-track__wave-status {
   height: 100%;

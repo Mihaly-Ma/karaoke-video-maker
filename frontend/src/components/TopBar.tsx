@@ -5,13 +5,13 @@ import {
   ExportOutlined,
   FieldTimeOutlined,
   FileTextOutlined,
-  RedoOutlined,
+  RollbackOutlined,
   TranslationOutlined,
-  UndoOutlined,
   VideoCameraOutlined,
 } from '@ant-design/icons'
 import type { ComponentType } from 'react'
 
+import { t } from '../i18n'
 import { useProject } from '../state/projectStore'
 import { STEP_LABEL, STEP_ORDER, type StepKey, type StepStatus } from '../workflow'
 
@@ -55,25 +55,39 @@ export default function TopBar({ step, status, onStep, onHome }: TopBarProps) {
           <span className="topbar__project-name">{project?.title || '未命名'}</span>
         </button>
 
+        {/*
+         * 撤销/重做为什么不是 antd 的 UndoOutlined / RedoOutlined：那两个图标的
+         * 路径是一段约 330° 的圆弧加一个箭头，也就是**一个几乎闭合的圆圈**，
+         * 与 ReloadOutlined / SyncOutlined 的轮廓几乎无法区分——用户实际读成了
+         * "旋转/刷新"。RollbackOutlined 是"箭头退回上一格"的方框造型，完全没有
+         * 圆弧，跟刷新类图标不存在混淆空间；重做用它的水平镜像，方向对称，
+         * 两个按钮并排时"往回 / 往前"一眼可读。
+         * 镜像仍然是 Ant Design 的图标资产，没有自绘 SVG（docs/ui-redesign.md §六）。
+         *
+         * 另外配上文字：15px 下 RollbackOutlined 的方框比里面的箭头抢眼，光看图标
+         * 仍要犹豫一下。docs/ui-redesign.md §六 允许"工具条这类空间紧张且动作高频
+         * 的地方"用图标加文字——撤销/重做正是编辑器里最高频的两个动作，值得花这点
+         * 横向空间换取零歧义。步骤条在 `1fr auto 1fr` 的中列，不受左侧变宽影响。
+         */}
         <button
           type="button"
-          className="iconbtn"
+          className="ghost small"
           disabled={!canUndo}
           onClick={() => void undo()}
           title="撤销 (Ctrl/Cmd+Z)"
-          aria-label="撤销"
+          aria-label={t('common.undo')}
         >
-          <UndoOutlined />
+          <RollbackOutlined /> {t('common.undo')}
         </button>
         <button
           type="button"
-          className="iconbtn"
+          className="ghost small"
           disabled={!canRedo}
           onClick={() => void redo()}
           title="重做 (Shift+Ctrl/Cmd+Z)"
-          aria-label="重做"
+          aria-label={t('common.redo')}
         >
-          <RedoOutlined />
+          <RollbackOutlined style={{ transform: 'scaleX(-1)' }} /> {t('common.redo')}
         </button>
       </div>
 
