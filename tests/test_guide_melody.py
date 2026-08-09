@@ -48,6 +48,7 @@ from kvm.pipeline.guide_melody import (  # noqa: E402
     frames_to_notes,
     group_phrases,
     harmonic_weights,
+    median_filter_f0,
     merge_same_pitch,
     quantize_notes,
     synth_guide,
@@ -305,6 +306,64 @@ def test_voicing_from_energy_fills_a_hole_a_pitch_tracker_would_leave() -> None:
 
     assert coverage_s(by_tracker) < 0.7 * coverage_s(by_energy)
     assert len(by_energy) == 1  # 整句应当是一个连贯的长音
+
+
+# ---------------------------------------------------------------------------
+# 缺陷 5：孤立的几帧音高跳变会被切分放大成一整个错音
+# ---------------------------------------------------------------------------
+
+
+def test_median_filter_removes_isolated_spike() -> None:
+    """用户听到的"跑调"里有一类就是这个：CREPE 抖两帧，被切分放大成 140ms 的错音。"""
+    f0 = np.array([A4] * 5 + [A4 * 2] + [A4] * 5)  # 中间一帧跳高八度
+    out = median_filter_f0(f0, 5)
+    assert out == pytest.approx(np.full(11, A4), rel=1e-6)
+
+
+def test_median_filter_keeps_real_note_changes() -> None:
+    """真正的换音（持续多帧）不能被抹平，否则旋律会糊掉。"""
+    f0 = np.array([A4] * 8 + [B4] * 8)
+    out = median_filter_f0(f0, 5)
+    assert out[:6] == pytest.approx(A4)
+    assert out[-6:] == pytest.approx(B4)
+
+
+def test_median_filter_is_identity_when_disabled() -> None:
+    f0 = np.array([A4, B4, AS4, A4])
+    assert median_filter_f0(f0, 1) == pytest.approx(f0)
+
+
+def test_median_filter_works_in_log_pitch_domain() -> None:
+    """音程是比值关系：赫兹域取中值会偏向高音，必须在对数域做。"""
+    # 以 A4 为中心、上下各一个八度：正确的中值是 A4 本身
+    f0 = np.array([A4 / 2, A4 * 2, A4])
+    out = median_filter_f0(f0, 3)
+    assert out[1] == pytest.approx(A4, rel=1e-9)
+
+
+def test_median_filter_does_not_drag_endpoints_inward() -> None:
+    """边界用端点复制：否则每个乐句的头尾音都会被拉向相邻音。"""
+    f0 = np.array([A4] * 4 + [B4] * 4)
+    out = median_filter_f0(f0, 5)
+    assert out[0] == pytest.approx(A4)
+    assert out[-1] == pytest.approx(B4)
+
+
+def test_median_filter_preserves_invalid_frames() -> None:
+    """滤波不负责补洞：原本无效的帧必须仍然无效，否则会凭空造出发声区间。"""
+    f0 = np.array([A4, np.nan, A4, A4, A4])
+    out = median_filter_f0(f0, 3)
+    assert np.isnan(out[1])
+    assert np.isfinite(out[[0, 2, 3, 4]]).all()
+
+
+def test_median_filter_rejects_even_window() -> None:
+    with pytest.raises(ValueError, match="奇数"):
+        median_filter_f0(np.array([A4, B4]), 4)
+
+
+def test_median_filter_handles_empty_input() -> None:
+    assert median_filter_f0(np.array([]), 5).size == 0
 
 
 # ---------------------------------------------------------------------------

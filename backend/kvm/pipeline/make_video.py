@@ -188,6 +188,11 @@ def main() -> int:
              "调低会补上更多空洞但可能填进休止，调高相反",
     )
     ap.add_argument(
+        "--guide-pitch-median", type=int, default=guide_defaults.pitch_median_frames,
+        help="音高中值滤波窗口（奇数帧，每帧 10ms，1 表示关闭）。"
+             "压掉 CREPE 偶发的孤立跳变，避免被切分放大成错音",
+    )
+    ap.add_argument(
         "--guide-crepe-model", choices=("full", "tiny"), default=guide_defaults.crepe_model,
         help="CREPE 音高模型。tiny（2MB）比 full（89MB）快很多但更容易走音，"
              "纯 CPU 机器上可换",
@@ -277,6 +282,7 @@ def main() -> int:
             gain=args.guide_gain,
             voicing_drop_db=args.guide_voicing_db,
             crepe_model=args.guide_crepe_model,
+            pitch_median_frames=args.guide_pitch_median,
         )
         guide_path = args.out.with_name("guide_melody.wav")
         print(f"合成引导声…（CREPE-{guide_cfg.crepe_model} 提取音高）")
