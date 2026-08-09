@@ -48,7 +48,7 @@ import type { Palette, Project } from '../api/types'
 import { t } from '../i18n'
 import { assToCssHex } from '../lib/assColor'
 import { alignReading, normalizeKana, toHiragana, validateKana } from '../lib/kana'
-import { useProject } from '../state/projectStore'
+import { locateLineId, useProject } from '../state/projectStore'
 import { EditLineText, submitLineText } from './EditLineText'
 import {
   buildProjectUnits,
@@ -460,6 +460,160 @@ export function useRubyEditing(): RubyEditing {
   }
 }
 
+// ---------------------------------------------------------------- 跟随播放
+
+/**
+ * 用户手动滚过歌词之后，暂停自动滚动多久。
+ *
+ * 有这个缓冲是因为**被界面拽着走比不滚更烦人**：用户往上翻两行去核对前一句时，
+ * 自动滚动会立刻把视口抢回去，那两行永远看不成。到点自愈而不是永久关闭，
+ * 是为了不让"跟随"悄无声息地失效——真要长期关掉，工具条上的「跟随」才是那个开关。
+ */
+const FOLLOW_RESUME_MS = 4000
+
+/**
+ * 自己滚完之后这么久内的 `scroll` 事件不算用户操作。
+ *
+ * `scrollTop = x` 触发的 scroll 事件是异步派发的（浏览器在 rAF 时机发），
+ * 不加这道闸门，每一次自动滚动都会把自己当成"用户在滚"，跟随就此停摆。
+ */
+const SELF_SCROLL_GRACE_MS = 150
+
+/**
+ * 跟着播放头高亮当前行，并在必要时把它滚进视口。
+ *
+ * ## 为什么整块都是命令式的
+ *
+ * `playheadMs` 是 60fps 级别的更新，而歌词正文有近百行、每行十几个 `<span>`。
+ * 把它订阅成 React state（`useProject((s) => s.playheadMs)`）会让整屏歌词
+ * **每帧重建一次虚拟 DOM 并做一次协调**——这不是"可能有点卡"，是必然的掉帧。
+ *
+ * 所以这里只做两件事：算出"当前是哪一行"（只在跨行时才变），
+ * 然后直接给那个 DOM 节点挂 `data-playing`。React 全程不参与，
+ * 一次跨行只产生 2 次属性变更（摘掉旧的、挂上新的）。
+ *
+ * ## 为什么每次渲染后还要重贴一次
+ *
+ * `data-playing` 不在 JSX 里，React 不认识它：正文因别的原因重渲时
+ * （改写行文本、拆行、展开制作名单）新建出来的行节点身上没有这个属性，
+ * 高亮就会凭空消失，而播放头并没有变、订阅回调也不会再触发。
+ * 兜底是渲染后无条件重贴一次，代价是两次 querySelector。
+ *
+ * ## 播放高亮 ≠ 选中
+ *
+ * 两者是不同的东西，视觉必须分开：选中是**编辑焦点**（底栏检查器在编谁），
+ * 播放高亮是**现在唱到这里**，它们经常落在不同的行上（一边听一边改前一句时
+ * 总是如此）。所以这里只写 `data-playing`，绝不去碰 `selection`。
+ */
+function usePlayheadLine(
+  paperRef: RefObject<HTMLDivElement>,
+  suspended: boolean,
+  /**
+   * 歌词纸这一刻是否已经渲染出来。**必须显式传进来当依赖**：
+   * 工程还在加载时正文整块不渲染，`paperRef.current` 是 null，
+   * 只挂一次的 effect 会当场返回、而且再也不会重跑 —— 监听器就此永远没挂上。
+   * 实测代价：用户滚动歌词后自动滚动照抢不误（抑制完全失效），
+   * 而高亮本身照常工作，所以肉眼很难发现是"监听没挂"。
+   */
+  ready: boolean,
+): void {
+  const suspendedRef = useRef(suspended)
+  suspendedRef.current = suspended
+
+  /** 当前高亮的行 id。刻意用 ref：它每帧都要被重新求值，进 state 就前功尽弃 */
+  const lineIdRef = useRef<string | null>(null)
+  /** 最近一次用户手动滚动的时刻 */
+  const userScrollAtRef = useRef(0)
+  /** 最近一次自己滚动的时刻，用来把自己触发的 scroll 事件排除掉 */
+  const selfScrollAtRef = useRef(0)
+
+  const applyRef = useRef<(force: boolean) => void>(() => undefined)
+  applyRef.current = (force: boolean) => {
+    const paper = paperRef.current
+    if (!paper) return
+    const { project, playheadMs, followPlayhead } = useProject.getState()
+    const id = locateLineId(project, playheadMs)
+    const changed = id !== lineIdRef.current
+    if (!changed && !force) return
+    lineIdRef.current = id
+
+    const prev = paper.querySelector('[data-playing]')
+    if (prev instanceof HTMLElement && prev.dataset.line !== id) prev.removeAttribute('data-playing')
+    if (!id) return
+    const el = paper.querySelector(`[data-line="${id}"]`)
+    if (!(el instanceof HTMLElement)) return
+    el.setAttribute('data-playing', '')
+
+    // 只在**跨行**时才考虑滚动。重贴（force）不滚：那是渲染后的补写，
+    // 视口本来就没有理由动
+    if (!changed || !followPlayhead || suspendedRef.current) return
+    if (Date.now() - userScrollAtRef.current < FOLLOW_RESUME_MS) return
+    scrollLineIntoView(paper, el, selfScrollAtRef)
+  }
+
+  // 渲染后重贴。无依赖数组 = 每次渲染都跑，这正是本 effect 的用途（见上）
+  useEffect(() => {
+    applyRef.current(true)
+  })
+
+  useEffect(() => {
+    const paper = paperRef.current
+    if (!paper) return
+    /*
+     * 用户在滚 vs 自己在滚。两条证据并用：
+     * - wheel / touchmove 是**确凿的**用户手势，不受时间窗竞争影响；
+     * - scroll 事件覆盖拖滚动条与键盘翻页，但自己滚也会触发，
+     *   靠 SELF_SCROLL_GRACE_MS 排除。
+     * 只用其中一条都会漏：只听 wheel 漏掉拖滚动条，只听 scroll 会有竞态。
+     */
+    const noteUser = () => {
+      userScrollAtRef.current = Date.now()
+    }
+    const onScroll = () => {
+      if (Date.now() - selfScrollAtRef.current < SELF_SCROLL_GRACE_MS) return
+      noteUser()
+    }
+    paper.addEventListener('wheel', noteUser, { passive: true })
+    paper.addEventListener('touchmove', noteUser, { passive: true })
+    paper.addEventListener('scroll', onScroll, { passive: true })
+    return () => {
+      paper.removeEventListener('wheel', noteUser)
+      paper.removeEventListener('touchmove', noteUser)
+      paper.removeEventListener('scroll', onScroll)
+    }
+  }, [paperRef, ready])
+
+  useEffect(() => {
+    // 只挑出播放头真的变了的那些通知：store 里任何字段的写入都会进这个回调
+    return useProject.subscribe((state, prev) => {
+      if (state.playheadMs !== prev.playheadMs) applyRef.current(false)
+    })
+  }, [])
+}
+
+/**
+ * 把当前行滚进视口——**只在它确实不在视口里时**。
+ *
+ * 用 `scrollTop` 而不是 `el.scrollIntoView()`：后者会连带滚动所有可滚祖先，
+ * 在这个"外层不滚、内部分区各自滚"的舞台里可能把整块面板顶掉。
+ *
+ * 上下各留一行余量再判断：正好卡在边缘的行虽然"可见"，但读起来仍要低头找，
+ * 而它下一秒就会滚出去。
+ */
+function scrollLineIntoView(
+  paper: HTMLElement,
+  el: HTMLElement,
+  selfScrollAtRef: { current: number },
+): void {
+  const pr = paper.getBoundingClientRect()
+  const er = el.getBoundingClientRect()
+  const pad = Math.min(er.height, pr.height / 4)
+  if (er.top >= pr.top + pad && er.bottom <= pr.bottom - pad) return
+  const next = paper.scrollTop + (er.top - pr.top) - (pr.height - er.height) / 2
+  selfScrollAtRef.current = Date.now()
+  paper.scrollTop = Math.max(0, next)
+}
+
 // ---------------------------------------------------------------- 正文
 
 export interface RubyPaperProps {
@@ -503,6 +657,13 @@ export function RubyPaper({ editing, reviewOpen, onToggleReview }: RubyPaperProp
 
   const selection = useProject((s) => s.selection)
   const selLineId = selection.kind === 'none' ? null : selection.lineId
+
+  /*
+   * 正在打字时不许抢视口：就地改写行文本、或者在某个词头上开着注音输入框时，
+   * 视口一动光标就跑了（注音输入框是绝对定位在词上方的，跟着行一起滚）。
+   * 高亮本身照常跟着走，被暂停的只有滚动。
+   */
+  usePlayheadLine(paperRef, editingLineId !== null || editingKey !== null, !!project)
 
   if (!project) {
     return <p className="kvm-ruby__muted">{t('ruby.empty.project')}</p>
@@ -696,6 +857,9 @@ export function RubyStyles() {
  *
  * 倍率从 1.5 降到 1.2：合并之后正文只占舞台上半区的一部分，1.5 倍下一屏只剩
  * 四五行，"整首歌里找出机器猜错的读音"这件事就退化成逐行翻页。
+ *
+ * **本块是模板字符串，注释里不能出现反引号**（按习惯给 `data-xxx` 加一对反引号
+ * 就会把字符串在那里截断，报出来的却是几十行之外莫名其妙的语法错误）。
  */
 const CSS = `
 .kvm-ruby__canvas {
@@ -771,6 +935,28 @@ const CSS = `
 }
 .kvm-ruby__line[data-active] { background: var(--accent-weak); }
 .kvm-ruby__line[data-editing] { background: var(--bg-surface); align-items: center; }
+
+/*
+ * 播放高亮。**与选中必须是两种视觉**，否则"现在唱到哪"和"我正在编哪个"会互相冒充：
+ *
+ * | 状态 | 视觉 | 说的是 |
+ * |---|---|---|
+ * | data-active | 强调色底 | 编辑焦点（底栏检查器在编这一行的字） |
+ * | data-playing | 左侧竖条 + 行号变色 | 现在唱到这里 |
+ *
+ * 竖条用 --danger 是刻意的：波形与逐字轴上那条播放头竖线就是这个颜色，
+ * 同一个"此刻"在三处用同一个颜色说。
+ *
+ * 用 inset box-shadow 而不是 border-left —— 后者会把整行往右挤 3px，
+ * 每跨一行整屏文字就抖一下。
+ */
+.kvm-ruby__line[data-playing] {
+  box-shadow: inset 3px 0 0 var(--danger);
+  background: color-mix(in srgb, var(--danger) 9%, transparent);
+}
+/* 正在唱的恰好就是选中那行时，强调色底不能被上面这条盖掉 */
+.kvm-ruby__line[data-playing][data-active] { background: var(--accent-weak); }
+.kvm-ruby__line[data-playing] .kvm-ruby__no { color: var(--danger); }
 
 /* 改文字的入口：常驻会在每一行右边挂一排图标，喧宾夺主；只在这一行上时露出来 */
 .kvm-ruby__linebtn { flex: 0 0 auto; align-self: center; opacity: 0; }

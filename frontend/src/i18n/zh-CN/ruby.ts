@@ -12,7 +12,8 @@ export const ruby: Record<string, string> = {
   'ruby.stat.spans': '{n} 处注音',
   'ruby.stat.review': '{n} 处待检查',
   'ruby.stat.locked': '{n} 处已锁定',
-  'ruby.legend': '来源',
+  // 同屏还有一条「时间来源」图例（时间轴底部），只写「来源」两条会互相冒充
+  'ruby.legend': '读音来源',
   'ruby.src.dict': '词典',
   'ruby.src.guess': '推断',
   'ruby.src.missing': '缺注音',
@@ -33,7 +34,8 @@ export const ruby: Record<string, string> = {
   'ruby.field.localHint': '发音形暂存在本机，工程文件里还没有这个字段',
   'ruby.mora': '{n} 拍',
   'ruby.candidates': '候选',
-  'ruby.lock': '锁定',
+  // 底栏并排着两把锁（时间 / 读音），只写「锁定」的那把等于没说锁的是什么
+  'ruby.lock': '锁定读音',
 
   // 动作
   'ruby.action.apply': '应用',

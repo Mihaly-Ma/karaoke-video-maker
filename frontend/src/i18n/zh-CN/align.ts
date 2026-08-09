@@ -22,16 +22,16 @@ export const align: Record<string, string> = {
   'align.rate': '速率',
   'align.rateHint': '变速由预览层执行，会同时改变音高',
   'align.follow': '跟随',
-  'align.followHint': '播放时跟随播放头滚动',
+  // 一个开关同时管波形与歌词正文，所以文案要把两处都说出来
+  'align.followHint': '播放时波形与歌词跟着播放头滚',
   'align.split': '拆行',
   'align.splitHint': '在选中的字之前拆成两行',
   'align.merge': '合并行',
   'align.mergeHint': '与下一行合并',
   'align.link': '边界联动',
   'align.linkHint': '拖边界时连带改相邻的字，保持首尾相接',
-  'align.audio': '试听',
-  'align.audioInstrumental': '伴奏',
-  'align.audioOriginal': '原声',
+  // 原「试听 伴奏/原声」下拉框已删：预览层的走带上本来就有同一组按钮，
+  // 改的还是 store 里同一个 audioMode。文案随控件一起去掉，不留孤儿键。
   'align.zoomIn': '放大',
   'align.zoomOut': '缩小',
   'align.fit': '整曲',

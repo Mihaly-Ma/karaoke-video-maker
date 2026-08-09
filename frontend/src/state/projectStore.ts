@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import * as api from '../api/client'
-import type { Line, LockTarget, Palette, Project, Token, TimingItem } from '../api/types'
+import type { LockTarget, Palette, Project, TimingItem } from '../api/types'
 
 /**
  * 编辑器状态层。
@@ -54,6 +54,14 @@ interface ProjectState {
   selection: Selection
   /** 试听伴奏还是原声。调轴时切到伴奏更容易听清节拍。 */
   audioMode: 'original' | 'instrumental'
+  /**
+   * 播放时是否跟着播放头走。
+   *
+   * 放在 store 而不是各面板自己一份：波形和歌词正文都要"跟随"，各存一份的话
+   * 界面上就会出现两个都叫「跟随」的开关，而用户想说的是同一件事。
+   * 一个开关同时管住波形滚动与歌词正文滚动，两处永远同进同退。
+   */
+  followPlayhead: boolean
 
   canUndo: boolean
   canRedo: boolean
@@ -75,6 +83,7 @@ interface ProjectState {
   setPlaybackRate: (v: number) => void
   select: (s: Selection) => void
   setAudioMode: (m: 'original' | 'instrumental') => void
+  setFollowPlayhead: (v: boolean) => void
 
   undo: () => Promise<void>
   redo: () => Promise<void>
@@ -139,6 +148,7 @@ export const useProject = create<ProjectState>((set, get) => {
     playbackRate: 1,
     selection: { kind: 'none' },
     audioMode: 'original',
+    followPlayhead: true,
     canUndo: false,
     canRedo: false,
 
@@ -188,6 +198,7 @@ export const useProject = create<ProjectState>((set, get) => {
     setPlaybackRate: (v) => set({ playbackRate: v }),
     select: (s) => set({ selection: s }),
     setAudioMode: (m) => set({ audioMode: m }),
+    setFollowPlayhead: (v) => set({ followPlayhead: v }),
 
     undo: () => withProject(api.undo),
     redo: () => withProject(api.redo),
@@ -251,20 +262,40 @@ export const useProject = create<ProjectState>((set, get) => {
   }
 })
 
-/** 找出播放头当前所在的行与 token，供预览高亮与"跟随播放"使用。 */
-export function locate(project: Project | null, ms: number): { line?: Line; token?: Token; tokenIndex: number } {
-  if (!project) return { tokenIndex: -1 }
-  const t = ms - project.global_offset_ms
+/**
+ * 播放头当前唱到哪一行。**"跟随播放高亮"的唯一定义**——歌词正文与时间轴行轨
+ * 都调它，两处才不会各说各的。
+ *
+ * 三条不显然的规定：
+ *
+ * 1. **入参是音频时间**（`playheadMs` 的基准），内部换算成工程时间；
+ *    调用方不必各自记得减 `global_offset_ms`。
+ * 2. **句内空隙期间不熄灭**。换气与词间停顿是真实存在的（CLAUDE.md §4.2
+ *    「句内空隙必须保住」，实测一首歌有 53 处正空隙、最大 280ms），
+ *    严格按「落在某行的首尾之间」判定会让整屏歌词一亮一灭。
+ *    落在空隙里时沿用**最近一个已经开唱的行**，到下一行开唱那一刻才交接。
+ * 3. **不假设行之间时间互斥**。§8.5 明确允许 `Line` 时间重叠（为"同一时刻两个
+ *    声部各走各的轴"预留），所以这里扫全部行取「起点最晚且已开唱」的那个，
+ *    而不是命中第一个就返回。第一版仍只高亮一行，但换成多声部时改的是这一个
+ *    函数，不是散落各处的判断。
+ *
+ * 复杂度 O(行数)，逐帧调用也远不到一帧预算（60 行 × 60fps ≈ 3.6k 次比较/秒）。
+ */
+export function locateLineId(project: Project | null, audioMs: number): string | null {
+  if (!project) return null
+  const t = audioMs - project.global_offset_ms
+  let bestId: string | null = null
+  let bestStart = -Infinity
   for (const line of project.lines) {
+    // 制作名单行不参与：它在正文里默认就不显示，高亮一个看不见的行等于没有高亮
     if (!line.tokens.length || line.is_metadata) continue
     const s = line.tokens[0].start_ms
-    const e = line.tokens[line.tokens.length - 1].start_ms + line.tokens[line.tokens.length - 1].dur_ms
-    if (t < s || t > e) continue
-    for (let i = 0; i < line.tokens.length; i++) {
-      const tk = line.tokens[i]
-      if (t >= tk.start_ms && t <= tk.start_ms + tk.dur_ms) return { line, token: tk, tokenIndex: i }
+    if (s > t) continue
+    // 取等也覆盖：同起点的重叠行按工程顺序取后者，与行轨的排布顺序一致
+    if (s >= bestStart) {
+      bestStart = s
+      bestId = line.id
     }
-    return { line, tokenIndex: -1 }
   }
-  return { tokenIndex: -1 }
+  return bestId
 }

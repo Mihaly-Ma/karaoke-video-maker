@@ -132,6 +132,12 @@ function TimingBlock({ unit }: { unit: RubyUnit | null }) {
         {t(meta.labelKey)}
       </span>
 
+      {/*
+        标签必须露出来。舞台左栏的「整体偏移」也是一模一样的四个 ±ms 按钮，
+        两组挨在同一屏上、长得完全一样却一个动全曲一个动一个字 ——
+        只把「平移」写进 aria-label 等于只对读屏软件说了，用眼睛的人看不到。
+      */}
+      <span className="kvm-ruby__label">{t('align.shift')}</span>
       <span className="edit-inspect__nudges" aria-label={t('align.shift')}>
         {NUDGES.map((ms) => (
           <button

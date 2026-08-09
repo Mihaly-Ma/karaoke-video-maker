@@ -62,13 +62,14 @@
  */
 
 import {
+  ColumnWidthOutlined,
   FieldTimeOutlined,
   LinkOutlined,
   LockOutlined,
   MergeCellsOutlined,
-  RedoOutlined,
   ScissorOutlined,
   UndoOutlined,
+  VerticalAlignMiddleOutlined,
   ZoomInOutlined,
   ZoomOutOutlined,
 } from '@ant-design/icons'
@@ -78,7 +79,7 @@ import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
 import * as api from '../api/client'
 import type { Line, Token } from '../api/types'
 import { t } from '../i18n'
-import { locate, useProject } from '../state/projectStore'
+import { locateLineId, useProject } from '../state/projectStore'
 import {
   buildTicks,
   clamp,
@@ -136,6 +137,9 @@ const NUDGE_MS = 10
 /** Shift+方向键 = 1 帧（按 30fps 估算） */
 const NUDGE_FRAME_MS = 33
 const NUDGE_FINE_MS = 1
+
+/** 试听速率的档位。§5.10 建议 0.5~0.75x 打点，1.0x 用来核对整体观感 */
+const RATE_OPTIONS = [0.5, 0.75, 1] as const
 
 export interface SourceMeta {
   /** 文案键。存键而不是存句子：模块级常量在 import 时求值，存句子等于把语言钉死 */
@@ -212,7 +216,25 @@ const CSS = `
 .kvm-tl button { display:inline-flex; align-items:center; gap:var(--sp-1);
   padding:var(--sp-1) var(--sp-2); border-radius:var(--r-sm); }
 .kvm-tl button[data-on="1"] { background:var(--accent-weak); border-color:var(--accent); color:var(--fg); }
-.kvm-tl select { padding:2px var(--sp-1); border-radius:var(--r-sm); }
+/*
+ * 按钮式 radio（一组并排按钮，选中的那个高亮）。
+ *
+ * **本舞台不用下拉框。** 这里的选择项都是三五个的小集合，而下拉框要点开才知道
+ * 有哪些选项、选完还得再点开一次才能确认当前值；摊开来是一眼可见 + 一次点击。
+ *
+ * 用真的 <input type=radio> 包在 <label> 里而不是拿 <button> 拼一组：单一 tab 停靠点、
+ * 与读屏软件的 radio 语义是白送的。**但方向键切换不能指望浏览器** ——
+ * Chromium 有、WebKit 实测没有，所以另外自己实现了一份（见 JSX 里的 onKeyDown）。
+ */
+.kvm-tl-seg { display:inline-flex; gap:2px; }
+.kvm-tl-seg label { position:relative; display:inline-flex; align-items:center;
+  padding:var(--sp-1) var(--sp-2); border:var(--hairline); border-radius:var(--r-sm);
+  color:var(--fg-2); cursor:pointer; white-space:nowrap; font-variant-numeric:tabular-nums; }
+.kvm-tl-seg label[data-on] { background:var(--accent-weak); border-color:var(--accent); color:var(--fg); }
+/* 原生 radio 藏起来但**保留可聚焦**：opacity:0 而不是 display:none */
+.kvm-tl-seg input { position:absolute; inset:0; width:100%; height:100%; opacity:0; margin:0; cursor:pointer; }
+/* 焦点态必须看得见，否则键盘用户不知道方向键正在动谁 */
+.kvm-tl-seg label:has(input:focus-visible) { outline:2px solid var(--accent); outline-offset:1px; }
 .kvm-tl input[type=number] { width:74px; padding:2px var(--sp-2); border-radius:var(--r-sm);
   font-variant-numeric:tabular-nums; }
 .kvm-tl-tok { position:absolute; box-sizing:border-box; border-radius:var(--r-sm) var(--r-sm) 0 0;
@@ -304,21 +326,23 @@ function blockBg(meta: SourceMeta, drafted: boolean): string {
 export function Timeline() {
   const project = useProject((s) => s.project)
   const selection = useProject((s) => s.selection)
-  const canUndo = useProject((s) => s.canUndo)
-  const canRedo = useProject((s) => s.canRedo)
   const audioMode = useProject((s) => s.audioMode)
   const storeError = useProject((s) => s.error)
   // 播放状态与速率都是 Preview 的（唯一时钟，见 projectStore 文件头）：
   // 这里只负责显示按钮状态、以及把用户的播放/变速意图写进去
   const playing = useProject((s) => s.playing)
   const rate = useProject((s) => s.playbackRate)
+  /**
+   * 「跟随」是全舞台一个开关（store），不是波形自己的本地状态：
+   * 歌词正文也要跟着播放头滚，两处各存一份就会变成两个都叫「跟随」的按钮。
+   */
+  const follow = useProject((s) => s.followPlayhead)
+  const setFollow = useProject((s) => s.setFollowPlayhead)
   const select = useProject((s) => s.select)
   const setPlayhead = useProject((s) => s.setPlayhead)
   const setPlaying = useProject((s) => s.setPlaying)
   const setRate = useProject((s) => s.setPlaybackRate)
   const setAudioMode = useProject((s) => s.setAudioMode)
-  const undo = useProject((s) => s.undo)
-  const redo = useProject((s) => s.redo)
   const shift = useProject((s) => s.shift)
   const setTiming = useProject((s) => s.setTiming)
   const splitLine = useProject((s) => s.splitLine)
@@ -339,7 +363,6 @@ export function Timeline() {
   const [pxPerSec, setPxPerSec] = useState(24)
   const [waveDurationMs, setWaveDurationMs] = useState(0)
   const [status, setStatus] = useState<WaveformStatus>({ kind: 'idle' })
-  const [follow, setFollow] = useState(true)
   const [linkNeighbor, setLinkNeighbor] = useState(true)
   const [viewWindow, setViewWindow] = useState({ startMs: 0, endMs: 0 })
   const [playheadLineId, setPlayheadLineId] = useState<string | null>(null)
@@ -503,9 +526,10 @@ export function Timeline() {
     const onPlayhead = (ms: number): void => {
       movePlayheadMarker(ms)
       followPlayhead(ms)
-      // locate 是 O(行数) 的线性扫描，逐帧跑也远不到一帧预算；
-      // 且行号相同时 setState 会被 React 直接丢弃，不会引起重渲
-      const id = locate(projectRef.current, ms).line?.id ?? null
+      // locateLineId 是 O(行数) 的线性扫描，逐帧跑也远不到一帧预算；
+      // 且行号相同时 setState 会被 React 直接丢弃，不会引起重渲。
+      // **与歌词正文调的是同一个函数**，两处不会各说各的（见其注释）
+      const id = locateLineId(projectRef.current, ms)
       setPlayheadLineId((prev) => (prev === id ? prev : id))
     }
     onPlayhead(useProject.getState().playheadMs)
@@ -1175,6 +1199,7 @@ export function Timeline() {
         <button
           data-role="tap"
           data-on={tapMode ? '1' : '0'}
+          aria-pressed={tapMode}
           onClick={() => (tapMode ? exitTapMode() : enterTapMode())}
           title={tapMode ? t('align.tapExit') : t('align.tapEnter')}
         >
@@ -1191,33 +1216,72 @@ export function Timeline() {
 
         <span style={S.sep} />
 
-        {/* 变速是打点的必需品（§5.10 建议 0.5~0.75x），且预览层没有这个控件 */}
-        <label style={S.dim} title={t('align.rateHint')}>
+        {/*
+         * 变速是打点的必需品（§5.10 建议 0.5~0.75x），且预览层没有这个控件。
+         * 三个档位摊开成按钮式 radio —— 见 CSS 里 `.kvm-tl-seg` 的说明。
+         */}
+        <span style={S.dim} title={t('align.rateHint')}>
           {t('align.rate')}
-          <select value={rate} onChange={(e) => setRate(Number(e.target.value))}>
-            <option value={0.5}>0.5x</option>
-            <option value={0.75}>0.75x</option>
-            <option value={1}>1.0x</option>
-          </select>
-        </label>
+          <span
+            className="kvm-tl-seg"
+            role="radiogroup"
+            aria-label={t('align.rate')}
+            /*
+             * 方向键切换**自己实现**，并 preventDefault 掉原生行为。
+             *
+             * 原生 radio 组在 Chromium 上方向键可用，**WebKit 上实测无效**
+             * （焦点与 checked 都不动）——用户用的正是 Safari，只靠原生等于
+             * 在那一端把键盘可达性丢了。两端都走自己这份实现才有一致行为，
+             * 不 preventDefault 的话 Chromium 会原生 + 自己各切一次，跳两档。
+             */
+            onKeyDown={(e) => {
+              const dir =
+                e.key === 'ArrowRight' || e.key === 'ArrowDown'
+                  ? 1
+                  : e.key === 'ArrowLeft' || e.key === 'ArrowUp'
+                    ? -1
+                    : 0
+              if (!dir) return
+              e.preventDefault()
+              const cur = RATE_OPTIONS.indexOf(rate as (typeof RATE_OPTIONS)[number])
+              const n = RATE_OPTIONS.length
+              const next = ((cur < 0 ? 0 : cur) + dir + n) % n
+              setRate(RATE_OPTIONS[next])
+              // 焦点跟着选中项走，这是原生 radio 组的行为，键盘用户靠它知道自己在哪
+              e.currentTarget.querySelectorAll('input')[next]?.focus()
+            }}
+          >
+            {RATE_OPTIONS.map((v) => (
+              <label key={v} data-on={rate === v || undefined} data-rate={v}>
+                <input
+                  type="radio"
+                  name="kvm-tl-rate"
+                  checked={rate === v}
+                  onChange={() => setRate(v)}
+                />
+                {v}x
+              </label>
+            ))}
+          </span>
+        </span>
         <button
+          data-role="follow"
           data-on={follow ? '1' : '0'}
-          onClick={() => setFollow((v) => !v)}
+          aria-pressed={follow}
+          onClick={() => setFollow(!follow)}
           title={t('align.followHint')}
         >
+          <VerticalAlignMiddleOutlined />
           {t('align.follow')}
         </button>
 
-        <span style={S.sep} />
-
-        <button onClick={() => void enqueue(undo)} disabled={!canUndo} title="Cmd/Ctrl+Z">
-          <UndoOutlined />
-          {t('common.undo')}
-        </button>
-        <button onClick={() => void enqueue(redo)} disabled={!canRedo} title="Cmd/Ctrl+Shift+Z">
-          <RedoOutlined />
-          {t('common.redo')}
-        </button>
+        {/*
+         * 这里**不放撤销/重做**。顶栏已经有一对，点下去调的是同一个后端历史 ——
+         * 与曾经"顶栏导出按钮跳到导出步骤"、"同屏两个播放按钮"是同一类重复
+         * （docs/ui-redesign.md §五：同一个动作只应在一处出现）。
+         * 顺带解决一个真实的误读：打轴面板里的「回退」退的是本地打点草稿，
+         * 与后端撤销不是一回事，两个"往回"的按钮同屏出现时没人分得清。
+         */}
 
         <span style={S.sep} />
 
@@ -1241,7 +1305,9 @@ export function Timeline() {
         <span style={S.sep} />
 
         <button
+          data-role="link"
           data-on={linkNeighbor ? '1' : '0'}
+          aria-pressed={linkNeighbor}
           onClick={() => setLinkNeighbor((v) => !v)}
           title={t('align.linkHint')}
         >
@@ -1251,18 +1317,13 @@ export function Timeline() {
 
         <span style={{ marginLeft: 'auto' }} />
 
-        <label style={S.dim}>
-          {t('align.audio')}
-          <select
-            value={audioMode}
-            onChange={(e) =>
-              setAudioMode(e.target.value === 'instrumental' ? 'instrumental' : 'original')
-            }
-          >
-            <option value="instrumental">{t('align.audioInstrumental')}</option>
-            <option value="original">{t('align.audioOriginal')}</option>
-          </select>
-        </label>
+        {/*
+         * 这里**不放原声/伴奏切换**。走带归预览层所有（docs/ui-redesign.md §五），
+         * 而"听哪条轨"正是走带的一部分，`Preview` 的控件条上已经有这一组按钮，
+         * 与这里改的是 store 里同一个 `audioMode` —— 同屏两个入口改同一个值。
+         * 波形显示哪条轨仍然跟着这个值走（见下方 `sources`），
+         * 也就是说切换能力一点没少，只是入口收敛到了它该在的地方。
+         */}
         <button onClick={() => zoomBy(-1)} title={t('align.zoomOut')} aria-label={t('align.zoomOut')}>
           <ZoomOutOutlined />
         </button>
@@ -1277,6 +1338,7 @@ export function Timeline() {
           }}
           title={t('align.fitHint')}
         >
+          <ColumnWidthOutlined />
           {t('align.fit')}
         </button>
       </div>
@@ -1439,10 +1501,15 @@ export function Timeline() {
               {visibleLines.map(({ line, row }) => {
                 const b = effLineBounds(line)
                 const isActive = line.id === activeLineId
+                // 选中（强调色）与正在唱（播放头同色的竖条）是两件事，
+                // 视觉分开的理由与歌词正文那边完全一样，见 RubyEditor 的 CSS 注释
+                const isPlaying = line.id === playheadLineId
                 return (
                   <div
                     key={line.id}
                     className="kvm-tl-line"
+                    data-line={line.id}
+                    data-playing={isPlaying || undefined}
                     title={`${lineText(line)}｜${formatMs(b.start, true)} + ${Math.round(b.dur)}ms`}
                     onPointerDown={(e) => {
                       select({ kind: 'line', lineId: line.id })
@@ -1472,6 +1539,8 @@ export function Timeline() {
                           ? tint('var(--accent)', 40)
                           : tint('var(--fg-2)', 22),
                       border: `1px solid ${isActive ? 'var(--accent)' : 'var(--stroke-strong)'}`,
+                      // inset 而不是 borderLeft：后者会改变盒宽，块的左边界就不再等于起点时间
+                      boxShadow: isPlaying ? 'inset 3px 0 0 var(--danger)' : undefined,
                       color: line.locked ? 'var(--warn)' : 'var(--fg)',
                       pointerEvents: 'auto',
                     }}
@@ -1498,7 +1567,7 @@ export function Timeline() {
               ))}
 
               {/* 播放头：位置走命令式更新，不进 state，避免每帧重渲 */}
-              <div ref={playheadRef} style={S.playhead} />
+              <div ref={playheadRef} data-role="playhead" style={S.playhead} />
             </div>
           </div>
         </div>
@@ -1511,6 +1580,9 @@ export function Timeline() {
         <div
           style={S.railClip}
           data-role="token-rail"
+          // 逐字轴当前编的是哪一行。既是排查抓手，也让"正文高亮的行"与
+          // "逐字轴在编的行"是否一致这件事可以被外部直接量出来
+          data-line={activeLine?.id}
           aria-label={t('align.tokenRail')}
           title={t('align.tokenRailHint')}
         >
@@ -1598,7 +1670,7 @@ export function Timeline() {
               )
             })}
 
-            <div ref={railPlayheadRef} style={S.playhead} />
+            <div ref={railPlayheadRef} data-role="playhead" style={S.playhead} />
           </div>
 
           {!activeLine && <div style={S.waveNotice}>{t('align.railEmpty')}</div>}
