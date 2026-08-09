@@ -16,8 +16,13 @@
 // 所以真正的判据是**播放是否真的启动了**，与音频设备无关：
 //   1. 界面没有"无法开始播放"提示；
 //   2. 播放按钮变成"暂停"（store 里 playing 为真，没有被 catch 分支复位）；
-//   3. `AudioBufferSourceNode.start()` 确实被调用过，且当时 AudioContext 已 running。
+//   3. **采样源真的被命令起播了**，且当时 AudioContext 已 running。
 // 时钟能不能走另算，环境允许时才断言。
+//
+// 第 3 条的观察点有两个，缺一不可：慢速试听保音高之后，正常路径的采样源是
+// `lib/timestretch` 的 AudioWorklet（起播 = 往它的 port 发一条 `play`），
+// 只有在它建不起来时才退回 `AudioBufferSourceNode.start()`。
+// 只盯 BufferSource 的话，正常路径会一直报"音频没起播"——一个纯属判据过期的红叉。
 //
 // 每个工程都开一个全新的浏览器上下文，并预先把它的 id 写进 localStorage
 // （App.tsx 启动时读 `kvm.lastProjectId` 恢复上次工程）。**不要用页面上的下拉框
@@ -86,13 +91,37 @@ async function runEngine(name) {
     const ctx = await browser.newContext({ viewport: { width: 1600, height: 1000 } })
     await ctx.addInitScript(([id]) => {
       localStorage.setItem('kvm.lastProjectId', id)
+      // 走带在「编辑」步骤上；不指定的话新上下文会落到「素材」，那里没有播放器
+      localStorage.setItem(`kvm.step.${id}`, 'edit')
       // 记录音频引擎是否真的起播了。挂在原型上，被测代码完全无感
-      window.__diag = { started: false, stateAtStart: null }
+      window.__diag = { started: false, stateAtStart: null, via: null, ctx: null }
       const origStart = AudioBufferSourceNode.prototype.start
       AudioBufferSourceNode.prototype.start = function (...a) {
         window.__diag.started = true
+        window.__diag.via = 'buffer-source'
         window.__diag.stateAtStart = this.context.state
         return origStart.apply(this, a)
+      }
+      // 保音高路径的起播 = 往 worklet 的 port 发一条 play。
+      // **补在 MessagePort 原型上而不是节点实例上**：WebKit 会重建 `node.port`
+      // 的包装对象，挂在实例上的补丁过一会儿就失效了
+      const AWN = window.AudioWorkletNode
+      if (AWN) {
+        window.AudioWorkletNode = class extends AWN {
+          constructor(ctx, name, opts) {
+            super(ctx, name, opts)
+            window.__diag.ctx = ctx
+          }
+        }
+      }
+      const origPost = MessagePort.prototype.postMessage
+      MessagePort.prototype.postMessage = function (msg, ...rest) {
+        if (msg && msg.type === 'play') {
+          window.__diag.started = true
+          window.__diag.via = 'timestretch-worklet'
+          window.__diag.stateAtStart = window.__diag.ctx?.state ?? null
+        }
+        return origPost.call(this, msg, ...rest)
       }
     }, [summary.id])
 
@@ -102,6 +131,11 @@ async function runEngine(name) {
     page.on('pageerror', (e) => errors.push(`[pageerror] ${e.message}`))
 
     await page.goto(APP, { waitUntil: 'domcontentloaded', timeout: 60000 })
+    // 应用启动在首页，从卡片进工程。**曾经靠 localStorage 里的 kvm.lastProjectId
+    // 自动恢复上次工程，界面重排后 App 不再这么做**，脚本却一直没跟上：
+    // 于是整轮都停在首页，"音频引擎就绪"直接超时——一个看起来像被测代码坏了、
+    // 其实是脚本自己过期的假阴性。
+    await page.locator('.pcard', { hasText: summary.title || '未命名' }).first().click()
 
     const iso = await page.evaluate(() => ({
       crossOriginIsolated: globalThis.crossOriginIsolated,
@@ -149,8 +183,8 @@ async function runEngine(name) {
     check(after.pausedLabel, '播放状态保持为「正在播放」（没被 catch 分支复位）')
     check(
       after.diag.started && after.diag.stateAtStart === 'running',
-      '音频真的起播了（AudioBufferSourceNode.start）',
-      `state=${after.diag.stateAtStart}`,
+      '音频真的起播了（采样源收到起播命令）',
+      `via=${after.diag.via} state=${after.diag.stateAtStart}`,
     )
 
     if (clockOk) {

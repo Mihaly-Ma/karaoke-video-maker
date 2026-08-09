@@ -51,6 +51,10 @@ export const media: Record<string, string> = {
   //   `media.player.warn.*`     真的降级了，语气是警告、说"出了什么事 + 怎么办"
   // 曾经二者混在一起，于是没有视频时也会报「已改用视频自身的声音」——
   // 此刻根本没有可退回的目标，用户看到的是一条自相矛盾的黄色警告。
+  'media.player.play': '播放',
+  'media.player.pause': '暂停',
+  'media.player.volume': '音量',
+  'media.player.overlayLoading': '字幕渲染器加载中…',
   'media.player.noAssets': '还没有素材',
   'media.player.noAssetsHint': '到「素材」步骤下载或导入',
   'media.player.audioOnly': '只有音轨，没有画面',
@@ -76,6 +80,35 @@ export const media: Record<string, string> = {
   'media.player.warn.unplayableRetry': '当前放的已经是编辑用代理，仍然放不了的话请重新生成一次代理。',
   'media.player.warn.unplayableNeedProxy': '请到「素材」步骤生成编辑用代理视频（H.264/MP4），生成完这里会自动恢复画面。',
   'media.player.warn.unplayableBuilding': '编辑用代理正在生成，完成后这里会自动恢复画面。',
+  'media.player.warn.noContextTitle': '无法创建 Web Audio 上下文',
+  'media.player.warn.noContextDetail': '预览将回退到视频自带音轨，试听混音不可用。',
+  'media.player.warn.trackFailed': '{track}轨加载失败',
+  'media.player.warn.trackFailedMix': '请确认视频已下载并抽出了音频。',
+  'media.player.warn.trackFailedStem': '这条轨要先跑一次人声分离，完成后会自动可用。',
+  // 保音高变速用不上时的降级说明。不是错误——播放照常，只是慢速试听会走调
+  'media.player.warn.pitchFallbackTitle': '慢速试听会降调',
+  'media.player.warn.pitchFallbackDetail':
+    '这个浏览器没能启用保音高变速，0.75x 试听会整体降调约 5 个半音，跟着唱对不上音。' +
+    '正常速度、打轴与导出都不受影响。',
+
+  // ---- 试听混音台（播放器控制条）----
+  //
+  // 这几档是**试听**，不是导出设置：「原声 / 伴奏」与导出的 ON/OFF VOCAL 一一对应
+  // 并共用状态，而「仅人声」纯属试听，没有对应的导出变体。
+  'media.player.mix.label': '试听',
+  'media.player.mix.original': '原声',
+  'media.player.mix.instrumental': '伴奏',
+  'media.player.mix.vocals': '仅人声',
+  'media.player.mix.tracks': '分轨',
+  'media.player.mix.tracksHint':
+    '分别调整各条音轨的音量。「原声」= 人声 + 伴奏，把人声压到两三成就是ガイドボーカル入り那种试听方式。',
+  'media.player.mix.needSeparate': '需要先完成人声分离',
+  'media.player.mix.loading': '音轨还在解码',
+  'media.player.mix.loadFailed': '这条音轨没能加载，原因见下方提示',
+  'media.player.mix.unavailable': 'Web Audio 不可用，无法切换音轨',
+  'media.player.track.mix': '原曲',
+  'media.player.track.vocals': '人声',
+  'media.player.track.instrumental': '伴奏',
 
   // ---- 音轨卡片 ----
   'media.track.video': '视频',

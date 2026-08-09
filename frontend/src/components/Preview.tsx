@@ -1,5 +1,5 @@
 /**
- * 预览播放器：视频 + libass 字幕叠加 + 原声/伴奏切换。
+ * 预览播放器：视频 + libass 字幕叠加 + 试听混音台。
  *
  * 这是「一站式」的技术前提 —— 所见即所得的实时预览。三条硬约束：
  *
@@ -10,6 +10,39 @@
  * 3. 播放头一律由 rVFC 的 mediaTime 驱动：timeupdate 每 250ms 才触发一次，
  *    精度不足以驱动逐字高亮；video.currentTime 在 Firefox 上被量化到 2ms，
  *    规范上也只是「近似值」。
+ *
+ * ## 声音是「层 × 增益」，不是几个写死的档位
+ *
+ * 按 D15，分离过的工程装的是 **vocals 与 instrumental 两条 stem**，
+ * **「原声」= 两者相加**，而不是另装一份原始混音。两条 stem 来自同一次分离，
+ * 天然采样级对齐，所以切换只是改增益、不需要 seek，也就不会「切一下跳一下」。
+ *
+ * 由此「仅人声」是白拿的：把伴奏那层拉到 0 即可。预设（原声 / 伴奏 / 仅人声）
+ * 只是把各层增益整组写成某个组合的**快捷方式，不是可选项的全集**（§8.7 的
+ * 导出混音台是同一个心智模型）；分轨滑块直接就是各层增益，
+ * 「原声 + 人声压低」就是日本卡拉OK 那种ガイドボーカル入り的试听方式。
+ *
+ * 没分离过的工程退化成单层 `mix`（原始混音），此时只有「原声」可用 ——
+ * 缺的档**禁用而不隐藏**，并说明为什么（§2.5：失败要降级，且要让用户知道原因）。
+ *
+ * ## 试听混音与导出音轨是两件事
+ *
+ * store 的 `audioMode` 只有 `original` / `instrumental` 两个值，它是**导出**的
+ * ON/OFF VOCAL 设置（ExportPanel 直接读它）。这里的「原声 / 伴奏」两档与它一一对应、
+ * 会写回去；而「仅人声」和分轨滑块**纯属试听，绝不写 audioMode** ——
+ * 结构上就不可能出现「编辑期为了核对咬字而 solo 了人声，结果导出一条只有人声的成片」。
+ * 反向同步仍然保留：导出舞台切 ON/OFF VOCAL 时，这里的预设跟着变，
+ * 「设置选了伴奏、预览还在放原声」不会发生。
+ *
+ * ## 慢速试听保音高
+ *
+ * 打轴主力是 tap-to-time，工作流要求 0.5~0.75x 慢速（§5.10），而
+ * `AudioBufferSourceNode.playbackRate` 是重采样、0.75x 会降调约 5 个半音。
+ * 所以采样源改用 `lib/timestretch` 的 WSOLA 拉伸器。**全引擎只建一个拉伸器**，
+ * 所有层共用它的帧偏移决策——每条 stem 各起一个的话相加即相位抵消，
+ * 而且只在「原声」档听得出来（见 lib/timestretch.ts 文件头）。
+ * 建不起来（浏览器没有 AudioWorklet 等）就退回 BufferSource，只是慢速会降调，
+ * **不让播放整个不可用**。
  *
  * ## 本组件是全应用唯一的播放时钟
  *
@@ -59,6 +92,7 @@ import {
   type FrameMeta,
   type PreviewIssue,
 } from '../lib/jassub'
+import { TimeStretchPlayer } from '../lib/timestretch'
 import { useProject } from '../state/projectStore'
 
 // ---------------------------------------------------------------------------
@@ -80,12 +114,61 @@ const SOFT_SYNC_S = 0.045
 const HARD_SYNC_S = 0.25
 /** 软纠偏时的播放速率偏移。静音视频调速没有音高副作用，比频繁 seek 平滑得多 */
 const SYNC_RATE_DELTA = 0.02
-/** 原声/伴奏交叉淡入时长（秒），避免切换时爆音 */
+/** 各层增益变化的交叉淡入时长（秒），避免切换时爆音 */
 const CROSSFADE_S = 0.06
 
-type AudioMode = 'original' | 'instrumental'
+/**
+ * 一条音频层。
+ *
+ * `vocals` / `instrumental` 是分离产出的两条 stem，**「原声」= 两者相加**（D15）。
+ * `mix` 是没分离过时的兜底单层（原始混音），与两条 stem **互斥地装载**：
+ * 有 stem 时再装一份混音等于同一段音乐白占第三份内存（整曲立体声约 100MB），
+ * 而且"原声"该长什么样已经由 D15 定死了。
+ */
+type LayerId = 'mix' | 'vocals' | 'instrumental'
 
-const AUDIO_LABEL: Record<AudioMode, string> = { original: '原声', instrumental: '伴奏' }
+/** 层 → 后端媒体 kind */
+const LAYER_KIND: Record<LayerId, 'audio' | 'vocals' | 'instrumental'> = {
+  mix: 'audio',
+  vocals: 'vocals',
+  instrumental: 'instrumental',
+}
+
+/**
+ * 试听预设。**只是把各层增益整组写成某个组合的快捷方式**，不是可选项的全集
+ * ——真正的模型是「层 × 增益」（分轨滑块），与 §8.7 的导出混音台一致。
+ */
+type MonitorPreset = 'original' | 'instrumental' | 'vocals'
+
+const MONITOR_PRESETS: readonly MonitorPreset[] = ['original', 'instrumental', 'vocals']
+
+/**
+ * 某个预设要让哪些层出声。
+ *
+ * 「原声」在有 stem 时是**两条 stem 相加**、没 stem 时是那条混音——所以它依赖
+ * 当前工程实际装了哪些层，不能写成常量表。
+ */
+function presetLayers(preset: MonitorPreset, layers: readonly LayerId[]): LayerId[] {
+  if (preset === 'original') {
+    return layers.includes('mix') ? ['mix'] : layers.filter((l) => l !== 'mix')
+  }
+  return layers.filter((l) => l === preset)
+}
+
+/** 按预设算出各层增益。已有的分轨音量（`trims`）要保住，切一圈档回来不该被复位成 100% */
+function presetLevels(
+  preset: MonitorPreset,
+  layers: readonly LayerId[],
+  trims: Partial<Record<LayerId, number>>,
+): Partial<Record<LayerId, number>> {
+  const on = new Set(presetLayers(preset, layers))
+  const out: Partial<Record<LayerId, number>> = {}
+  for (const id of layers) out[id] = on.has(id) ? (trims[id] ?? 1) : 0
+  return out
+}
+
+/** 增益低于它就当作"听不见"，用于反推当前落在哪个预设上 */
+const AUDIBLE_EPS = 5e-4
 
 /**
  * loading：音轨还在解码；webaudio：走 Web Audio；fallback：Web Audio 没拿到音轨。
@@ -114,48 +197,63 @@ const ACTIVITY_POLL_IDLE_MS = 4000
 // ---------------------------------------------------------------------------
 
 /**
- * 两条音轨（原声 / 伴奏）作为两个 AudioBufferSourceNode 同时 start，
- * 用 GainNode 交叉淡入切换。它们共用同一个 AudioContext 时钟，天然采样级对齐，
- * 切换时不需要 seek，也就不会「切一下跳一下」。
+ * 一台小混音台：若干条层各接一个 GainNode 汇进 master。
+ *
+ * 各层共用同一个 AudioContext 时钟、由**同一个采样源**推进，天然采样级对齐，
+ * 所以切换只是改增益、不需要 seek，也就不会「切一下跳一下」。
+ *
+ * 采样源优先用 `TimeStretchPlayer`（保音高变速）；它建不起来时退回
+ * `AudioBufferSourceNode`（变速会降调）。两条路的对外行为完全一致，
+ * 差别只有"慢速试不试得出音高"这一条，由调用方报给用户。
  *
  * AudioContext 是主时钟，<video> 是从动方。
  */
 class AudioEngine {
   private ctx: AudioContext | null = null
   private master: GainNode | null = null
-  private readonly buffers = new Map<AudioMode, AudioBuffer>()
-  private readonly gains = new Map<AudioMode, GainNode>()
-  private readonly sources = new Map<AudioMode, AudioBufferSourceNode>()
+  /** 保音高采样源。null = 已降级到 BufferSource 路径 */
+  private stretch: TimeStretchPlayer | null = null
+  /** **仅降级路径持有**：走拉伸器时样本已转移给 worklet，主线程再留一份纯属白占内存 */
+  private readonly buffers = new Map<LayerId, AudioBuffer>()
+  private readonly gains = new Map<LayerId, GainNode>()
+  private readonly sources = new Map<LayerId, AudioBufferSourceNode>()
+  /** 真正解码成功、已经能出声的层 */
+  private readonly present = new Set<LayerId>()
+  private levels: Partial<Record<LayerId, number>> = {}
+  private maxDurationSec = 0
 
-  /** 播放锚点：ctx 时间轴上的一个时刻，以及它对应的媒体位置 */
+  /** 播放锚点：ctx 时间轴上的一个时刻，以及它对应的媒体位置（仅降级路径用） */
   private anchorCtxTime = 0
   private anchorMediaSec = 0
   private running = false
-  private mode: AudioMode = 'original'
   private rate = 1
   private disposed = false
 
   get available(): boolean {
-    return this.buffers.size > 0
+    return this.present.size > 0
+  }
+
+  /** 是否真的用上了保音高变速。false = 慢速试听会降调，界面上要说明 */
+  get pitchPreserved(): boolean {
+    return this.stretch !== null
   }
 
   get playing(): boolean {
-    return this.running
+    return this.stretch ? this.stretch.playing : this.running
   }
 
   /** 已载入音轨里最长的那条的时长（秒）。没有音轨时为 0 */
   get durationSec(): number {
-    let max = 0
-    for (const buffer of this.buffers.values()) max = Math.max(max, buffer.duration)
-    return max
+    return this.maxDurationSec
   }
 
-  has(mode: AudioMode): boolean {
-    return this.buffers.has(mode)
+  has(layer: LayerId): boolean {
+    return this.present.has(layer)
   }
 
   /** 主时钟：当前媒体位置（秒）。变速时 ctx 时间要按速率折算成媒体时间 */
   get positionSec(): number {
+    if (this.stretch) return this.stretch.positionSec
     if (!this.ctx || !this.running) return this.anchorMediaSec
     return Math.max(
       this.anchorMediaSec,
@@ -164,11 +262,16 @@ class AudioEngine {
   }
 
   /**
-   * 载入音轨，返回中文警告列表。
+   * 载入各层，返回中文警告列表。
    * 某条轨缺失不影响另一条，也不能因此终止 —— 一站式定位下「失败要降级」（CLAUDE.md §2.5）。
    */
-  async load(projectId: string, kinds: Record<AudioMode, boolean>): Promise<PreviewIssue[]> {
+  async load(
+    projectId: string,
+    layers: readonly LayerId[],
+    levels: Partial<Record<LayerId, number>>,
+  ): Promise<PreviewIssue[]> {
     const warnings: PreviewIssue[] = []
+    this.levels = { ...levels }
     let ctx: AudioContext
     try {
       ctx = new AudioContext()
@@ -176,8 +279,8 @@ class AudioEngine {
       return [
         {
           level: 'warn',
-          title: '无法创建 Web Audio 上下文',
-          detail: `${describeError(e)}。预览将回退到视频自带音轨，伴奏切换不可用。`,
+          title: t('media.player.warn.noContextTitle'),
+          detail: `${describeError(e)}。${t('media.player.warn.noContextDetail')}`,
         },
       ]
     }
@@ -185,31 +288,64 @@ class AudioEngine {
     this.master = ctx.createGain()
     this.master.connect(ctx.destination)
 
-    const targets: Array<[AudioMode, 'audio' | 'instrumental']> = [
-      ['original', 'audio'],
-      ['instrumental', 'instrumental'],
-    ]
+    for (const id of layers) {
+      const gain = ctx.createGain()
+      gain.gain.value = this.levels[id] ?? 0
+      gain.connect(this.master)
+      this.gains.set(id, gain)
+    }
 
-    for (const [mode, kind] of targets) {
-      if (!kinds[mode]) continue
+    /*
+     * 保音高变速。**整个引擎只建一个拉伸器**，各层占它的一个输出序号：
+     * 帧偏移决策在节点内部只做一次、所有层共用，这是"两条 stem 相加不梳状滤波"
+     * 的唯一依据（证明见 lib/timestretch.ts 文件头）。给每条 stem 各建一个是错的，
+     * 而且只在「原声」档（两层同时出声）才听得出来，单听任何一层都好——极易漏测。
+     *
+     * `referenceLayerIds` 刻意不传：相似度搜索的参考信号就该是**所有层的等增益和**，
+     * 那正好等于原曲混音。绝不能按当前增益加权——切档时增益在变，参考跟着变，
+     * 两条 stem 的对齐会在切换瞬间一起跳。
+     */
+    try {
+      const stretch = await TimeStretchPlayer.create(ctx, { layerIds: layers })
+      if (this.disposed) {
+        stretch.dispose()
+        return warnings
+      }
+      this.stretch = stretch
+      for (const id of layers) {
+        const gain = this.gains.get(id)
+        if (gain) stretch.connectLayer(id, gain)
+      }
+    } catch (e) {
+      warnings.push({
+        level: 'warn',
+        title: t('media.player.warn.pitchFallbackTitle'),
+        detail: `${t('media.player.warn.pitchFallbackDetail')}（${describeError(e)}）`,
+      })
+    }
+
+    for (const id of layers) {
       try {
-        const resp = await fetch(api.mediaUrl(projectId, kind))
+        const resp = await fetch(api.mediaUrl(projectId, LAYER_KIND[id]))
         if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`)
         const decoded = await ctx.decodeAudioData(await resp.arrayBuffer())
         if (this.disposed) return warnings
-        const gain = ctx.createGain()
-        gain.gain.value = mode === this.mode ? 1 : 0
-        gain.connect(this.master)
-        this.buffers.set(mode, decoded)
-        this.gains.set(mode, gain)
+        this.present.add(id)
+        this.maxDurationSec = Math.max(this.maxDurationSec, decoded.duration)
+        if (this.stretch) {
+          // 样本转移给 worklet 之后就地丢掉 AudioBuffer：留着等于同一段音乐占两份内存
+          this.stretch.setLayer(id, decoded)
+        } else {
+          this.buffers.set(id, decoded)
+        }
       } catch (e) {
         warnings.push({
           level: 'warn',
-          title: `${AUDIO_LABEL[mode]}音轨加载失败`,
+          title: t('media.player.warn.trackFailed', { track: t(`media.player.track.${id}`) }),
           detail: `${describeError(e)}。${
-            mode === 'instrumental'
-              ? '伴奏需要先跑一次人声分离，完成后会自动可用。'
-              : '请确认视频已下载并抽出了音频。'
+            id === 'mix'
+              ? t('media.player.warn.trackFailedMix')
+              : t('media.player.warn.trackFailedStem')
           }`,
         })
       }
@@ -221,18 +357,22 @@ class AudioEngine {
     const ctx = this.ctx
     if (!ctx || !this.available || this.disposed) return
     if (ctx.state === 'suspended') await ctx.resume()
+    if (this.stretch) {
+      this.stretch.play(offsetSec)
+      return
+    }
     this.stopSources()
 
     const when = ctx.currentTime
-    for (const [mode, buffer] of this.buffers) {
-      const gain = this.gains.get(mode)
+    for (const [id, buffer] of this.buffers) {
+      const gain = this.gains.get(id)
       if (!gain) continue
       const src = ctx.createBufferSource()
       src.buffer = buffer
       src.playbackRate.value = this.rate
       src.connect(gain)
       src.start(when, Math.max(0, Math.min(offsetSec, buffer.duration)))
-      this.sources.set(mode, src)
+      this.sources.set(id, src)
     }
     this.anchorCtxTime = when
     this.anchorMediaSec = offsetSec
@@ -240,6 +380,10 @@ class AudioEngine {
   }
 
   pause(): void {
+    if (this.stretch) {
+      this.stretch.pause()
+      return
+    }
     if (!this.running) return
     this.anchorMediaSec = this.positionSec
     this.running = false
@@ -247,6 +391,10 @@ class AudioEngine {
   }
 
   seek(offsetSec: number): void {
+    if (this.stretch) {
+      this.stretch.seek(offsetSec)
+      return
+    }
     if (this.running) {
       void this.play(offsetSec)
     } else {
@@ -257,32 +405,39 @@ class AudioEngine {
   /**
    * 变速（打轴时用 0.5~0.75x 试听，CLAUDE.md §5.10）。
    *
-   * 先把锚点结算到当前位置再改速率，否则**已经播过的那段**会被按新速率重新折算，
-   * 播放头会瞬间跳一大截。`AudioBufferSourceNode.playbackRate` 可以在播放中直接改，
-   * 不必重起 source，也就没有换挡时的断音。
-   *
-   * 代价：Web Audio 的 buffer source 变速会同步改变音高（没有 preservesPitch），
-   * 0.75x 试听会降调约 5 个半音。保音高需要相位声码器，属于后续课题。
+   * 拉伸器路径上是保音高的；降级路径先把锚点结算到当前位置再改速率，
+   * 否则**已经播过的那段**会被按新速率重新折算，播放头会瞬间跳一大截。
+   * `AudioBufferSourceNode.playbackRate` 可以在播放中直接改，不必重起 source，
+   * 也就没有换挡时的断音——代价是它是重采样，0.75x 会降调约 5 个半音。
    */
   setRate(rate: number): void {
+    if (rate <= 0) return
+    if (this.stretch) {
+      this.stretch.setRate(rate)
+      return
+    }
     const ctx = this.ctx
-    if (rate <= 0 || rate === this.rate) return
+    if (rate === this.rate) return
     this.anchorMediaSec = this.positionSec
     this.anchorCtxTime = ctx?.currentTime ?? 0
     this.rate = rate
     for (const src of this.sources.values()) src.playbackRate.value = rate
   }
 
-  setMode(mode: AudioMode): void {
+  /**
+   * 设置各层增益（缺省的层视为 0）。切换一律走斜坡，**不要直接赋 `.value`**：
+   * 增益跳变就是一声爆音。
+   */
+  setLevels(levels: Partial<Record<LayerId, number>>): void {
+    this.levels = { ...this.levels, ...levels }
     const ctx = this.ctx
-    // 目标轨还不存在时（例如尚未分离出伴奏）保持现状，由 UI 禁用对应按钮
-    if (!ctx || !this.buffers.has(mode)) return
-    this.mode = mode
+    if (!ctx) return
     const now = ctx.currentTime
-    for (const [m, gain] of this.gains) {
+    for (const [id, gain] of this.gains) {
+      const target = this.levels[id] ?? 0
       gain.gain.cancelScheduledValues(now)
       gain.gain.setValueAtTime(gain.gain.value, now)
-      gain.gain.linearRampToValueAtTime(m === mode ? 1 : 0, now + CROSSFADE_S)
+      gain.gain.linearRampToValueAtTime(target, now + CROSSFADE_S)
     }
   }
 
@@ -293,8 +448,11 @@ class AudioEngine {
   dispose(): void {
     this.disposed = true
     this.stopSources()
+    this.stretch?.dispose()
+    this.stretch = null
     this.buffers.clear()
     this.gains.clear()
+    this.present.clear()
     void this.ctx?.close()
     this.ctx = null
     this.master = null
@@ -348,6 +506,22 @@ export function Preview({ className }: PreviewProps) {
   const volumeRef = useRef(1)
   /** 播放速率同理：逐帧的纠偏回调要读它，但不该因它变化而重挂 */
   const rateRef = useRef(playbackRate)
+  /** 各层增益的 ref 镜像，理由同 volumeRef：引擎重建时要读它，但不该因它变化而重挂 */
+  const levelsRef = useRef<Partial<Record<LayerId, number>>>({})
+  /**
+   * 各层最近一次的**非零**增益。
+   *
+   * 预设切换要靠它把用户调过的分轨音量还回去：把人声压到 30% 当引导声、
+   * 切去伴奏听一段再切回来，音量不该被复位成 100%。
+   */
+  const trimsRef = useRef<Partial<Record<LayerId, number>>>({})
+  /**
+   * 上一次看到的 `audioMode`。
+   *
+   * 导出舞台切 ON/OFF VOCAL 时预览要跟着走，但**只在它真的变化时**跟——
+   * 每次渲染都同步的话，用户在这里选的「仅人声」会被立刻按回去。
+   */
+  const lastAudioModeRef = useRef(audioMode)
 
   /**
    * 最近一次由播放器写进 store 的播放头。
@@ -369,7 +543,12 @@ export function Preview({ className }: PreviewProps) {
   const [playbackError, setPlaybackError] = useState<string | null>(null)
   const [volume, setVolume] = useState(1)
   const [audioState, setAudioState] = useState<AudioState>('loading')
-  const [instrumentalReady, setInstrumentalReady] = useState(false)
+  /** 已经解码成功、能出声的层。缺的层要**禁用而不隐藏**对应的档 */
+  const [readyLayers, setReadyLayers] = useState<readonly LayerId[]>([])
+  /** 各层增益 = 混音台本身。预设只是把它整组写成某个组合 */
+  const [levels, setLevels] = useState<Partial<Record<LayerId, number>>>({})
+  /** 分轨音量那一排是否展开。默认收起：绝大多数时候三个预设就够了 */
+  const [mixerOpen, setMixerOpen] = useState(false)
   const [rvfcMissing, setRvfcMissing] = useState(false)
   /** 当前正在跑的素材准备任务（下载 / 分离 / 代理）。见下方轮询 effect */
   const [activity, setActivity] = useState<JobStatus[]>([])
@@ -403,7 +582,30 @@ export function Preview({ className }: PreviewProps) {
   const videoSrcKind: 'proxy' | 'video' = proxyPath ? 'proxy' : 'video'
   const fontName = project?.style.font_name ?? ''
   const audioPath = project?.audio_path ?? null
+  const vocalsPath = project?.vocals_path ?? null
   const instrumentalPath = project?.instrumental_path ?? null
+
+  /** 层 → 工程里对应的文件路径。为空 = 这条轨还不存在（多半是没分离过） */
+  const layerPath = useCallback(
+    (id: LayerId): string | null =>
+      id === 'mix' ? audioPath : id === 'vocals' ? vocalsPath : instrumentalPath,
+    [audioPath, vocalsPath, instrumentalPath],
+  )
+
+  /**
+   * 这个工程要装哪几层。
+   *
+   * 两条 stem 都在就**只装 stem**：按 D15「原声 = 人声 + 伴奏」，再装一份原始混音
+   * 是同一段音乐的第三份内存（整曲立体声约 100MB），而且"原声"该长什么样已经定死。
+   * 缺任何一条 stem 时才回退到装原始混音，否则「原声」就残了。
+   */
+  const layers = useMemo<LayerId[]>(() => {
+    const out: LayerId[] = []
+    if (audioPath && !(vocalsPath && instrumentalPath)) out.push('mix')
+    if (vocalsPath) out.push('vocals')
+    if (instrumentalPath) out.push('instrumental')
+    return out
+  }, [audioPath, vocalsPath, instrumentalPath])
 
   /**
    * 视频画面这条路是否还走得通。**播放的前提只有音频**，这个值只决定
@@ -505,36 +707,47 @@ export function Preview({ className }: PreviewProps) {
 
   // --- 音频：工程或音轨可用性变化时重建 ------------------------------------
 
+  /**
+   * 层集合变了（换工程 / 分离刚跑完）就按当前导出音轨设置重建一次各层增益。
+   *
+   * **必须声明在重建引擎的 effect 之前**：那个 effect 直接读 `levelsRef.current`
+   * 去初始化各层增益节点，顺序反了的话首次起播会从静音斜坡淡进来。
+   */
+  useEffect(() => {
+    const next = presetLevels(useProject.getState().audioMode, layers, trimsRef.current)
+    levelsRef.current = next
+    setLevels(next)
+  }, [layers])
+
   useEffect(() => {
     if (!projectId) return
     const engine = new AudioEngine()
     audioRef.current = engine
     setAudioState('loading')
-    setInstrumentalReady(false)
+    setReadyLayers([])
     let cancelled = false
 
-    void engine
-      .load(projectId, { original: !!audioPath, instrumental: !!instrumentalPath })
-      .then((warnings) => {
-        if (cancelled) return
-        setAudioWarnings(warnings)
-        setInstrumentalReady(engine.has('instrumental'))
-        setAudioState(engine.available ? 'webaudio' : 'fallback')
-        engine.setMode(useProject.getState().audioMode)
-        engine.setRate(rateRef.current)
-        engine.setVolume(volumeRef.current)
-        // 音轨可能是分离作业跑完后才出现的，此刻若正在播放就续上当前位置
-        if (useProject.getState().playing) {
-          void engine.play(useProject.getState().playheadMs / 1000)
-        }
-      })
+    void engine.load(projectId, layers, levelsRef.current).then((warnings) => {
+      if (cancelled) return
+      setAudioWarnings(warnings)
+      setReadyLayers(layers.filter((id) => engine.has(id)))
+      setAudioState(engine.available ? 'webaudio' : 'fallback')
+      // 解码期间用户可能已经动过混音台或音量，这里以最新值为准补一次
+      engine.setLevels(levelsRef.current)
+      engine.setRate(rateRef.current)
+      engine.setVolume(volumeRef.current)
+      // 音轨可能是分离作业跑完后才出现的，此刻若正在播放就续上当前位置
+      if (useProject.getState().playing) {
+        void engine.play(useProject.getState().playheadMs / 1000)
+      }
+    })
 
     return () => {
       cancelled = true
       audioRef.current = null
       engine.dispose()
     }
-  }, [projectId, audioPath, instrumentalPath])
+  }, [projectId, layers])
 
   useEffect(() => {
     volumeRef.current = volume
@@ -544,8 +757,22 @@ export function Preview({ className }: PreviewProps) {
   }, [volume, audioState])
 
   useEffect(() => {
-    audioRef.current?.setMode(audioMode)
-  }, [audioMode])
+    levelsRef.current = levels
+    audioRef.current?.setLevels(levels)
+  }, [levels])
+
+  /**
+   * 导出舞台切 ON/OFF VOCAL 时预览跟着走。
+   *
+   * **只在 `audioMode` 真的变化时同步**（而不是每次渲染都对齐）：否则用户在这里
+   * 选的「仅人声」或调过的分轨音量会被立刻按回预设值。反方向的写回在
+   * `applyPreset` 里，且只有「原声 / 伴奏」两档写——「仅人声」没有对应的导出变体。
+   */
+  useEffect(() => {
+    if (lastAudioModeRef.current === audioMode) return
+    lastAudioModeRef.current = audioMode
+    setLevels(presetLevels(audioMode, layers, trimsRef.current))
+  }, [audioMode, layers])
 
   /**
    * 变速由这里统一执行：音频引擎与 <video> 必须同时改，否则视频会被纠偏逻辑
@@ -796,6 +1023,74 @@ export function Preview({ className }: PreviewProps) {
     [seekTo, setPlayhead],
   )
 
+  // --- 试听混音台 -------------------------------------------------------------
+
+  /**
+   * 套用一个预设。
+   *
+   * 「原声 / 伴奏」与导出的 ON/OFF VOCAL 一一对应，所以**写回 `audioMode`**：
+   * 导出舞台上那个设置就是它，不写回的话同屏两个控件会各说各的。
+   * 「仅人声」没有对应的导出变体，**绝不写** —— 这就是"编辑期 solo 人声"
+   * 不可能变成"导出一条只有人声的成片"的结构性保证。
+   */
+  const applyPreset = useCallback(
+    (preset: MonitorPreset) => {
+      setLevels(presetLevels(preset, layers, trimsRef.current))
+      if (preset !== 'vocals') setAudioMode(preset)
+    },
+    [layers, setAudioMode],
+  )
+
+  /** 拖某一层的音量。**滑块直接就是该层的增益**，不是"预设之上的修正量" */
+  const setLayerLevel = useCallback((id: LayerId, value: number) => {
+    // 只记非零值：拉到 0 是"暂时不要这层"，预设切回来时该还原成拉到 0 之前的音量
+    if (value > AUDIBLE_EPS) trimsRef.current = { ...trimsRef.current, [id]: value }
+    setLevels((prev) => ({ ...prev, [id]: value }))
+  }, [])
+
+  /**
+   * 当前落在哪个预设上。**由"实际听得见哪几层"反推**，而不是记一个独立的选中态：
+   * 把人声拉到 0 之后耳朵里就只剩伴奏，此时高亮「伴奏」才是实话。
+   * 一个都不匹配（例如两层都拉到 0）就谁都不高亮。
+   */
+  const audible = layers.filter((id) => (levels[id] ?? 0) > AUDIBLE_EPS)
+  const activePreset =
+    MONITOR_PRESETS.find((p) => {
+      const on = presetLayers(p, layers)
+      return on.length > 0 && on.length === audible.length && on.every((id) => audible.includes(id))
+    }) ?? null
+
+  const ready = new Set(readyLayers)
+
+  /**
+   * 某条层为什么用不了。返回 null 表示可用。
+   *
+   * 缺的东西**禁用而不隐藏**：藏起来用户只会以为没这个功能，而真实原因
+   * （还没分离 / 这条轨没加载上）是他自己能去解决的。
+   */
+  const layerBlockReason = (id: LayerId): string | null => {
+    if (ready.has(id)) return null
+    if (audioState === 'loading') return t('media.player.mix.loading')
+    // 工程里压根没有这条轨 = 还没分离；有路径却没就绪 = 加载失败（详情在下方警告里）
+    return layerPath(id) ? t('media.player.mix.loadFailed') : t('media.player.mix.needSeparate')
+  }
+
+  /** 某个预设为什么不能选。返回 null 表示可选 */
+  const presetBlockReason = (preset: MonitorPreset): string | null => {
+    if (audioState === 'loading') return t('media.player.mix.loading')
+    if (audioState !== 'webaudio') return t('media.player.mix.unavailable')
+    const need = presetLayers(preset, layers)
+    if (need.length === 0) return t('media.player.mix.needSeparate')
+    for (const id of need) {
+      const reason = layerBlockReason(id)
+      if (reason) return reason
+    }
+    return null
+  }
+
+  // 只有一层时"分轨音量"就是主音量，多一个入口只会让人以为它们是两回事
+  const mixerAvailable = layers.length > 1
+
   // --- 渲染 ------------------------------------------------------------------
 
   if (!project) {
@@ -938,12 +1233,14 @@ export function Preview({ className }: PreviewProps) {
             {stageNote.hint && <span style={styles.noVideoHint}>{stageNote.hint}</span>}
           </div>
         )}
-        {overlayLoading && videoActive && <div style={styles.badge}>字幕渲染器加载中…</div>}
+        {overlayLoading && videoActive && (
+          <div style={styles.badge}>{t('media.player.overlayLoading')}</div>
+        )}
       </div>
 
       <div style={styles.controls}>
         <button type="button" onClick={() => setPlaying(!playing)} style={styles.button}>
-          {playing ? '暂停' : '播放'}
+          {playing ? t('media.player.pause') : t('media.player.play')}
         </button>
 
         <span ref={clockRef} style={styles.clock}>
@@ -961,31 +1258,46 @@ export function Preview({ className }: PreviewProps) {
           style={styles.seek}
         />
 
-        <div style={styles.group}>
-          {(['original', 'instrumental'] as AudioMode[]).map((mode) => {
-            const disabled =
-              audioState !== 'webaudio' || (mode === 'instrumental' && !instrumentalReady)
+        <span style={styles.dim}>{t('media.player.mix.label')}</span>
+        <div style={styles.group} role="group" aria-label={t('media.player.mix.label')}>
+          {MONITOR_PRESETS.map((preset) => {
+            const blocked = presetBlockReason(preset)
             return (
               <button
-                key={mode}
+                key={preset}
                 type="button"
-                disabled={disabled}
-                title={disabled ? '伴奏需要先完成人声分离' : undefined}
-                onClick={() => setAudioMode(mode)}
+                data-testid={`mix-preset-${preset}`}
+                aria-pressed={activePreset === preset}
+                disabled={!!blocked}
+                title={blocked ?? undefined}
+                onClick={() => applyPreset(preset)}
                 style={{
                   ...styles.toggle,
-                  ...(audioMode === mode ? styles.toggleActive : null),
-                  ...(disabled ? styles.toggleDisabled : null),
+                  ...(activePreset === preset ? styles.toggleActive : null),
+                  ...(blocked ? styles.toggleDisabled : null),
                 }}
               >
-                {AUDIO_LABEL[mode]}
+                {t(`media.player.mix.${preset}`)}
               </button>
             )
           })}
         </div>
 
+        {mixerAvailable && (
+          <button
+            type="button"
+            data-testid="mix-tracks-toggle"
+            aria-expanded={mixerOpen}
+            title={t('media.player.mix.tracksHint')}
+            onClick={() => setMixerOpen((v) => !v)}
+            style={{ ...styles.toggle, ...(mixerOpen ? styles.toggleActive : null) }}
+          >
+            {t('media.player.mix.tracks')}
+          </button>
+        )}
+
         <label style={styles.volume}>
-          音量
+          {t('media.player.volume')}
           <input
             type="range"
             min={0}
@@ -996,6 +1308,37 @@ export function Preview({ className }: PreviewProps) {
           />
         </label>
       </div>
+
+      {/*
+        分轨音量。滑块直接就是各层增益——「原声」档把人声压到 20~30%
+        就是日本卡拉OK 那种ガイドボーカル入り的试听方式，而这正是
+        "原声/伴奏"两个固定档覆盖不到的中间地带（§8.7）。
+      */}
+      {mixerAvailable && mixerOpen && (
+        <div style={styles.mixer} data-testid="mix-tracks">
+          {layers.map((id) => {
+            const blocked = layerBlockReason(id)
+            const disabled = !!blocked
+            return (
+              <label key={id} style={styles.mixerRow} title={blocked ?? undefined}>
+                <span style={styles.mixerName}>{t(`media.player.track.${id}`)}</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  disabled={disabled}
+                  data-testid={`mix-level-${id}`}
+                  value={levels[id] ?? 0}
+                  onChange={(e) => setLayerLevel(id, Number(e.target.value))}
+                  style={styles.mixerSlider}
+                />
+                <span style={styles.mixerValue}>{Math.round((levels[id] ?? 0) * 100)}%</span>
+              </label>
+            )
+          })}
+        </div>
+      )}
 
       {(overlayError ?? playbackError) && (
         <IssueList
@@ -1076,10 +1419,17 @@ const styles = {
   duration: { fontVariantNumeric: 'tabular-nums', fontSize: 13, color: '#888' },
   seek: { flex: 1, minWidth: 120 },
   group: { display: 'flex' },
+  dim: { fontSize: 12, color: '#888' },
   toggle: { padding: '4px 12px', cursor: 'pointer' },
   toggleActive: { fontWeight: 700 },
   toggleDisabled: { cursor: 'not-allowed', opacity: 0.5 },
   volume: { display: 'flex', alignItems: 'center', gap: 4, fontSize: 12 },
+  // 分轨那一排单独占一行：挤进走带行会把进度条压没，而它本来就是"展开才看"的东西
+  mixer: { display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap', fontSize: 12 },
+  mixerRow: { display: 'flex', alignItems: 'center', gap: 6 },
+  mixerName: { color: '#aab', minWidth: 28 },
+  mixerSlider: { width: 96 },
+  mixerValue: { color: '#888', fontVariantNumeric: 'tabular-nums', minWidth: 34, textAlign: 'right' },
   issues: {
     listStyle: 'none',
     margin: 0,
