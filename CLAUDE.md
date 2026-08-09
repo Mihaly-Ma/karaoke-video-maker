@@ -4,25 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ---
 
-## 0. 当前状态（重要）
+## 0. 怎么读这份文件
 
-**已有一条可运行的端到端出片管线**（2026-08-09），但**没有任何 GUI**——
-"一站式"所依赖的三级调轴与注音编辑界面尚未开始。
+本文件是**契约**，不是进度记录：它规定该怎么做、以及哪些做法已经被验证是错的。
+不要在这里追加"某某已完成"之类的状态，那是 git 历史的职责。
 
-已经能跑的（`backend/kvm/`）：
+**代码是唯一的真实状态。** 本文件描述的架构、目录、数据结构、命令，凡未标"已实测"的，
+都是**设计决策**或**待实现项**——动手前先确认它是否真的存在，不要假设。
 
-| 模块 | 作用 |
-|---|---|
-| `models/karaoke.py` | 工程数据模型：Project → Line → Token + RubySpan |
-| `pipeline/qrc_import.py` | QRC 逐字轴 + `[kana:]` 注音 → 工程 |
-| `render/text_metrics.py` | 向 libass 实测 advance（尾随标记块法） |
-| `render/ass_builder.py` | ASS 生成：双层 clip 描边翻色、注音布局、拆行、引导点、制作名单 |
-| `pipeline/make_video.py` | 端到端 CLI：探测 → 生成 ASS → ffmpeg 烧录 |
-
-`experiments/` 下是各阻断问题的实测脚本，结论已固化进本文件，脚本保留作为证据与回归基线。
-
-除此之外，本文件中的架构描述、目录约定、数据结构、命令，凡未标"已实测"或未在上表中，
-都仍是**设计决策**或**待实现项**，不要假设它已经存在。
+`experiments/` 下是各阻断问题的实测脚本，结论已固化进本文件，脚本保留作为回归基线。
 
 标注体系：
 
@@ -74,7 +64,7 @@ Windows x64 与 macOS Apple Silicon (arm64) 双端。任何"只有 Linux 有 whe
 
 环境缺什么就补什么，不要让环境现状反过来扭曲架构。按理想架构设计，然后补环境。
 
-开发机现状（2026-08-08 实测）：已装 `ffmpeg-full` 8.1.2_2，带 `libass + libharfbuzz + libfontconfig + libfreetype`，`ass`/`subtitles` 滤镜可用。注意 **Homebrew 主线 `ffmpeg` formula 不含 libass**，`ffmpeg@6` 含但版本旧——所以探测 ffmpeg 时必须**以滤镜是否注册为准**，不能只看版本号，也不能假设 `which ffmpeg` 拿到的那个可用。系统 Python 是 3.14，项目用 3.12，由 uv 管理，不动系统 Python。
+开发机现状：已装 `ffmpeg-full` 8.1.2_2，带 `libass + libharfbuzz + libfontconfig + libfreetype`，`ass`/`subtitles` 滤镜可用。注意 **Homebrew 主线 `ffmpeg` formula 不含 libass**，`ffmpeg@6` 含但版本旧——所以探测 ffmpeg 时必须**以滤镜是否注册为准**，不能只看版本号，也不能假设 `which ffmpeg` 拿到的那个可用。系统 Python 是 3.14，项目用 3.12，由 uv 管理，不动系统 Python。
 
 ### 2.5 自动化可以打折，一站式不能
 
@@ -134,11 +124,11 @@ Windows x64 与 macOS Apple Silicon (arm64) 双端。任何"只有 Linux 有 whe
 
 ---
 
-## 3. 分发模式（已定 D0，2026-08-08 用户拍板）
+## 3. 分发模式（已定 D0）
 
 **D0：私有自用，顶多作为开源项目公开源码；不单独分发编译好的二进制。**
 
-这条解除了原本阻塞 5 项选型的许可证约束：
+由此解除的许可证约束：
 
 | 决策点 | 结论 |
 |---|---|
@@ -187,7 +177,7 @@ Windows x64 与 macOS Apple Silicon (arm64) 双端。任何"只有 Linux 有 whe
    （libass WASM）                （同一 libass commit）
 ```
 
-**唯一真源是工程文件，不是 ASS。** ASS 只是渲染目标，从工程文件序列化产生，永远不被反向解析回来。四个独立调研领域得出同一结论，这条不要动摇。
+**唯一真源是工程文件，不是 ASS。** ASS 只是渲染目标，从工程文件序列化产生，永远不被反向解析回来。这条不要动摇。
 
 ### 4.2 中枢数据结构：工程文件（`project.json`）
 
@@ -244,13 +234,12 @@ Windows x64 与 macOS Apple Silicon (arm64) 双端。任何"只有 Linux 有 whe
 4. 同一行内相邻 mora **单调不重叠**：`mora[i].t_end_ms <= mora[i+1].t_start_ms`。
    **取等只是常见情况，不是要求**——两者之差就是句内空隙
 
-**句内空隙必须保住（已实测，2026-08-09）**。曾经把不变式写成"边界严格相等 +
-`sum(\k) === 行时长`"，那是错的：真实演唱有换气与词间停顿，而 QRC 的字级时间本来
-就是 `(start, duration)`、天然表达空隙。赤春花实测 633 个 token 里 **53 处相邻字之间
-有正空隙，12 处 ≥100ms，最大 280ms**。
+**句内空隙必须保住。** 真实演唱有换气与词间停顿，而 QRC 的字级时间本来就是
+`(start, duration)`、天然表达空隙。实测 633 个 token 的曲目里 **53 处相邻字之间有正空隙，
+12 处 ≥100ms，最大 280ms**。
 
-若强行让边界相等（把空隙并进前一个字），扫色就会在没人唱的时候继续往前爬，
-演唱者看着颜色走却无词可唱——这是卡拉OK 字幕最刺眼的一类错误。因此：
+**不要把不变式写成"边界严格相等"**：那会把空隙并进前一个字，扫色就在没人唱的时候
+继续往前爬，演唱者看着颜色走却无词可唱——这是卡拉OK 字幕最刺眼的一类错误。因此：
 
 - **存储用 `(start_ms, dur_ms)`，`end_ms` 是派生量**。绝不能用"下一个字的 start"
   反推本字的 end，那等于把空隙信息抹掉（`models/karaoke.py`、`pipeline/qrc_import.py`
@@ -340,7 +329,7 @@ surface 字符块的 `\k` 值 = 其所属 mora 时长之和。这样「学校」
 - **yt-dlp 版本检测 + 一键升级必须做成产品功能**。YouTube extractor 因签名解密/PO Token 策略变化频繁失效，这是运维常态。pip/uv 安装的 yt-dlp 不能用内置 `-U` 自更新（`is_non_updateable()` 会拒绝），升级动作 = 子进程跑一次 `uv pip install -U --pre "yt-dlp[default]"` 后重启后端
 - 预留 `--cookies-from-browser` 与 PO Token Provider（`bgutil-ytdlp-pot-provider`，需 Node.js 20+ 或 Deno 2.0+）作为降级路径
 
-已实测（2026-08，单次快照）：验证曲 MV `HCC-0sr_-lo` 无 cookie / 无 PO Token 即可取到 31 个 format 含 2160p。**这是易碎的时间快照，不是长期保证。**
+**不要把"当前不需要 cookie / PO Token"当成长期保证。** 实测过某支 MV 无鉴权即可取到含 2160p 的 31 个 format，但 YouTube 的策略随时会变，这类结论只是时间快照。
 
 ### 5.2 歌词源
 
@@ -363,7 +352,7 @@ Provider 清单（**优先级未最终裁决，见 §9**）：
 |---|---|---|---|
 | QQ音乐 QRC | 逐字 + `[kana:]` + 罗马音 + 翻译 | `POST https://u.y.qq.com/cgi-bin/musicu.fcg`，`module=music.musichallSong.PlayLyricInfo` / `method=GetPlayLyricInfo`，param 含 `crypt:1, qrc:1, roma:1, trans:1` | **已实测端到端闭环，全程零 Cookie**。第一版主源，实现见 `experiments/qrc_decrypt.py` |
 | 酷狗 KRC | 逐字 + `[kana:]` | 三步：`mobiles.kugou.com/api/v3/search/song` → `krcs.kugou.com/search` → `lyrics.kugou.com/download`；解密 = base64 → 去 4 字节 `krc1` 头 → 与 16 字节密钥 `40 47 61 77 5E 32 74 47 51 36 31 2D CE D2 6E 69` 循环 XOR → zlib | 已实测端到端跑通 |
-| 网易云 | 行级 LRC + 中译 + **按拍分词罗马音** | `music.163.com/api/song/lyric?id=...&lv=1&kv=1&tv=1&rv=1` | 已实测；**匿名 API 与匿名 eapi 都拿不到 yrc 逐字**，别为 yrc 投入 eapi 工程量。**后期计划接入**（用户 2026-08-09 指定）：作为行级兜底与 QQ 的交叉校验源，不指望它提供逐字轴 |
+| 网易云 | 行级 LRC + 中译 + **按拍分词罗马音** | `music.163.com/api/song/lyric?id=...&lv=1&kv=1&tv=1&rv=1` | 已实测；**匿名 API 与匿名 eapi 都拿不到 yrc 逐字**，别为 yrc 投入 eapi 工程量。**计划接入**：作为行级兜底与 QQ 的交叉校验源，不指望它提供逐字轴 |
 | YouTube 官方 ja 字幕 | 句级，**已在 MV 时间轴上** | yt-dlp `subtitles.ja`（与 `automatic_captions` 分离即人工轨） | 已实测，65 行。**最稳的兜底，完全不依赖中国大陆 API** |
 | LRCLIB | 行级 | `https://lrclib.net/api/search`，无鉴权 | 已实测 |
 | UtaTen | 纯文本 + **权威 ruby** | 页面 `<span class="rb">/<span class="rt">` 成对 | 已实测可抓 |
@@ -371,17 +360,23 @@ Provider 清单（**优先级未最终裁决，见 §9**）：
 
 **QRC 解密**：hex → **魔改（有 bug 的）3DES-ECB** → zlib inflate。密钥 ASCII `!@#)(*$%123ZXC!@!@#)(NHL`。腾讯的 DES S-box 有笔误（sbox2 第 2 行第 8 项是 15 而非 14；sbox4 第 4 行第 6 项是 10 而非 1 等），**`pycryptodome` / `cryptography` 的标准 DES3 解出来是垃圾**。可移植来源：MIT 的 `WXRIW/QQMusicDecoder`（C#）、`jixunmoe-go/qrc`（Go）、`wangqr/QQMusicDES`（C）；GPL 的 `chenmozhijin/LDDC`（Python，`core/decryptor/tripledes.py`）质量最高但会污染闭源分发。
 
-**关于验证曲的覆盖率结论（重要，不要被误导）**：`赤春花 (feat. 幾田りら)` 的 QQ 入库时间是 2026-02-27，紧随其**数字先行配信 2026-01-29 / 实体发售 2026-02-25**，而不是紧随 MV 公开的 2026-07-23。也就是说**"两周新歌冷启动"这个场景从来没被验证过**。三个调研领域都在用这个不成立的样本论证覆盖率。所以：
+**歌词源覆盖率不能拿"有商业发行的曲目"去论证。** QQ 的入库时间跟的是**数字配信/实体发售**，
+不是 MV 公开日；拿一首有单曲发行的歌去验证，测的是"商业发行曲的覆盖率"，
+**"只有 MV、无同步发行的新歌"这个场景根本没被覆盖到**——样本选择偏差正好就是被测变量本身。
 
-- 「20 首日语曲 20/20 命中 QRC」这个结论只适用于**有商业单曲发行的曲目**（样本选择偏差就是被测变量本身），置信度应视为 medium
+由此三条：
+
+- 「20 首日语曲 20/20 命中 QRC」之类的结论只适用于有商业单曲发行的曲目，置信度视为 medium
 - 强制对齐兜底路径**不能降级**
 - 需要另找一首"只有 MV、无同步商业发行"的真新歌重测
 
-### 5.3 时间轴重锚定（最大的缺口，零调研）
+### 5.3 时间轴重锚定（最大的缺口，尚无验证过的方案）
 
-**问题**：所有中文平台的歌词时间轴对齐的是**流媒体母带**，不是 YouTube MV 音轨。MV 常有不同的前奏长度、淡入淡出、专属剪辑。至少 6 处调研都写了"必须做全局 offset + 逐句漂移校正"，但**没有任何领域调研过怎么做**。
+**问题**：所有中文平台的歌词时间轴对齐的是**流媒体母带**，不是 YouTube MV 音轨。MV 常有不同的前奏长度、淡入淡出、专属剪辑。**必须做全局 offset + 逐句漂移校正，但具体怎么做尚无验证过的方案。**
 
-**已作废的结论**：曾有结论称"MV 与母带时间轴差 11ms，偏移是全局单一常数，不要写复杂重对齐逻辑"。这条**推理不成立**——它是用 YouTube 官方句级人工字幕对比网易句级 LRC 得出的，两者都是人手打的句级时间轴，本身就有 ±100ms 的随意性。**用两份人工标注的一致性无法证明两条音频轨的时间基准一致。** 不要据此简化架构。
+**不要用"两份人工标注一致"去证明音轨时间基准一致。** 拿 YouTube 官方句级人工字幕对比
+网易句级 LRC，两者都是人手打的句级轴、本身就有 ±100ms 的随意性，它们吻合说明不了任何事。
+据此得出"偏移是全局单一常数、不必写重对齐"的结论是错的，不要用它简化架构。
 
 **待实现的设计方向**（未经验证，实现时必须先做实验）：
 
@@ -406,19 +401,19 @@ audio-separator 的命名空间，换模型不该逼前端跟着改。档位表�
 | `standard`（默认） | `mel_band_roformer_kim_ft_unwa.ckpt` | 比 BS-Roformer 快约 2.3x，SDR 仅低 0.1 |
 | `best` | `model_bs_roformer_ep_317_sdr_12.9755.ckpt` | 639 MB，质量最高，最慢 |
 
-已实测（2026-08-09，赤春花 60s 真实素材，macOS arm64 / MPS）：扣掉固定开销后每 30s
-音频的推理成本约 **2.0s / 4.0s / 10.1s**，standard 约为 best 的 2.4 倍速，与上表的
-"快约 2.3x"吻合。三档 corr(原混音, 各声部之和) = 0.991 / 0.9996 / 0.998。
+实测（macOS arm64 / MPS，真实素材）：扣掉固定开销后每 30s 音频的推理成本约
+**2.0s / 4.0s / 10.1s**，standard 约为 best 的 2.4 倍速。三档 corr(原混音, 各声部之和)
+= 0.991 / 0.9996 / 0.998。
 
-三条会咬人的实测事实：
+三条会咬人的事实：
 
 - **声部命名三种约定并存**，消费端必须归一化后再判类型：htdemucs 给 `(Vocals)/(Bass)/(Drums)/(Other)`，
   BS-Roformer 给 `(Vocals)/(Instrumental)`，而 **MelBand 给小写 `(vocals)/(other)`——
   它的 `other` 就是完整伴奏，不是 4 声部里的那个 other**。判据要看有没有 Drums/Bass，不能看键名
 - **audio-separator 一律把输出重采样到 44.1kHz**（源是 48kHz 时也一样），下游混音要留意
-- **绝不用合成信号测分离模型**：BS-Roformer 在人工合成的 `synth_mix` 上输出数字静音
-  （mean = max = −91.0 dB），同一模型在真实音乐上是正常的 −17.0 dB。曾据此误判"BS-Roformer
-  在本机不可用"，差点写进契约。测试素材必须是真实音乐
+- **绝不用合成信号测分离模型**：BS-Roformer 在人工合成的混音上输出数字静音
+  （mean = max = −91.0 dB），同一模型在真实音乐上是正常的 −17.0 dB。拿合成信号测会得出
+  "模型不可用"的假结论。**测试素材必须是真实音乐**
 
 设备策略（**已定**）：
 
@@ -489,6 +484,34 @@ audio-separator 的命名空间，换模型不该逼前端跟着改。档位表�
 - 用与 libass 一致的字体度量测每个 syllable 的 advance 宽度（叠加 ScaleX、Spacing、PlayRes 缩放）
 - 主歌词行：自己算 X（按对齐方式）和 Y（自己管两行交替槽位），**一律 `\pos` + `\an`，不依赖 libass 碰撞检测**
 - 注音：照抄 karaskel 的 layout group 算法（**注意它是两趟遍历**，且 `|` `#` `!` `<` 四个符号的解析在 `preproc_line_text` 而非 `do_furigana_layout`，移植时要一起搬；第一趟里 `0 < furiwidth <= basewidth` 分支也要计算负 spill 用于组间避让，漏掉会导致相邻组重叠）
+
+#### 度量必须用尾随标记块法（已实测）
+
+度量方式是**让 libass 自己渲染再从像素反推**，不用 `uharfbuzz` 近似——这样坐标定义与最终
+渲染天然一致，且不读 hmtx/kern、不做 shaping 推演，对任意自定义字体都兼容。
+
+但**量法只有一种是对的**：
+
+| 量法 | 做法 | 结果 |
+|---|---|---|
+| 墨迹差分（❌ 禁用） | 量前缀墨迹右边界后差分 | 差分值 = `advance + (前字rsb − 本字rsb)`，混入 side bearing。同字体下全角字符给出 `明:45 ま:52`，本应相同 |
+| **尾随标记块（✅ 采用）** | 每个前缀后加 `█`，由其位置反推 | 全角字符 advance 恒定（`明:50 ま:49`，±1px 取整） |
+
+在 4 个风格迥异的字体（Noto Sans CJK JP / Hiragino Sans / Hiragino Mincho ProN / YuGothic）
+与日英混排文本上均成立：CJK advance 恒定，西文按比例各异。实现见 `render/text_metrics.py`。
+
+两条派生的硬性规则：
+
+- **注音居中于基字的 advance 格位，不是墨迹包围盒。** 用墨迹中心会在日英混排下产生肉眼可见偏移
+- **`Fontsize` ≠ em size。** 字号 72 时 Noto Sans CJK JP 的 CJK advance 仅 50px（≈0.694）。
+  注音字号、行距、间距一律以**实测 advance** 为准，禁止拿字号硬算
+
+#### 描边同步翻色用双层 + 渐进 clip（已实测）
+
+libass 支持 `\t(t1,t2,\clip(x1,y1,x2,y2))` 的矩形 clip 动画，且 clip 边界严格单调推进、
+精确吻合线性插值。因此**每句只需 2 个 Dialogue 事件**：底层未唱色、顶层已唱色 + clip 动画，
+不必退化成逐音节静态 clip 导致事件数暴涨。这是 nicokara 招牌观感（黑边→白边）在纯 ASS
+下的干净解法。
 
 **ASS 标签语义要点（已从 libass 源码核实）**：
 
@@ -605,7 +628,7 @@ libass 扩展可以放心用（链路两端都是 libass）：`BorderStyle=4`（
 
 **进度**：ffmpeg `-progress pipe:1 -nostats` 输出 key=value 块，用 `out_time_us` 除以 ffprobe 预测总时长算百分比，同时用 `frame=` 与总帧数交叉校验。
 
-### 5.11.5 编辑用代理视频（已定 D16，2026-08-09）
+### 5.11.5 编辑用代理视频（已定 D16）
 
 **编辑器播放代理视频，导出用原始源。** 这不是优化，是可用性前提。
 
@@ -728,7 +751,7 @@ libass 扩展可以放心用（链路两端都是 libass）：`BorderStyle=4`（
 ### 6.3 渲染
 
 - **libass 完全不认识 furigana 语法**。`漢字|かんじ` 和 `#` 是 **Aegisub 自动化脚本的输入约定**，不是 ASS 规范也不是渲染器功能。libass 会把 `|` 原样画出来。任何"把带 `|` 的文本直接写进 Dialogue"的实现都是错的
-- **`\k`/`\kf` 只插值 PrimaryColour，描边色不跟着走字翻转**。而"黑边→白边"恰恰是 nicokara 最标志性的观感。**参考实现里只有 Kirakara-Player 真做到了，用的是浏览器 Canvas 2D 逐字 4-Pass 重绘 + `ctx.clip()`，完全脱离 ASS/libass**；`nicokara-studio` 的三层叠加只解决了填充色渐进，描边色自始至终没变过。**纯 ASS 目前没有任何已验证方案** —— 见 §9 第一项
+- **`\k`/`\kf` 只插值 PrimaryColour，描边色不跟着走字翻转**。而"黑边→白边"恰恰是 nicokara 最标志性的观感。**参考实现里只有 Kirakara-Player 真做到了，用的是浏览器 Canvas 2D 逐字 4-Pass 重绘 + `ctx.clip()`，完全脱离 ASS/libass**；`nicokara-studio` 的三层叠加只解决了填充色渐进，描边色自始至终没变过。**本项目的解法是双层 + 渐进 clip，见 §5.7**
 - **一旦对注音行用 `\pos`，主歌词行也必须 `\pos`**（`\pos` 关闭碰撞检测），否则 libass 会把主行挪走、注音对不上
 - **注音是派生量不是存量（已定 D8）**：换字体/字号/字距后所有注音坐标必须重算。度量由**单一实现**产出（建议后端 `uharfbuzz` 或 libass 绑定），前端只消费坐标，**绝不用 Canvas `measureText`**（不支持 letter-spacing，CJK 混排偏移肉眼可见）
 - **字宽估算的固定比例是权宜之计**：`nicokara-studio` 用 `_CHAR_WIDTH_RATIO = 0.68`，在汉字/假名/拉丁/半角标点混排时必偏
@@ -784,7 +807,7 @@ effective = manual_override if manual_override.locked else computed
 
 ---
 
-## 8. 编辑器状态层（零调研，但没有它就只有一个跑批工具）
+## 8. 编辑器状态层（没有它就只有一个跑批工具）
 
 **待实现**，且必须在写调轴 UI 之前定下来：
 
@@ -849,7 +872,7 @@ effective = manual_override if manual_override.locked else computed
 
 ---
 
-## 8.6 待实现的功能（按用户指定的优先级）
+## 8.6 待实现的功能（按优先级）
 
 | 优先级 | 功能 | 说明 |
 |---|---|---|
@@ -866,7 +889,7 @@ effective = manual_override if manual_override.locked else computed
 
 ---
 
-## 8.7 主唱 / 和声分离与音轨变体（2026-08-09 用户指定的后续方向）
+## 8.7 主唱 / 和声分离与音轨混音台（待实现）
 
 ### 真正要解决的是「コーラス入り」
 
@@ -969,7 +992,7 @@ CTC 要的是可懂度，引导声只要 f0，二者对残留伪影的容忍度�
 
 ---
 
-## 8.8 README 与多语言（2026-08-09 用户指定，待实现）
+## 8.8 README 与多语言（待实现）
 
 ### README
 
@@ -1015,86 +1038,62 @@ README 属于 `.claude/rules/doc-style.md` 里明确豁免"不许贴代码"的�
 
 ---
 
-## 9. 待实测的开放问题（按阻断性排序）
+## 9. 待实测的开放问题
 
-**前四项里有三项不需要联网调研，只需要写 50 行代码跑一次实验。在补更多外部调研之前，先把这三个实验做掉。**
+**凡标"待实测"的，一律先写实验代码验证，不要凭猜测写进生产路径。**
 
-### ✅ 已实测结项（2026-08-08）
+### 阻断编辑体验
 
-**P0-1 描边翻色 —— 已实测通过。** 实验：`experiments/ass_clip_animation.py`
+1. **JASSUB `setEvent` 的端到端延迟**（IPC + libass 重排 + WebGL 上传）未实测，
+   而它是"拖拽时实时看到字幕变化"的技术前提。若单次超过 16ms，拖拽必须改成
+   "拖动时 DOM overlay 预览、松手才 setEvent"的双层策略。
 
-**libass 支持 `\t(t1,t2,\clip(x1,y1,x2,y2))` 的矩形 clip 动画。** 实测 clip 右边界从
-x=255 严格单调推进到 x=1025，且精确吻合线性插值 `clip_x = t/T × W`。
+2. **`pyopenjtalk.g2p` 吃纯假名串时的行为**：能否绕过词典直接做假名→音素？
+   这是"注音与对齐共享读音"能否成立的关键节点——若不能，`[kana:]` 给的
+   `reading_display` 就无法确定性地推导出 `reading_phonetic`。
 
-结论：**"双层 + 渐进 clip"的描边同步翻色方案可用**，每句仅需 2 个 Dialogue 事件
-（底层未唱色、顶层已唱色 + clip 动画），不必退化成逐音节静态 clip 导致事件数暴涨。
-nicokara 的招牌观感有干净解法。`Kirakara-Player` 在 Canvas 里靠 4-Pass 才做到的效果，ASS 两层即可。
+### 影响成片质量
 
-**P0-2 文本度量闭环 —— 已实测通过，但方法必须用对。**
-实验：`experiments/text_metrics_libass.py`（墨迹法，**有偏差，仅作对照**）
-与 `experiments/text_metrics_advance.py`（**advance 法，采用这个**）
+3. **时间轴重锚定**（见 §5.3）：歌词源的轴对齐的是流媒体母带而非 MV 音轨，
+   目前整条链路直接用歌词源时间、未做任何重锚定。需实测波形互相关，
+   量出真实 offset 与是否需要非线性 warp。
 
-可以直接让 libass 自己渲染再从像素反推度量，**无需 `uharfbuzz` 近似**，
-坐标定义上就与最终渲染一致。但两种量法结果不同，只有后者正确：
+4. **对齐精度的 ground truth**：强制对齐尚未实现。落地后要人工标 20 个假名起点，
+   量出模型在分离后歌声上的中位误差与 p90——这个数字决定 UI 需要多重的手工干预。
+   **标注工具本身也要写。**
 
-| 量法 | 做法 | 结果 |
-|---|---|---|
-| 墨迹差分（❌ 有偏差） | 量前缀墨迹右边界后差分 | 差分值 = `advance + (前字rsb − 本字rsb)`，混入 side bearing。实测同字体下全角字符给出 `明:45 ま:52`，本应相同 |
-| **尾随标记块（✅ 采用）** | 每个前缀后加 `█`，由其位置反推 | 实测全角字符 advance **恒定**（`明:50 ま:49`，±1px 取整） |
+5. **段落（间奏）检测改进**：现在是固定阈值 4.0s，对慢歌会误判，而指示灯是
+   nicokara 的标志性元素，判错段落就等于判错指示灯。用已有的 `vocals.wav` 做
+   VAD 能量检测是免费的更好信号。
 
-在 4 个风格迥异的字体（Noto Sans CJK JP / Hiragino Sans / Hiragino Mincho ProN / YuGothic）
-与日英混排文本上均成立：CJK advance 恒定，西文按比例各异。
-**方法不读 hmtx/kern、不做 shaping 推演，因此对任意自定义字体天然兼容**。
+6. **自动分行**：现在只在行过宽时按最大时间间隙拆分。官方分行 ≠ nicokara 一屏两行，
+   还需要按语法边界/字符数的主动重新分行，以及拆并行后的时间重分配策略。
 
-两条派生的硬性规则：
+### 歌词源
 
-- **注音居中于基字的 advance 格位，不是墨迹包围盒。** 用墨迹中心会在日英混排下产生肉眼可见偏移。
-- **`Fontsize` ≠ em size。** 实测字号 72 时 Noto Sans CJK JP 的 CJK advance 仅 50px（≈0.694）。
-  注音字号、行距、间距一律以**实测 advance** 为准，禁止拿字号硬算。
+7. **Kugou vs QQ 谁做主源**：尚无同曲对比数据。半小时实测就能裁决。
 
----
+8. **真正的"冷启动新歌"覆盖率**：换一首只有 MV、无同步商业发行的日语新歌重测。
+   现有覆盖率结论都建立在有商业发行的样本上，不适用于这个场景。
 
-### P0 — 阻断第一个视频（剩余）
+### 分发前必须解决
 
-3. **QRC 解密链路是否真正闭环**（两个调研领域结论直接对立）
-   一方称"解密成功，10926 字符 QRC XML，首句 `桜(774,665)舞(1439,188)...`"；另一方称"没有真正看到解密后的 XML，标准 DES 9 次全败"。**这必须立刻裁决**：若解密成功，把那段代码固化下来；若没跑通，整条主链路的地基是空的，第一版应改走「YouTube 官方 ja 字幕 + 强制对齐」路线。
-   同时验证：QRC 内容是真逐字还是退化的句级 QRC；逐字切分粒度是按汉字词块（`桜/舞/って`）还是按拍。
+9. **环境自检**（`backend.doctor`，尚未实现）：ffmpeg 是否带 libass、libass 版本、
+   torch 设备、模型是否已下载、字体是否齐、磁盘余量。桌面工具必须有这个。
 
-4. **重锚定算法实验**（见 §5.3）：拿验证曲的 MV 与 Art Track（`PZ3CB2vmGYo`，260s，Sony 官方上传）实测波形互相关，量出真实 offset 与是否需要非线性 warp。**不要沿用"差 11ms、全局单一常数"这个已作废的结论。**
+10. **自建 ffmpeg 的实际工程量**：为 win-x64 与 mac-arm64 双平台自建含指定 libass
+    commit 的 ffmpeg。**要么专门评估一次，要么明确接受"先用 Homebrew `ffmpeg-full`
+    开发、分发问题后置"。**
 
-### P1 — 阻断"一站式"
+11. **JASSUB 与 ffmpeg 的像素回归方案**：headless 截图 + ffmpeg 单帧输出做 SSIM 对比。
+    重点覆盖 `\kf` 扫光边缘、`\blur`、`\bord+\shad`、`\fad`、`\t` 动画、
+    日文小字号注音栅格化。
 
-5. **JASSUB `setEvent` 的端到端延迟**（IPC + libass 重排 + WebGL 上传）。它被写成了"整个一站式的技术前提"，但**未实测**。若单次超过 16ms，拖拽必须改成"拖动时 DOM overlay 预览、松手才 setEvent"的双层策略。第一周就写最小 spike。
-
-6. **JASSUB 与 ffmpeg 的像素回归方案**：headless 截图（Playwright？）+ ffmpeg 单帧输出做 SSIM 对比。重点覆盖 `\kf` 扫光边缘、`\blur`、`\bord+\shad`、`\fad`、`\t` 动画、日文小字号注音栅格化。这个 CI 方案本身没被调研过。
-
-7. **`pyopenjtalk.g2p` 吃纯假名串时的行为**：能否绕过词典直接做假名→音素？这是"注音与对齐共享读音"方案能否成立的关键节点 —— 若不能，`[kana:]` 给的 `reading_display` 就无法确定性地推导出 `reading_phonetic`。
-
-8. **编辑器状态层设计**（见 §8）—— 不是实测，是必须先设计。
-
-### P2 — 影响质量与工作量
-
-9. **Kugou vs QQ 谁做主源**：两个调研领域给出完全相反的排序，两边都承认"没做同曲对比"。**半小时实测就能裁决。**
-
-10. **真正的"冷启动新歌"覆盖率**：换一首只有 MV、无同步商业发行的日语新歌，重测 QQ/Kugou/网易/LRCLIB 的覆盖情况。当前所有覆盖率结论都建立在一个不成立的样本上。
-
-11. **对齐精度的 ground truth**：拿验证曲人工标 20 个假名起点，量出 `vumichien` 模型在分离后歌声上的中位误差与 p90。这个数字决定 UI 需要多重的手工干预，比任何进一步的文献调研都有价值。**标注工具本身也要写。**
-
-12. **自动分行算法**：官方分行 ≠ nicokara 一屏两行。按时长间隔？按全角字符数 12-20？按语法边界？拆并行后时间如何重分配？零调研。
-
-13. **段落（间奏）检测**：当前只有固定阈值 4.0s，对慢歌会误判，而**指示灯（4 点倒计时）是 nicokara 的标志性元素，判错段落就等于判错指示灯**。你本来就已经有 `vocals.wav`，用它的 VAD 能量做段落检测是免费的更好信号 —— 这条没人调研过。
-
-14. **对唱声部归属（diarization）**：两个领域都说"必须手动标记""本地没有可靠方案"，但**没人真去查**。至少这三条值得评估：`pyannote.audio`（本地推理，模型在 HF 需接受条款）；先用 `mel_band_roformer_karaoke_*` 分 lead/backing 再按能量归属；QQ 的 `singingAnnotationsLyric` 字段（对本曲为空，但格式与覆盖面未查）。验证曲正好是男女对唱。
-
-15. **环境自检设计**：ffmpeg 是否带 libass、libass 版本、torch 设备、模型是否已下载、字体是否齐、磁盘余量。桌面工具必须有这个，目前零设计。
-
-16. **`ffmpeg` 自建的实际工程量**：为 win-x64 与 mac-arm64 双平台自建含指定 libass commit 的 ffmpeg，调研里只有一句"自己在 CI 里编译"。**要么单独立一个调研，要么明确接受"先用 Homebrew `ffmpeg-full` 开发、分发问题后置"。**
-
-17. **Tauri WebView 兼容性**：Windows WebView2（Chromium）与 macOS WKWebView（WebKit）对 rVFC、`OffscreenCanvas.transferControlToOffscreen`、`VideoFrame`、COOP/COEP + SharedArrayBuffer 的支持。JASSUB 要求 Safari 17+，仓库里有 "fix: iOS" 类 commit 说明 WebKit 路径有过坑。**两个平台都要早测。**
-
-18. ~~**编辑用代理视频**~~ —— **已定 D16（2026-08-09），见下方 §5.11 之后的专节。**
-
-19. **验证曲是否真的没有官方 instrumental**：只能证明"在 CD 曲目表和主流检索中未找到"。可再查 Apple Music / mora 的『Honto』完整曲目 —— 若存在官方 inst，第一个视频质量会有质的差别。
+12. **Tauri 壳内的 WebView 兼容性**：浏览器侧的 WebKit 行为已经摸清（`require-corp`
+    可拿到跨源隔离；AV1/Matroska 放不了，已由代理视频解决——见 §5.11.5），
+    但 **Tauri 壳内未测**：WebView2 与 WKWebView 对 rVFC、
+    `OffscreenCanvas.transferControlToOffscreen`、`VideoFrame` 的支持，
+    以及 Tauri 自己的 COOP/COEP 头配置是否真的生效。两个平台都要早测。
 
 ---
 
@@ -1109,14 +1108,14 @@ nicokara 的招牌观感有干净解法。`Kirakara-Player` 在 Canvas 里靠 4-
 
 ## 11. 命令
 
-**以下命令绝大多数对应的脚本尚未存在。** 列在这里是作为约定，实现时按此命名。
+**命名约定：新增脚本按此命名。** 动手前先确认目标脚本是否已存在。
 
 ### 环境准备（一次性，待补齐）
 
 ```bash
 # ffmpeg —— 必须带 libass。Homebrew 主线 ffmpeg 不带！
 brew install ffmpeg-full                      # macOS，开发期临时方案
-# 分发前需自建 vendor 指定 libass commit 的 ffmpeg（见 §5.12 / §9 第16项）
+# 分发前需自建 vendor 指定 libass commit 的 ffmpeg（见 §5.12）
 ffmpeg -h filter=ass                          # 验证：返回 "Unknown filter" 说明没编 libass
 
 # Python —— 系统是 3.14，项目要 3.12
@@ -1180,11 +1179,11 @@ uv run --python 3.12 --with audio-separator --with onnxruntime audio-separator \
 ### 实验脚本（已存在，作为结论证据与回归基线）
 
 ```bash
-uv run python -m experiments.ass_clip_animation      # P0-1 描边翻色（已结项）
-uv run python -m experiments.text_metrics_advance    # P0-2 度量闭环（已结项，采用这个）
-uv run python -m experiments.text_metrics_libass     # P0-2 墨迹法对照（有偏差，勿用于生产）
-uv run python -m experiments.qrc_decrypt             # P0-3 QRC 解密（已结项）
-uv run python -m experiments.reanchor_xcorr          # P0-4 重锚定
+uv run python -m experiments.ass_clip_animation      # 描边翻色的 clip 动画
+uv run python -m experiments.text_metrics_advance    # 度量：尾随标记块法（生产采用这个）
+uv run python -m experiments.text_metrics_libass     # 度量：墨迹法对照（有偏差，勿用于生产）
+uv run python -m experiments.qrc_decrypt             # QRC 解密
+uv run python -m experiments.reanchor_xcorr          # 重锚定
 uv run python -m experiments.download_bilibili       # bilibili 兼容性
 uv run python -m experiments.furigana_local          # 注音链路
 uv run python -m experiments.separation_check        # 分离后端
