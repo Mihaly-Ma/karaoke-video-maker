@@ -21,24 +21,34 @@ from kvm.api.schemas import (
     DownloadRequest,
     JobStatus,
     ProjectDTO,
+    ProxyRequest,
+    ProxyStatus,
     SeparateModelTier,
     SeparateRequest,
 )
 from kvm.api.store import ProjectStore
 from kvm.jobs import job_manager
 from kvm.media import download as download_module
+from kvm.media import proxy as proxy_module
 from kvm.media import separate as separate_module
 
 router = APIRouter(prefix="/api/media", tags=["media"])
 
-# kind → ProjectDTO 上对应的媒体路径字段。
+# kind → ProjectDTO 上对应的媒体路径字段（可下发给前端播放的全部媒体）。
 _MEDIA_FIELDS: dict[str, str] = {
     "video": "video_path",
+    # 编辑用代理：Safari 放得动的 H.264/MP4 低分辨率短 GOP 版本。
+    # **只用于编辑器预览**，导出成片走的是 `video` 那份原始素材（见 kvm.media.proxy）。
+    "proxy": "proxy_video_path",
     "audio": "audio_path",
     "instrumental": "instrumental_path",
     "vocals": "vocals_path",
     "drums": "drums_path",
 }
+
+# 允许**手工导入**的 kind。比 `_MEDIA_FIELDS` 少一个 proxy：代理是本工具从原视频
+# 派生出来的中间产物，不是用户素材——放开导入只会让 proxy 与 video 对不上号。
+_IMPORT_FIELDS: dict[str, str] = {k: v for k, v in _MEDIA_FIELDS.items() if k != "proxy"}
 
 # Python 的 `mimetypes` 默认不认识这几种常见容器/编码，显式补上，否则
 # `<video>`/`<audio>` 标签可能因为 Content-Type 缺失/错误而拒绝播放。
@@ -98,18 +108,25 @@ def import_media(
     写盘，这里不读取 `file` 的完整内容进内存。
     """
     _project_or_404(store, project_id)
-    field = _MEDIA_FIELDS.get(kind)
+    field = _IMPORT_FIELDS.get(kind)
     if field is None:
         raise HTTPException(
             status_code=400,
-            detail=f"不支持的导入类型：{kind}（应为 {'/'.join(_MEDIA_FIELDS)} 之一）",
+            detail=f"不支持的导入类型：{kind}（应为 {'/'.join(_IMPORT_FIELDS)} 之一）",
         )
     try:
-        return download_module.import_local_media(
+        project = download_module.import_local_media(
             store, project_id, kind, field, file.filename or "", file.file
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if kind == "video":
+        # 导入本地视频后自动补一份编辑用代理（与下载路径同一条自动化）。
+        # 这一步只是排队，几毫秒返回，不拖慢导入本身的响应；失败也不影响导入结果——
+        # 没有代理时预览会回退用原视频（Safari 上表现为只有声音）。
+        proxy_module.submit_proxy_job(store, project_id)
+    return project
 
 
 @router.get("/separate/models", response_model=list[SeparateModelTier])
@@ -137,6 +154,53 @@ def start_separate(req: SeparateRequest, store: ProjectStore = Depends(get_store
         kind="media.separate",
         run=lambda handle: separate_module.run_separate(handle, store, req),
     )
+
+
+@router.post("/proxy", response_model=JobStatus)
+def start_proxy(req: ProxyRequest, store: ProjectStore = Depends(get_store)) -> JobStatus:
+    """手动生成编辑用代理视频。
+
+    自动路径在下载完成 / 导入本地视频之后由后端自行发起，这个接口是与之等价的
+    手工入口（CLAUDE.md §2.5：每个自动环节都要有手工旁路），也用于给**已经有
+    原视频但还没有代理**的老工程补一份。
+    """
+    project = _project_or_404(store, req.project_id)
+    if not project.video_path:
+        raise HTTPException(
+            status_code=400,
+            detail="工程还没有视频文件，无法生成编辑用代理（只有音轨的工程本来就不需要代理）",
+        )
+    return proxy_module.submit_proxy_job(
+        store, req.project_id, max_height=req.max_height, force=req.force
+    )
+
+
+@router.get("/proxy/{project_id}", response_model=ProxyStatus)
+def get_proxy_status(project_id: str, store: ProjectStore = Depends(get_store)) -> ProxyStatus:
+    """代理是否就绪 + 最近一次代理任务的状态。
+
+    前端靠它决定 `<video>` 的 src 用代理还是原视频，并在下载/导入之后自动发起的
+    那次代理任务上显示进度——那个 job_id 只有后端知道。
+    """
+    project = _project_or_404(store, project_id)
+    job = proxy_module.latest_job(project_id)
+    path = project.proxy_video_path
+    ready = bool(path) and Path(path or "").is_file()
+
+    if ready:
+        note = "编辑用代理已就绪，预览走代理（Safari 也能出画面，seek 更快）"
+    elif not project.video_path:
+        note = "工程还没有视频，不需要代理"
+    elif job is not None and job.state in ("pending", "running"):
+        note = "正在生成编辑用代理…"
+    elif job is not None and job.state == "failed":
+        note = f"代理生成失败，预览暂时回退用原视频：{job.error}"
+    elif path:
+        note = "代理文件不见了（可能已被清理），请重新生成"
+    else:
+        note = "还没有编辑用代理。Safari 放不了原始 MKV/AV1，生成后即可看到画面"
+
+    return ProxyStatus(project_id=project_id, ready=ready, path=path, job=job, note=note)
 
 
 @router.get("/jobs/{job_id}", response_model=JobStatus)

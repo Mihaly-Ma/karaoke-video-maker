@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import * as api from '../api/client'
 import { useProject } from '../state/projectStore'
-import type { Project } from '../api/types'
+import type { JobStatus, Project, ProxyStatus } from '../api/types'
+import JobProgress from './JobProgress'
 
 /**
  * 视频下载与人声分离面板。
@@ -99,6 +100,16 @@ export default function MediaPanel({
   const [model, setModel] = useState<string | null>(null)
   const [separateError, setSeparateError] = useState<string | null>(null)
 
+  /**
+   * 编辑用代理视频的状态。**这一步的目的就是确认下载质量**，而原始素材
+   * （AV1 + Matroska + Opus）在 Safari 上根本出不了画面，所以代理的就绪与否
+   * 必须摆在素材面板上，不能让用户对着黑屏猜。
+   */
+  const [proxy, setProxy] = useState<ProxyStatus | null>(null)
+  /** 代理任务 id：既可能是这里点出来的，也可能是后端在下载/导入之后自动排的 */
+  const [proxyJobId, setProxyJobId] = useState<string | null>(null)
+  const [proxyError, setProxyError] = useState<string | null>(null)
+
   const [importError, setImportError] = useState<string | null>(null)
   const [importingKind, setImportingKind] = useState<
     null | 'video' | 'audio' | 'vocals' | 'instrumental' | 'drums'
@@ -137,6 +148,54 @@ export default function MediaPanel({
   }, [])
 
   const selectedModel = model ?? tiers.find((t) => t.recommended)?.id ?? tiers[0]?.id ?? 'fast'
+
+  const videoPath = project?.video_path ?? null
+  const proxyPath = project?.proxy_video_path ?? null
+
+  // 拉一次代理状态。依赖里放 video_path / proxy_video_path 而不是定时轮询：
+  // 下载完成或本地导入之后工程会被刷新，这两个字段必然变化，正好是"后端可能
+  // 刚自动排了一个代理任务"的时刻——那个 job_id 只有后端知道，必须来这里取，
+  // 取到后交给 JobProgress 继续轮询进度。
+  useEffect(() => {
+    if (!projectId) return
+    let alive = true
+    void api
+      .proxyStatus(projectId)
+      .then((st) => {
+        if (!alive) return
+        setProxy(st)
+        if (st.job && (st.job.state === 'pending' || st.job.state === 'running')) {
+          setProxyJobId(st.job.job_id)
+        }
+      })
+      .catch(() => {
+        // 代理状态查不到不该让素材面板报错：没有代理时预览会回退用原视频
+        if (alive) setProxy(null)
+      })
+    return () => {
+      alive = false
+    }
+  }, [projectId, videoPath, proxyPath])
+
+  const startProxy = async () => {
+    if (!projectId) return
+    setProxyError(null)
+    try {
+      // 已经有代理时点这个按钮意味着"重来一次"（换了编码器、或怀疑上次产物有问题），
+      // 必须绕开缓存，否则会秒回一个"完成"却什么都没变
+      const job = await api.buildProxy(projectId, undefined, !!proxyPath)
+      setProxyJobId(job.job_id)
+    } catch (e) {
+      setProxyError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  const onProxySettled = async (status: JobStatus) => {
+    // 刷新工程让 proxy_video_path 落进 store —— 预览的 <video> 会据此换 src
+    await refresh()
+    if (projectId) setProxy(await api.proxyStatus(projectId).catch(() => null))
+    if (status.state === 'done') setProxyJobId(null)
+  }
 
   const startDownload = async () => {
     if (!projectId || !url.trim()) return
@@ -246,6 +305,36 @@ export default function MediaPanel({
         </div>
 
         {downloadError && <p className="error">{downloadError}</p>}
+
+        {/* 编辑用代理：下载/导入之后后端会自动跑一次，这里既显示进度也提供手工入口
+            （CLAUDE.md §2.5：每个自动环节都要有等价的手工旁路）。
+            代理只服务于编辑器预览，导出成片始终用上面那份原始素材。 */}
+        <div className="media-panel__proxy">
+          <h4>编辑用代理</h4>
+          <div className="media-panel__status">
+            <span className={`badge${proxy?.ready ? ' badge--ok' : ''}`}>
+              编辑用代理 {proxy?.ready ? '已就绪' : '未生成'}
+            </span>
+          </div>
+          <p className="hint">
+            {proxy?.note ??
+              '编辑用代理是原视频的 H.264 / MP4 低分辨率短 GOP 版本，只用于编辑器预览：' +
+                'Safari 放不了原始的 MKV / AV1，逐帧核对音节边界也需要短 GOP。导出成片仍用原始素材。'}
+          </p>
+          {proxy?.ready && proxy.path && <code className="path">{proxy.path}</code>}
+          <button type="button" onClick={() => void startProxy()} disabled={!videoPath || !!proxyJobId}>
+            {proxy?.ready ? '重新生成代理' : '生成编辑用代理'}
+          </button>
+          {proxyJobId && (
+            <JobProgress
+              jobId={proxyJobId}
+              label="生成编辑用代理"
+              onSettled={onProxySettled}
+              onDismiss={() => setProxyJobId(null)}
+            />
+          )}
+          {proxyError && <p className="error">{proxyError}</p>}
+        </div>
       </section>
 
       <section className={`media-panel__section${focusSection === 'separate' ? ' media-panel__section--focus' : ''}`}>

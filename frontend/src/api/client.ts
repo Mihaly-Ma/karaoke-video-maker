@@ -18,6 +18,7 @@ import type {
   PaletteTemplate,
   Project,
   ProjectSummary,
+  ProxyStatus,
   Style,
   TimingEdit,
 } from './types'
@@ -86,6 +87,23 @@ export const download = (projectId: string, url: string) =>
 
 export const separate = (projectId: string, model = 'htdemucs') =>
   post<JobStatus>('/media/separate', { project_id: projectId, model })
+
+/**
+ * 生成编辑用代理视频（H.264 / MP4 / 短 GOP / 无音轨，只服务于编辑器预览）。
+ *
+ * 下载完成、导入本地视频之后后端会自动跑一次，这个入口是等价的手工旁路
+ * （CLAUDE.md §2.5），也用于给"已有原视频但还没有代理"的老工程补一份。
+ * **导出成片与它无关**，那条路始终用原始素材。
+ */
+export const buildProxy = (projectId: string, maxHeight?: number, force = false) =>
+  post<JobStatus>('/media/proxy', {
+    project_id: projectId,
+    ...(maxHeight === undefined ? {} : { max_height: maxHeight }),
+    force,
+  })
+
+/** 代理是否就绪 + 最近一次代理任务（含后端自动发起的那次）的状态 */
+export const proxyStatus = (projectId: string) => req<ProxyStatus>(`/media/proxy/${projectId}`)
 
 export const jobStatus = (jobId: string) => req<JobStatus>(`/media/jobs/${jobId}`)
 export const cancelJob = (jobId: string) => post<JobStatus>(`/media/jobs/${jobId}/cancel`, {})
@@ -208,5 +226,5 @@ export const exportVideo = (body: {
  */
 export const mediaUrl = (
   projectId: string,
-  kind: 'video' | 'audio' | 'instrumental' | 'vocals' | 'drums',
+  kind: 'video' | 'proxy' | 'audio' | 'instrumental' | 'vocals' | 'drums',
 ) => `${BASE}/media/file/${projectId}/${kind}`

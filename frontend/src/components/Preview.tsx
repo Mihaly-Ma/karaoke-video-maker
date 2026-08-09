@@ -363,6 +363,20 @@ export function Preview({ className }: PreviewProps) {
   const durationMs = project?.duration_ms ?? 0
   const hasVideo = !!project?.video_path
   const videoPath = project?.video_path ?? null
+  const proxyPath = project?.proxy_video_path ?? null
+
+  /**
+   * 画面取哪一份素材：**有代理就用代理**（H.264 / MP4 / 无音轨 / 约 1 秒 GOP），
+   * 没有才回退原视频。
+   *
+   * 原视频常是 AV1 + Matroska + Opus——Safari 三重放不了（没有 Matroska 解复用器、
+   * 不认 MKV 里的 Opus、M1/M2 也没有 AV1 硬解），所以在 WebKit 上"有没有代理"
+   * 直接决定看不看得见画面；4K 长 GOP 还会让逐帧核对音节边界卡住。
+   *
+   * **这只影响预览。** 导出成片始终烧在原始素材上（后端 render 路由读的是
+   * `video_path`），代理是 540p 无音轨的编辑器专用产物，绝不能拿来出片。
+   */
+  const videoSrcKind: 'proxy' | 'video' = proxyPath ? 'proxy' : 'video'
   const fontName = project?.style.font_name ?? ''
   const audioPath = project?.audio_path ?? null
   const instrumentalPath = project?.instrumental_path ?? null
@@ -385,11 +399,15 @@ export function Preview({ className }: PreviewProps) {
     setVideoUnplayable(true)
   }, [])
 
-  /** 换了工程或换了视频文件，之前那次「放不了」的结论就作废，重新给它一次机会 */
+  /**
+   * 换了工程或换了视频文件，之前那次「放不了」的结论就作废，重新给它一次机会。
+   * 代理路径也算：后台把代理跑出来之后 src 会从原视频切到代理，
+   * 那正是「刚才放不了的东西现在放得了」的典型时刻，不复位就白跑一场。
+   */
   useEffect(() => {
     videoUnplayableRef.current = false
     setVideoUnplayable(false)
-  }, [projectId, videoPath])
+  }, [projectId, videoPath, proxyPath])
 
   /**
    * 取当前真正能用的 `<video>`。没有视频的工程根本不渲染这个元素，所以 ref 为空
@@ -745,7 +763,10 @@ export function Preview({ className }: PreviewProps) {
             detail:
               '声音、播放头、打轴、导出都不受影响，只是看不到画面和叠在画面上的字幕。' +
               '常见原因是视频用的容器/编码本浏览器不支持 —— 例如 yt-dlp 下载得到的 .mkv 在 Safari' +
-              '（WebKit）上没有解复用器。换用 Chrome / Edge 预览，或把视频转成 MP4（H.264 + AAC）后重新导入即可恢复画面。',
+              '（WebKit）上没有解复用器，AV1 在 M1/M2 上也没有解码支持。' +
+              (proxyPath
+                ? '当前放的已经是编辑用代理，仍然放不了的话请在「素材」步骤重新生成一次代理。'
+                : '请到「素材」步骤生成编辑用代理视频（H.264/MP4），生成完这里会自动恢复画面。'),
           },
         ]
       : []),
@@ -764,7 +785,7 @@ export function Preview({ className }: PreviewProps) {
             playsInline
             muted
             preload="auto"
-            src={api.mediaUrl(project.id, 'video')}
+            src={api.mediaUrl(project.id, videoSrcKind)}
             onEnded={onEnded}
             // 元素报错就地降级为纯音频，**不当致命错误**：声音、播放头、打轴、
             // 导出全都不依赖这条视频轨（WebKit 放不了 .mkv 时走的正是这里）
@@ -775,7 +796,9 @@ export function Preview({ className }: PreviewProps) {
         {!videoActive && (
           <div style={styles.noVideo}>
             {hasVideo
-              ? '这个浏览器放不了当前视频，已降级为纯音频预览。'
+              ? proxyPath
+                ? '这个浏览器放不了当前视频，已降级为纯音频预览。'
+                : '这个浏览器放不了原始视频，请在「素材」步骤生成编辑用代理后重试。'
               : '还没有视频。下载或选择本地文件后即可预览。'}
           </div>
         )}

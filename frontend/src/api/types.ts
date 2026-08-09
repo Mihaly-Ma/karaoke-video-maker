@@ -99,7 +99,16 @@ export interface Project {
   video_width: number
   video_height: number
   global_offset_ms: number
+  /** **原始**视频文件。导出成片一律用它，绝不用 proxy_video_path */
   video_path: string | null
+  /**
+   * 编辑用代理视频（H.264 / MP4 / 短 GOP / 无音轨），**只服务于编辑器预览**。
+   *
+   * 原始视频常是 AV1 + Matroska + Opus，Safari 三重放不了（没有 Matroska 解复用器、
+   * 不认 MKV 里的 Opus、M1/M2 也没有 AV1 硬解），4K 长 GOP 还会让逐帧核对音节边界卡住。
+   * 为 null 表示还没生成，预览回退用原视频，**不因此阻断播放**。
+   */
+  proxy_video_path: string | null
   audio_path: string | null
   instrumental_path: string | null
   vocals_path: string | null
@@ -160,6 +169,22 @@ export interface JobStatus {
   message: string
   error: string
   result: Record<string, unknown>
+}
+
+/**
+ * 编辑用代理视频的状态（`GET /api/media/proxy/{project_id}`）。
+ *
+ * 一次回答两个问题：代理现在能不能用（决定 `<video>` 的 src），以及有没有任务
+ * 正在跑——下载/导入之后的代理任务由**后端自动发起**，前端没有别的途径拿到那个
+ * job_id，只能从这里取。
+ */
+export interface ProxyStatus {
+  project_id: string
+  ready: boolean
+  path: string | null
+  job: JobStatus | null
+  /** 已是中文，可直接显示 */
+  note: string
 }
 
 // ---- 编辑：批量改时间 / 锁定 ----

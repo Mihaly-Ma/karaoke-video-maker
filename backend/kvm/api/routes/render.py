@@ -337,6 +337,9 @@ def _run_export(job_id: str, dto: ProjectDTO, req: RenderRequest) -> None:
         if not dto.video_path:
             msg = "工程未关联视频文件，无法导出"
             raise RuntimeError(msg)
+        # **导出永远烧在原始素材上**，绝不能用 `dto.proxy_video_path`：那份代理
+        # 是 540p 无音轨的编辑器专用产物（见 kvm.media.proxy），拿它出片等于把
+        # 成片画质砍掉一大截，而且是"导完才发现"的那种错误。
         video_path = Path(dto.video_path)
 
         _set_job(job_id, state="running", message="探测 ffmpeg…", progress=0.02)

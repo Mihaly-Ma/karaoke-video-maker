@@ -133,6 +133,19 @@ class ProjectDTO(BaseModel):
     global_offset_ms: int = 0
 
     video_path: str | None = None
+    """**原始**视频文件。导出成片一律用它，绝不用 `proxy_video_path`。"""
+
+    proxy_video_path: str | None = None
+    """编辑用代理视频（H.264 / MP4 / 短 GOP / 无音轨），**只服务于编辑器预览**。
+
+    原始视频常是 AV1 + Matroska + Opus：Safari 三重放不了（没有 Matroska 解复用器、
+    不认 MKV 里的 Opus、M1/M2 也没有 AV1 硬解），4K 长 GOP 还会让逐帧核对音节边界
+    卡到没法用。代理解决这两件事，见 `kvm.media.proxy`。
+
+    为 None 表示还没生成（老工程文件缺这个字段也会落到 None，可正常读取）；
+    前端据此判断"代理是否已就绪"，未就绪就回退用原视频，**不因此阻断预览**。
+    """
+
     audio_path: str | None = None
     instrumental_path: str | None = None
     vocals_path: str | None = None
@@ -296,6 +309,38 @@ class JobStatus(BaseModel):
     message: str = ""
     error: str = ""
     result: dict = Field(default_factory=dict)
+
+
+class ProxyRequest(BaseModel):
+    """生成编辑用代理视频（见 `kvm.media.proxy`）。"""
+
+    project_id: str
+
+    max_height: int = 540
+    """代理画面的高度上限，按宽高比等比缩小。540p 实测足够核对口型与字幕位置。"""
+
+    force: bool = False
+    """True 表示忽略缓存强制重新生成（换了编码器或想换分辨率时用）。"""
+
+
+class ProxyStatus(BaseModel):
+    """工程的代理视频状态。
+
+    前端需要一个入口同时回答两个问题：代理**现在能不能用**（决定 `<video>` 的
+    src 取代理还是原视频），以及**有没有任务正在跑**——后者尤其重要，因为下载
+    / 导入之后的代理任务是后端自动发起的，前端没有别的途径知道那个 job_id。
+    """
+
+    project_id: str
+    ready: bool
+    """代理文件已生成且确实存在。为 False 时前端回退用原视频，不阻断预览。"""
+
+    path: str | None = None
+    job: JobStatus | None = None
+    """最近一次代理任务，用于展示进度/失败原因。后端重启后为 None。"""
+
+    note: str = ""
+    """给用户看的一句话中文说明。"""
 
 
 # ---- 渲染 ----

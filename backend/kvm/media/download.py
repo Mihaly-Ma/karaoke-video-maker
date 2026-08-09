@@ -361,6 +361,20 @@ def run_download(handle: JobHandle, store: ProjectStore, req: DownloadRequest) -
         json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
+    # 下载回来的最佳画质通常是 AV1 + Matroska + Opus，Safari 三重放不了，
+    # 4K 长 GOP 在编辑器里 seek 也慢。紧接着排一个编辑用代理任务（异步，几毫秒
+    # 返回），用户这就能一边等代理一边继续别的操作。**排队失败不算下载失败**：
+    # 没有代理时预览会回退用原视频，不该让整次下载显示成红色。
+    proxy_job_id: str | None = None
+    proxy_note = ""
+    try:
+        from kvm.media.proxy import submit_proxy_job
+
+        proxy_job_id = submit_proxy_job(store, project.id).job_id
+        proxy_note = "已自动开始生成编辑用代理视频（Safari 需要它才能出画面）。"
+    except Exception as exc:  # noqa: BLE001 —— 代理是可选增强，任何失败都只降级不阻断
+        proxy_note = f"编辑用代理未能自动排队（{exc}），可在素材面板手动生成。"
+
     handle.report(1.0, "完成")
     return {
         "project_id": updated_project.id,
@@ -370,7 +384,8 @@ def run_download(handle: JobHandle, store: ProjectStore, req: DownloadRequest) -
         "duration_ms": updated_project.duration_ms,
         "audio_format_id": selection.audio.stream_id,
         "video_format_id": selection.video.stream_id if selection.video else None,
-        "notes": [*selection.rationale, offset_note],
+        "proxy_job_id": proxy_job_id,
+        "notes": [*selection.rationale, offset_note, proxy_note],
     }
 
 
