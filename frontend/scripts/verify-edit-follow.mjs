@@ -94,7 +94,14 @@ const SNAPSHOT = () => {
   const m = clock ? /^(\d+):(\d{2})\.(\d{2})$/.exec(clock) : null
   const playing = paper?.querySelector('[data-playing]')
   const railLine = document.querySelector('[data-role="token-rail"]')?.dataset.line ?? null
-  const stripPlaying = document.querySelector('.kvm-tl-line[data-playing]')?.dataset.line ?? null
+  /*
+   * 时间轴这边"正在唱的是哪一句"的载体。
+   *
+   * 原先读的是行轨（`.kvm-tl-line[data-playing]`），行轨已经拆掉——它把整句歌词
+   * 文本画在波形上，与右侧正文重复且盖住能量曲线。现在句子层落在**概览条**上，
+   * 每句一个不含文本的小块，正在唱的那块带 `data-playing`。
+   */
+  const stripPlaying = document.querySelector('.kvm-tl-ov[data-playing]')?.dataset.line ?? null
   return {
     ms: m ? (+m[1] * 60 + +m[2]) * 1000 + +m[3] * 10 : null,
     playingLine: playing instanceof HTMLElement ? (playing.dataset.line ?? null) : null,
@@ -147,8 +154,22 @@ async function setPlaying(page, want) {
  * "本该发生一次自动滚动"的确定性触发器。
  */
 async function seek(page, ms) {
-  // 走带上有两个 range（进度条、音量），第一个才是进度条
-  await page.locator('.edit-preview input[type="range"]').first().fill(String(ms))
+  /*
+   * **不能用 `fill()`**：它会先 focus 进度条，于是正在改写的那个行内输入框被 blur、
+   * 触发 onBlur 提交，改写态当场结束。后面那条"改写期间不抢视口"的判据因此
+   * 测不到自己想测的东西 —— 量的时候改写早已退出，滚动是**正确行为**，
+   * 却会被记成"抢视口"（或反过来假通过）。
+   *
+   * 所以自己派事件、不碰焦点。value 必须用原型上的原生 setter 赋值：
+   * 直接 `el.value = x` 会被 React 的 value tracker 当成没变，静默失效。
+   */
+  await page.evaluate((v) => {
+    // 走带上有两个 range（进度条、音量），第一个才是进度条
+    const el = document.querySelector('.edit-preview input[type="range"]')
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
+    setter.call(el, String(v))
+    el.dispatchEvent(new Event('input', { bubbles: true }))
+  }, ms)
   await page.waitForTimeout(450)
 }
 
@@ -210,9 +231,14 @@ async function runEngineOn(name, browser) {
     const btns = [...document.querySelectorAll('button')]
     return {
       selects: stage ? stage.querySelectorAll('select').length : -1,
-      rateGroups: document.querySelectorAll('.kvm-tl-seg[role="radiogroup"]').length,
-      rateItems: document.querySelectorAll('.kvm-tl-seg label').length,
-      rateOn: [...document.querySelectorAll('.kvm-tl-seg label[data-on]')].map((l) => txt(l)),
+      // 工具条上现在有**两组** radio（试听速率、波形画哪条轨），
+      // 各自定位——早先笼统数 `.kvm-tl-seg label` 会把两组加在一起，
+      // 表现为"速率不是 3 档""有两档同时选中"，而实际两组各自都是对的
+      rateGroups: document.querySelectorAll('[aria-label="速率"].kvm-tl-seg').length,
+      rateItems: document.querySelectorAll('[aria-label="速率"].kvm-tl-seg label').length,
+      rateOn: [...document.querySelectorAll('[aria-label="速率"].kvm-tl-seg label[data-on]')].map((l) => txt(l)),
+      waveSrcGroups: document.querySelectorAll('[aria-label="波形"].kvm-tl-seg').length,
+      waveSrcOn: [...document.querySelectorAll('[aria-label="波形"].kvm-tl-seg label[data-on]')].map((l) => txt(l)),
       undoBtns: btns.filter((b) => txt(b) === '撤销').length,
       redoBtns: btns.filter((b) => txt(b) === '重做').length,
       originalBtns: btns.filter((b) => txt(b) === '原声').length,
@@ -226,7 +252,12 @@ async function runEngineOn(name, browser) {
   })
   check(controls.selects === 0, '编辑舞台没有下拉框', `select=${controls.selects}`)
   check(controls.rateGroups === 1 && controls.rateItems === 3, '速率是一组 3 档按钮 radio')
-  check(controls.rateOn.length === 1, '恰好一档处于选中态', controls.rateOn.join(','))
+  check(controls.rateOn.length === 1, '速率恰好一档处于选中态', controls.rateOn.join(','))
+  check(
+    controls.waveSrcGroups === 1 && controls.waveSrcOn.length === 1,
+    '波形音源是另一组独立的 radio，且恰好一档选中',
+    controls.waveSrcOn.join(','),
+  )
   check(controls.undoBtns === 1 && controls.redoBtns === 1, '撤销/重做全页各只有一处', `撤销${controls.undoBtns} 重做${controls.redoBtns}`)
   check(
     controls.originalBtns === 1 && controls.instrumentalBtns === 1,
@@ -352,11 +383,25 @@ async function runEngineOn(name, browser) {
   const bothShown = run.filter((s) => s.playingLine && s.stripPlaying)
   check(
     bothShown.length > 0 && bothShown.every((s) => s.playingLine === s.stripPlaying),
-    '歌词纸与时间轴行轨指的是同一行',
+    '歌词纸与时间轴概览条指的是同一行',
     `比对 ${bothShown.length} 次`,
   )
-  const separated = run.some((s) => s.playingLine && s.activeLine && s.playingLine !== s.activeLine)
-  check(separated, '播放高亮与选中是两个独立的标记（出现过落在不同行的时刻）')
+  /*
+   * 「选中」与「正在唱」已经合成一件事（用户要求：不要区分这两者）。
+   * 这条判据因此**整个反过来**：从"必须出现过落在不同行的时刻"改成
+   * "任何一个采样点上都不许分家"。
+   *
+   * 只断言"没分家"会假通过 —— 两个标记都不存在也满足它。所以先要求确实
+   * 采到了足够多两者都在的时刻，再要求它们逐点相等。
+   */
+  const bothMarks = run.filter((s) => s.playingLine && s.activeLine)
+  const split = bothMarks.filter((s) => s.playingLine !== s.activeLine)
+  check(bothMarks.length >= 20, '（前置）采到了足够多"两个标记都在"的时刻', `${bothMarks.length} 个`)
+  check(
+    split.length === 0,
+    '播放高亮与选中始终落在同一行（两者已合并为一件事）',
+    split.length ? `分家 ${split.length} 次，例如 ${split[0].playingLine} vs ${split[0].activeLine}` : '',
+  )
 
   // ---------------------------------------------------------- 三、渲染开销
   console.log('\n3) 渲染开销')
@@ -381,14 +426,26 @@ async function runEngineOn(name, browser) {
       '阳性对照：观察器数得到播放头的逐次更新（否则测量本身不可信）',
       `${perf.control} 次 / ${sec.toFixed(1)}s`,
     )
+    /*
+     * 阈值随「选中跟着播放走」一起放宽过一次。
+     *
+     * 以前跨一行只动 `data-playing` 一个属性（命令式），实测 9 次变更；现在选中
+     * 与正在唱是同一件事，跨行还会连带移动 `data-active`、词上的 `data-selected`、
+     * 以及声部标签，实测 41 次。**这不是回归**：变更数仍然只跟换行次数走，
+     * 与帧数无关（4 次换行 41 次变更，而播放头更新了 400 次）。
+     *
+     * 判据的本意是"没有把 playheadMs 订阅成 React state"，那种写法下变更数会与
+     * **帧数**同阶（数百上千次）。所以这里改成按"每次换行摊多少次"来卡，
+     * 并保留一条与逐帧更新的距离比 —— 两者都留着，单看任一条都可能被绕过。
+     */
     check(
-      perf.paper <= lineChanges * 6 + 12,
+      perf.paper <= lineChanges * 15 + 12,
       '歌词纸的 DOM 变更只与换行次数同阶',
-      `${perf.paper} 次 / ${lineChanges} 次换行`,
+      `${perf.paper} 次 / ${lineChanges} 次换行 = ${(perf.paper / lineChanges).toFixed(1)} 次每行`,
     )
     check(
-      perf.paper * 10 < perf.control,
-      '歌词纸变更数比"每次播放头更新都动"低一个数量级以上',
+      perf.paper * 4 < perf.control,
+      '歌词纸变更数远低于"每次播放头更新都动"',
       `${perf.paper} vs ${perf.control}`,
     )
     check(fps > 40, '播放期间帧率正常', `${fps.toFixed(1)} fps`)
@@ -462,6 +519,11 @@ async function runEngineOn(name, browser) {
   await page.waitForTimeout(4300)
   const edited = await seekAndWatch(60000)
   check(edited.changed, '（前置）改写期间 seek 确实换了行')
+  // 前置条件必须自己断言：改写态一旦提前结束，"没滚"和"该滚"就分不开了
+  check(
+    await page.locator('.edit-linetext__input').count() === 1,
+    '（前置）量的时候改写态还开着',
+  )
   check(
     edited.after.scrollTop === edited.before.scrollTop,
     '就地改写行文本时不抢视口（且已排除"刚滚过"的干扰）',

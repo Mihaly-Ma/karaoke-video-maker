@@ -83,12 +83,12 @@
   --topbar-h: 48px;
 
   /*
-   * 编辑舞台的三条固定栏宽。视频**不参与横向空间竞争**——它只用于随时确认观感，
-   * 优先级排在逐字轴、波形、歌词正文之后（docs/ui-redesign.md §四）。
+   * 编辑舞台左栏曾经是写死的 `--edit-side-w: 340px`，现在由可拖的左右分割条给定
+   * （EditStage 的 `SIDE_SPLIT_DEFAULT`）。一起去掉的还有 `--edit-tools-w: 208px`
+   * （整体偏移，整栏拆除、搬进时间轴工具条）与 `--edit-review-w: 224px`
+   * （待检查清单，搬进左栏画面下方那片常年空着的地方）——这两条曾合计从
+   * 歌词正文身上切走 456px。
    */
-  --edit-video-w: 340px;
-  --edit-tools-w: 208px;
-  --edit-review-w: 224px;
 
   /* ==== DEPRECATED：旧变量别名，第二阶段收编五套内联 CSS 后整段删除 ==== */
   --bg-0: var(--bg-canvas);
@@ -491,22 +491,26 @@ label.checkbox-row {
   min-height: 0;
 }
 
-/* 上半区三栏并排。每一栏都写 min-height:0，否则内部滚动区永远滚不动（§七点五） */
+/*
+ * 上半区。内容是一个横向 StageSplit，本层只负责内边距与"自己不滚"。
+ * 写 min-height:0，否则内部滚动区永远滚不动（§七点五）。
+ */
 .edit-top {
   display: flex;
-  gap: var(--sp-3);
   padding: var(--sp-3);
   overflow: hidden;
+  min-height: 0;
 }
 
-/* 画面栏。宽度固定 —— "视频小、靠左"是这一步的定位，不是临时观感 */
-.edit-video {
-  flex: 0 0 var(--edit-video-w);
+/* 左栏：画面 + 走带 + 待检查清单。宽度由左右分割条给定 */
+.edit-side {
   min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
+  gap: var(--sp-3);
   overflow: hidden;
+  padding-right: var(--sp-3);
 }
 
 /*
@@ -525,7 +529,12 @@ label.checkbox-row {
  */
 .edit-preview {
   width: 100%;
-  height: 100%;
+  /*
+   * `flex: 0 1 auto` 而不是 `height: 100%`：清单展开时两者要分这一栏的高度，
+   * 画面块**先按内容取自然高度**（340px 栏宽 → 191px），装不下才收缩。
+   * 写死 100% 会让它把整栏吃光，清单被挤成 0 高。
+   */
+  flex: 0 1 auto;
   min-height: 0;
 }
 .edit-preview > div:first-child {
@@ -542,30 +551,30 @@ label.checkbox-row {
   overflow-y: auto;
 }
 
-/* 画面右侧的窄控件栏：整体偏移，以及展开后的待检查清单 */
-.edit-tools {
-  flex: 0 0 var(--edit-tools-w);
-  min-width: 0;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-3);
-  overflow-y: auto;
-}
-
-/* 歌词正文：这一步的第三主角，吃掉剩余宽度 */
+/* 歌词正文：这一步的第二主角，宽度由左右分割条给定 */
 .edit-lyrics {
-  flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
   display: flex;
+  padding-left: var(--sp-3);
 }
 
-/* 待检查清单，默认收着（它吃横向空间，而正文才是主对象） */
+/*
+ * 待检查清单，默认收着。它接管画面下方那片剩余高度：`flex: 1 1 0` 是
+ * "占满剩余高度并把滚动交给子元素"的写法，滚动条最终落在内部的
+ * `.kvm-ruby__list` 上（docs/ui-redesign.md §七点五）。
+ *
+ * `min-height` 给 168px 而不是 0：只靠"剩多少给多少"的话，1600×950 下画面与走带
+ * 先吃掉 266px，清单只剩 135px、扣掉标题与内边距真正能列条目的只有 43px ——
+ * 一屏一条半，等于没有。给了下限之后不够的部分从**画面**身上收，
+ * 这一步本来就把视频排在最后（"只用于随时确认观感"）。
+ * 走带那一条是 `flex: 0 0 auto`，无论怎么挤都不会被裁掉 —— 打轴模式下空格是打点
+ * 而不是播放，走带没了就真的起播不能。
+ */
 .edit-review {
-  flex: 0 0 var(--edit-review-w);
+  flex: 1 1 0;
   min-width: 0;
-  min-height: 0;
+  min-height: 168px;
   display: flex;
 }
 
@@ -576,47 +585,34 @@ label.checkbox-row {
   background: var(--bg-panel);
 }
 
-/* ---- 整体偏移（三级调轴的「整体」级，紧凑成一张小卡片） ---- */
+/* ---- 整曲偏移（三级调轴的「整体」级，行内控件，住在时间轴工具条上） ---- */
 
+/*
+ * 整条控件裹一层浅底 + 边框，让"这几个按钮是一组、管的是同一个数"一眼可见。
+ * 检查器底栏那组按字平移的 ±ms 按钮**没有**这层包裹，这是两者在形状上的
+ * 第一处差别（其余两处见 EditOffset 的文件头）。
+ */
 .edit-offset {
-  flex: 0 0 auto;
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-  padding: var(--sp-2) var(--sp-3);
-  background: var(--bg-panel);
-  border: var(--hairline);
-  border-radius: var(--r-lg);
-}
-.edit-offset__head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-2);
-}
-.edit-offset__title {
-  font-size: var(--fs-sm);
-  color: var(--fg-2);
-}
-.edit-offset__row {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-1);
-}
-.edit-offset__value {
-  flex: 1 1 auto;
-  min-width: 0;
-  text-align: right;
-}
-/* 四个档位平分一行：等宽才看得出它们是一组同类动作 */
-.edit-offset__nudge {
-  flex: 1 1 0;
-  min-width: 0;
   display: inline-flex;
   align-items: center;
-  padding-left: 0;
-  padding-right: 0;
-  justify-content: center;
+  gap: var(--sp-1);
+  padding: 2px var(--sp-2);
+  background: var(--bg-surface);
+  border: var(--hairline);
+  border-radius: var(--r-pill);
+}
+.edit-offset__title {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  font-size: var(--fs-sm);
+  color: var(--fg-2);
+  white-space: nowrap;
+}
+/* 数值框比工具条上的默认 number 窄：这里只填三四位数 */
+.kvm-tl .edit-offset__value {
+  width: 60px;
+  text-align: right;
 }
 .edit-offset__unit {
   color: var(--fg-3);
@@ -661,7 +657,104 @@ label.checkbox-row {
   border-color: var(--src-manual);
 }
 
-/* ---- 上下分割条（编辑舞台在用） ---- */
+/* ---- 声部指派（§2.5：自动没有可靠方案，手工旁路就是唯一入口） ---- */
+
+.edit-voice {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  flex-wrap: wrap;
+  padding-left: var(--sp-3);
+  border-left: var(--hairline);
+}
+/*
+ * 当前行的声部，读起来是"现在是什么"，与右边那排"改成什么"分开。
+ * 它同时是**改名入口**（点一下就地变成输入框）—— 改名低频，
+ * 为它常驻一条空输入框既挤又难看。
+ */
+.edit-voice__cur {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 1px var(--sp-2);
+  border-radius: var(--r-pill);
+  border: var(--hairline-strong);
+  background: var(--bg-surface);
+  font-size: var(--fs-sm);
+}
+.edit-voice__cur .anticon {
+  color: var(--fg-3);
+  font-size: var(--fs-xs);
+}
+.edit-voice__cur:hover:not(:disabled) .anticon {
+  color: var(--accent);
+}
+.edit-voice__renaming {
+  width: 108px;
+  font-size: var(--fs-sm);
+}
+.edit-voice__unit {
+  color: var(--fg-3);
+  font-size: var(--fs-xs);
+}
+/* 作用域用按钮式 radio，与时间轴的速率同一种形态；本舞台不用下拉框 */
+.edit-voice__seg {
+  display: inline-flex;
+  gap: 2px;
+}
+.edit-voice__seg label {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  padding: var(--sp-1) var(--sp-2);
+  border: var(--hairline);
+  border-radius: var(--r-sm);
+  color: var(--fg-2);
+  cursor: pointer;
+  white-space: nowrap;
+  font-size: var(--fs-sm);
+}
+.edit-voice__seg label[data-on] {
+  background: var(--accent-weak);
+  border-color: var(--accent);
+  color: var(--fg);
+}
+.edit-voice__seg label:has(input:disabled) {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+/* 原生 radio 藏起来但保留可聚焦：opacity:0 而不是 display:none */
+.edit-voice__seg input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  margin: 0;
+  cursor: pointer;
+}
+.edit-voice__seg label:has(input:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.edit-voice__span {
+  width: 56px;
+  text-align: right;
+}
+.edit-voice__new {
+  width: 132px;
+}
+/* 影响范围要显眼：改错声部会连带改掉一片颜色，而退回去要一行行来 */
+.edit-voice__count {
+  color: var(--warn);
+  font-size: var(--fs-sm);
+}
+.edit-voice__done {
+  color: var(--src-manual);
+  font-size: var(--fs-sm);
+}
+
+/* ---- 分割条（编辑舞台上下、左右各用一次） ---- */
 
 /*
  * 分割容器。两栏都是 `flex-basis: 0` + grow 因子，剩余空间严格按比例分；
@@ -728,6 +821,44 @@ label.checkbox-row {
 .stage-split__bar:focus-visible::after,
 .stage-split--dragging .stage-split__bar::after {
   background: var(--accent);
+}
+
+/*
+ * 左右分割形态。只改三处：主轴方向、夹取用的那一维、以及分割条的朝向与光标。
+ *
+ * **两栏的 min-width 必须显式写。** 横向 flex 子项的 `min-width` 默认也是 `auto`
+ * （与 §七点五 说的纵向 min-height 是同一条规则的另一面），装着不换行的内容
+ * ——比如走带那一排按钮——就会把自己顶到内容宽度，分割条再怎么拖也推不动它。
+ */
+.stage-split[data-dir='horizontal'] {
+  flex-direction: row;
+  min-width: 0;
+}
+.stage-split[data-dir='horizontal'].stage-split--dragging {
+  cursor: col-resize;
+}
+.stage-split[data-dir='horizontal'] .stage-split__pane {
+  min-width: 0;
+}
+.stage-split[data-dir='horizontal'] .stage-split__pane--top {
+  /* 画面栏：走带第一排实测要 312px 才不折行，下限比它再留一点余量 */
+  min-height: 0;
+  min-width: 320px;
+}
+.stage-split[data-dir='horizontal'] .stage-split__pane--bottom {
+  min-height: 0;
+  min-width: 240px;
+}
+.stage-split[data-dir='horizontal'] .stage-split__bar {
+  border-top: none;
+  border-bottom: none;
+  border-left: var(--hairline);
+  border-right: var(--hairline);
+  cursor: col-resize;
+}
+.stage-split[data-dir='horizontal'] .stage-split__bar::after {
+  width: 2px;
+  height: 40px;
 }
 
 .stage__empty {

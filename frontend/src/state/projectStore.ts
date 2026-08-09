@@ -55,6 +55,12 @@ interface ProjectState {
   /** 试听伴奏还是原声。调轴时切到伴奏更容易听清节拍。 */
   audioMode: 'original' | 'instrumental'
   /**
+   * 时间轴波形**画**哪条轨。与 `audioMode`（耳朵听哪条轨）刻意分开：
+   * 对着人声的波形能一眼看出每个字的起音在哪，而耳朵里放伴奏才不被原唱带着走，
+   * 绑在一起就只能二选一。`audio` = 原曲混音。
+   */
+  waveSource: 'audio' | 'instrumental' | 'vocals'
+  /**
    * 播放时是否跟着播放头走。
    *
    * 放在 store 而不是各面板自己一份：波形和歌词正文都要"跟随"，各存一份的话
@@ -83,6 +89,7 @@ interface ProjectState {
   setPlaybackRate: (v: number) => void
   select: (s: Selection) => void
   setAudioMode: (m: 'original' | 'instrumental') => void
+  setWaveSource: (m: 'audio' | 'instrumental' | 'vocals') => void
   setFollowPlayhead: (v: boolean) => void
 
   undo: () => Promise<void>
@@ -109,7 +116,12 @@ interface ProjectState {
   mergeLine: (lineId: string) => Promise<void>
   setVoicePart: (lineId: string, voicePart: string, range?: [number, number]) => Promise<void>
   updateStyle: (patch: Partial<Project['style']>) => Promise<void>
-  updatePalettes: (patch: Record<string, Palette>) => Promise<void>
+  /**
+   * `replace=true` 时整份配色被替换，未出现的声部配色会被删掉。
+   * 声部**改名**要用它：合并式更新删不掉旧键，而 `collectParts` 会把配色里
+   * 剩下的旧名当成一个还存在的声部继续列出来，界面上就多出一个幽灵声部。
+   */
+  updatePalettes: (patch: Record<string, Palette>, replace?: boolean) => Promise<void>
   /** 把歌词候选写入当前工程 */
   applyLyrics: (provider: string, songId: string) => Promise<void>
   /** 手工导入歌词：纯文本 / LRC / 已解密的 QRC。一站式的手工旁路，随时可用（CLAUDE.md §2.5） */
@@ -148,6 +160,7 @@ export const useProject = create<ProjectState>((set, get) => {
     playbackRate: 1,
     selection: { kind: 'none' },
     audioMode: 'original',
+    waveSource: 'audio',
     followPlayhead: true,
     canUndo: false,
     canRedo: false,
@@ -198,6 +211,7 @@ export const useProject = create<ProjectState>((set, get) => {
     setPlaybackRate: (v) => set({ playbackRate: v }),
     select: (s) => set({ selection: s }),
     setAudioMode: (m) => set({ audioMode: m }),
+    setWaveSource: (m) => set({ waveSource: m }),
     setFollowPlayhead: (v) => set({ followPlayhead: v }),
 
     undo: () => withProject(api.undo),
@@ -252,7 +266,8 @@ export const useProject = create<ProjectState>((set, get) => {
 
     updateStyle: async (patch) => withProject((id) => api.updateStyle(id, patch)),
 
-    updatePalettes: async (patch) => withProject((id) => api.updatePalettes(id, patch)),
+    updatePalettes: async (patch, replace) =>
+      withProject((id) => api.updatePalettes(id, patch, replace)),
 
     applyLyrics: async (provider, songId) =>
       withProject((id) => api.applyLyrics(id, provider, songId)),
@@ -281,9 +296,22 @@ export const useProject = create<ProjectState>((set, get) => {
  *
  * 复杂度 O(行数)，逐帧调用也远不到一帧预算（60 行 × 60fps ≈ 3.6k 次比较/秒）。
  */
+/**
+ * 判定"这一句已经开始"的容差。
+ *
+ * 点一句歌词会把播放头送到它的**首字起点**，但真正落到哪儿由播放层说了算：
+ * `<video>` 会吸附到帧边界，23.976fps 一帧就是 41.7ms，于是实测常常落在目标
+ * **之前**几十毫秒。没有容差的话，点第 25 句、高亮却停在第 24 句 ——
+ * 而「选中」与「正在唱」现在是同一件事，这一下就是肉眼可见的错。
+ *
+ * 60ms 比一帧多一点，且远小于验收脚本判定用的 ±150ms 边界保护区。
+ * 对正常播放的影响是高亮提早 60ms 出现，听感上察觉不到。
+ */
+const LINE_START_TOLERANCE_MS = 60
+
 export function locateLineId(project: Project | null, audioMs: number): string | null {
   if (!project) return null
-  const t = audioMs - project.global_offset_ms
+  const t = audioMs - project.global_offset_ms + LINE_START_TOLERANCE_MS
   let bestId: string | null = null
   let bestStart = -Infinity
   for (const line of project.lines) {

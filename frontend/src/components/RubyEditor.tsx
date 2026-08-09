@@ -217,13 +217,26 @@ export function useRubyEditing(): RubyEditing {
     if (el instanceof HTMLElement) el.scrollIntoView({ block: 'nearest' })
   }, [selLineId, showMetadata])
 
+  /**
+   * 待检查清单。**制作名单行永远不进来**，即使此刻正显示着它们。
+   *
+   * `lineUnits` 是按"正文里显示哪些行"建的，而制作名单行有一个开关能把它们显示
+   * 出来（时间轴上选中一条名单行时还会自动打开）。开关一开，「词：片岡健太」
+   * 「编曲：sumika」这些根本不唱的行就会挤进清单，把真正要复核的当て字淹掉 ——
+   * 而清单的数字正是"这一步还剩多少活"的硬指标，掺了假就没法用。
+   */
+  const metaIds = useMemo(
+    () => new Set((project?.lines ?? []).filter((l) => l.is_metadata).map((l) => l.id)),
+    [project],
+  )
   const review = useMemo(() => {
     const out: RubyUnit[] = []
-    for (const list of lineUnits.values()) {
+    for (const [lineId, list] of lineUnits) {
+      if (metaIds.has(lineId)) continue
       for (const u of list) if (u.guess || u.missing) out.push(u)
     }
     return out
-  }, [lineUnits])
+  }, [lineUnits, metaIds])
 
   const stats = useMemo(() => {
     let spans = 0
@@ -256,6 +269,17 @@ export function useRubyEditing(): RubyEditing {
       setSelectedKey(unitKey(u))
       // 写的是 token 级选中：时间轴、逐字轴、检查器的时间栏都靠它对齐到同一个字
       select({ kind: 'token', lineId: u.lineId, tokenIndex: u.tokenIndex })
+      /*
+       * 点词 = 把播放位置也挪过来。「选中」与「正在唱」已经合成一件事，
+       * 而验证读音本来就只能靠耳朵（「運命」在本曲唱 さだめ 还是 うんめい），
+       * 点完还要自己去拖进度条找这句，等于把最常做的一步留给用户手动完成。
+       *
+       * 只写 store 的播放头，真正的 seek 由 Preview 执行（D15：唯一时钟）。
+       * 加上整曲偏移换算成音频时间——工程时间与音频时间差的就是这个数。
+       */
+      const st = useProject.getState()
+      const tk = st.project?.lines.find((l) => l.id === u.lineId)?.tokens[u.tokenIndex]
+      if (tk) st.setPlayhead(Math.max(0, Math.round(tk.start_ms + (st.project?.global_offset_ms ?? 0))))
       if (openEditor && canAnnotate(u)) {
         setEditDraft(u.span?.text ?? '')
         setEditingKey(unitKey(u))
@@ -747,6 +771,7 @@ export function RubyPaper({ editing, reviewOpen, onToggleReview }: RubyPaperProp
               data-line={line.id}
               data-meta={line.is_metadata || undefined}
               data-active={selLineId === line.id || undefined}
+              data-voice={line.voice_part || undefined}
               style={paletteVars(project.palettes[line.voice_part] ?? project.palettes['main'])}
             >
               <span className="kvm-ruby__no num">{lineNo.get(line.id)}</span>
@@ -796,6 +821,18 @@ export function RubyPaper({ editing, reviewOpen, onToggleReview }: RubyPaperProp
                 })}
               </span>
               {line.is_metadata && <span className="kvm-ruby__tag">{t('ruby.metadata')}</span>}
+              {/*
+                声部标签。**不能只靠颜色说这件事**：新指派的声部还没有自己的配色时，
+                后端与前端都按 main 回退（`effectivePalette` 的 explicit=false），
+                于是"改了声部却看起来毫无变化"，用户会以为指派没生效。
+                标签是那一刻唯一的证据；等去样式舞台配好四个颜色，颜色才接手。
+                main 不标 —— 它是默认值，每行挂一个「main」只是噪音。
+              */}
+              {line.voice_part && line.voice_part !== 'main' && (
+                <span className="kvm-ruby__voice" data-role="voice-tag">
+                  {line.voice_part}
+                </span>
+              )}
               {/*
                 改写这一行的文字。§2.5 要求每个自动环节都有等价的手工旁路，
                 而歌词文本此前是唯一空着的一档——改一个错字得把整首歌重贴一遍。
@@ -937,26 +974,22 @@ const CSS = `
 .kvm-ruby__line[data-editing] { background: var(--bg-surface); align-items: center; }
 
 /*
- * 播放高亮。**与选中必须是两种视觉**，否则"现在唱到哪"和"我正在编哪个"会互相冒充：
+ * 播放高亮。
  *
- * | 状态 | 视觉 | 说的是 |
- * |---|---|---|
- * | data-active | 强调色底 | 编辑焦点（底栏检查器在编这一行的字） |
- * | data-playing | 左侧竖条 + 行号变色 | 现在唱到这里 |
+ * 曾经这里是**两种**视觉：data-active（选中，强调色底）与 data-playing
+ * （正在唱，左侧红竖条 + 行号变红）。现在合成一种 —— 点哪一句播放头就跳到哪一句、
+ * 播放推进时选中也跟着走（见 Timeline 的播放头订阅），二者永远指同一行，
+ * 再画两种颜色只会让人以为它们可能不一样。
  *
- * 竖条用 --danger 是刻意的：波形与逐字轴上那条播放头竖线就是这个颜色，
- * 同一个"此刻"在三处用同一个颜色说。
- *
- * 用 inset box-shadow 而不是 border-left —— 后者会把整行往右挤 3px，
- * 每跨一行整屏文字就抖一下。
+ * data-playing 保留**属性**：它是命令式更新的落点（见上方 usePlayheadLine），
+ * 也是验收脚本判断"时间轴与正文说的是不是同一行"的抓手。左侧那条竖条也留着，
+ * 因为它和波形上那条播放头是同一个 --danger —— 同一个"此刻"在三处用同一个颜色说，
+ * 而它与强调色底不冲突：一个是底、一个是边。
  */
 .kvm-ruby__line[data-playing] {
   box-shadow: inset 3px 0 0 var(--danger);
-  background: color-mix(in srgb, var(--danger) 9%, transparent);
+  background: var(--accent-weak);
 }
-/* 正在唱的恰好就是选中那行时，强调色底不能被上面这条盖掉 */
-.kvm-ruby__line[data-playing][data-active] { background: var(--accent-weak); }
-.kvm-ruby__line[data-playing] .kvm-ruby__no { color: var(--danger); }
 
 /* 改文字的入口：常驻会在每一行右边挂一排图标，喧宾夺主；只在这一行上时露出来 */
 .kvm-ruby__linebtn { flex: 0 0 auto; align-self: center; opacity: 0; }
@@ -999,6 +1032,19 @@ const CSS = `
   border-radius: var(--r-pill);
   background: var(--bg-surface);
   color: var(--fg-3);
+}
+/*
+ * 声部标签。比制作名单标签醒目一档（描边 + 手工语义色）：它标的是**用户刚做的决定**，
+ * 而不是一条系统判定；新声部还没配色时，它是"指派确实生效了"的唯一可见证据。
+ */
+.kvm-ruby__voice {
+  flex: 0 0 auto;
+  align-self: center;
+  font-size: var(--fs-xs);
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-pill);
+  border: 1px solid var(--src-manual);
+  color: var(--src-manual);
 }
 
 /*

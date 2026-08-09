@@ -9,14 +9,26 @@
  *
  * | 级别 | 交互 | 落到哪里 |
  * |---|---|---|
- * | 整体 | 舞台左栏的偏移控件（`EditOffset`，不在本组件里） | `project.global_offset_ms`，**不动任何 token** |
- * | 单句 | 拖「行轨」上的整条，或选中行后按方向键 | `shift(scope='line')` |
+ * | 整体 | 工具条上的「整曲偏移」（`EditOffset`） | `project.global_offset_ms`，**不动任何 token** |
+ * | 单句 | 拖逐字轴顶上的「句柄条」，或选中行后按方向键 | `shift(scope='line')` |
  * | 单词 | 拖「逐字轴」上的 token 本体或它的左右边界 | `shift(scope='token')` / `setTiming` |
  *
  * 整体偏移刻意不写进 token 时间：写进去就再也回不来了，而重锚定（§5.3）本身
- * 是个高不确定性的自动环节，用户必须能随时归零重来。它从本组件搬去了舞台左栏：
- * 一个全曲一次的旋钮占掉时间轴一整条横带，挤的正是**逐字轴**——这一步真正要
- * 编辑的东西。
+ * 是个高不确定性的自动环节，用户必须能随时归零重来。它曾经是工具条下的一整条
+ * 横带，挤掉的正是逐字轴；后来搬去舞台左栏，又和画面一起在那儿空占一大片。
+ * 现在收进工具条右段，与缩放/整曲这些**同样作用于全曲**的控件放在一起，
+ * 而按字平移留在底栏检查器——两级调轴按作用范围分处时间轴的一头一尾。
+ *
+ * ## 时间轴上不画句子文本
+ *
+ * 曾经有一条「行轨」压在波形顶部 45px，把每句歌词的**文本**画出来。同一句
+ * 在右侧歌词正文里本来就整屏摆着，波形上再画一遍既是重复、又盖住了真正要对的
+ * 能量曲线。现在句子层收敛成两处**不含文本**的标记：
+ *
+ * - **句柄条**：逐字轴顶上一条 22px 的窄带，只画当前行的跨度 + 行号（与正文左侧
+ *   同一个数），拖它 = 整句平移
+ * - **概览条**：全曲每句一个小块，当前行强调色、正在唱的那句带播放色描边，
+ *   点它就切到那一句
  *
  * ## 逐字轴是主角，不是波形上的一条压边
  *
@@ -96,13 +108,22 @@ import {
   toProjectMs,
   visibleRangeMs,
 } from '../lib/timeScale'
+import EditOffset from './EditOffset'
 import { Waveform } from './Waveform'
 import type { WaveformHandle, WaveformStatus } from './Waveform'
 
 // ---------------------------------------------------------------- 常量
 
 const RULER_H = 22
-const WAVE_H = 150
+/**
+ * 波形高度**不是常数**：刻度、逐字轴、概览、工具条、图例都是定高的，
+ * 波形吃掉时间轴里剩下的全部空间。所以把上下分割条往上拖，波形就跟着长高，
+ * 而不是在下面留一片没人用的空白。
+ *
+ * 只保留一个下限：低于这个数波形就只剩一条糊线，读不出能量突变，
+ * 而"对着能量突变去拖边界"正是这一步的干活方式。首帧还没量到尺寸时用它兜底。
+ */
+const MIN_WAVE_H = 96
 /**
  * 首次拿到真实时长后落在哪个缩放上：视口内摆得下这么多秒。
  *
@@ -115,15 +136,21 @@ const WAVE_H = 150
  * 字与起点时间都读得出来。
  */
 const INITIAL_WINDOW_SEC = 10
-/** 行轨叠在波形上半部。行时间允许互相重叠（§8.5），所以要多备几排 */
-const LINE_ROW_H = 15
-const LINE_ROWS = 3
-const LINES_STRIP_H = LINE_ROW_H * LINE_ROWS
 /**
- * 逐字轴的高度。它是这一步的主对象，给的高度要装得下**一个成人字号的字 + 起点时间**，
+ * 句柄条：逐字轴顶上的一条窄带，只画**当前行**的时间跨度，内容只有行号。
+ *
+ * 它接手了原「行轨」的单句级调轴（拖它 = 整句平移）。原行轨把整句歌词文本
+ * 画在波形上，而同一句在右侧歌词正文里本来就有——**同一份信息在两处各画一遍，
+ * 且在波形上盖掉了真正要对的能量曲线**。行号是"这段属于哪句"所需的最小信息，
+ * 与正文左侧的行号是同一个数，扫一眼就能对上，不必再把句子搬过来。
+ */
+const LINE_HANDLE_H = 22
+/**
+ * 逐字块的高度。它是这一步的主对象，给的高度要装得下**一个成人字号的字 + 起点时间**，
  * 而不是压成波形底下的一条边——78px 下字号可以给到 --fs-xl，扫一眼就读得出是哪个字。
  */
-const TOKEN_RAIL_H = 78
+const TOKEN_BLOCK_H = 78
+const TOKEN_RAIL_H = LINE_HANDLE_H + TOKEN_BLOCK_H
 const OVERVIEW_H = 26
 
 /** 任何编辑都不许把 token 拖成 0 时长：零时长音节会触发 libass #124（§5.7） */
@@ -140,6 +167,9 @@ const NUDGE_FINE_MS = 1
 
 /** 试听速率的档位。§5.10 建议 0.5~0.75x 打点，1.0x 用来核对整体观感 */
 const RATE_OPTIONS = [0.5, 0.75, 1] as const
+
+/** 波形可以画哪几条轨。顺序按"原曲 → 拆出来的两条"，与分离流程的先后一致 */
+const WAVE_SOURCES = ['audio', 'instrumental', 'vocals'] as const
 
 export interface SourceMeta {
   /** 文案键。存键而不是存句子：模块级常量在 import 时求值，存句子等于把语言钉死 */
@@ -213,8 +243,13 @@ export const SOURCE_META: Record<Token['timing_source'], SourceMeta> = {
 const CSS = `
 .kvm-tl { color:var(--fg); font-size:var(--fs-sm); user-select:none; }
 /* 只覆盖尺寸与图标对齐，配色一律继承 styles.css 的 button 规则 */
-.kvm-tl button { display:inline-flex; align-items:center; gap:var(--sp-1);
-  padding:var(--sp-1) var(--sp-2); border-radius:var(--r-sm); }
+.kvm-tl button { display:inline-flex; align-items:center; justify-content:center; gap:var(--sp-1);
+  padding:var(--sp-1) var(--sp-2); border-radius:var(--r-sm);
+  /*
+   * 触点下限。纯图标按钮没有文字撑高，早先实测只有 30×22 —— 图标化省下来的
+   * 横向空间不该拿可点性去换，所以这里把两个方向都钉到 28px。
+   */
+  min-height:28px; min-width:28px; }
 .kvm-tl button[data-on="1"] { background:var(--accent-weak); border-color:var(--accent); color:var(--fg); }
 /*
  * 按钮式 radio（一组并排按钮，选中的那个高亮）。
@@ -249,9 +284,23 @@ const CSS = `
     transparent 4px 9px); }
 .kvm-tl-hnd { position:absolute; top:0; bottom:0; width:9px; cursor:ew-resize; z-index:2; }
 .kvm-tl-hnd:hover { background:color-mix(in srgb, var(--fg) 45%, transparent); }
-.kvm-tl-line { position:absolute; box-sizing:border-box; border-radius:var(--r-sm); cursor:grab;
-  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; padding:0 var(--sp-1); }
-.kvm-tl-line:hover { filter:brightness(1.3); }
+/*
+ * 句柄条（单句级调轴）。**不画句子文本，只画行号** —— 句子在右侧正文里，
+ * 搬到波形上只会盖住能量曲线并且和正文说两遍同一件事。
+ */
+.kvm-tl-lh { position:absolute; box-sizing:border-box; display:flex; align-items:center;
+  gap:var(--sp-1); padding:0 var(--sp-1); border-radius:var(--r-sm) var(--r-sm) 0 0;
+  cursor:grab; white-space:nowrap; overflow:hidden;
+  background:color-mix(in srgb, var(--accent) 26%, transparent);
+  border:1px solid var(--accent); border-bottom:none;
+  font-size:var(--fs-xs); color:var(--fg); }
+.kvm-tl-lh:hover { filter:brightness(1.25); }
+.kvm-tl-lh:active { cursor:grabbing; }
+.kvm-tl-lh[data-playing] { box-shadow:inset 3px 0 0 var(--danger); }
+/* 概览条上的每一句。点它 = 选中该行，于是逐字轴切过去 —— 行轨拆掉后，
+   "在时间轴上换一句"的入口收在这里，且它是全曲尺度、比原先只能看到视口内几行更全 */
+.kvm-tl-ov { position:absolute; box-sizing:border-box; border-radius:var(--r-sm); cursor:pointer; }
+.kvm-tl-ov:hover { filter:brightness(1.4); }
 .kvm-tl-next { animation:kvm-tl-pulse 1.1s ease-in-out infinite; }
 @keyframes kvm-tl-pulse {
   0%,100% { box-shadow:0 0 0 0 color-mix(in srgb, var(--warn) 85%, transparent); }
@@ -326,7 +375,6 @@ function blockBg(meta: SourceMeta, drafted: boolean): string {
 export function Timeline() {
   const project = useProject((s) => s.project)
   const selection = useProject((s) => s.selection)
-  const audioMode = useProject((s) => s.audioMode)
   const storeError = useProject((s) => s.error)
   // 播放状态与速率都是 Preview 的（唯一时钟，见 projectStore 文件头）：
   // 这里只负责显示按钮状态、以及把用户的播放/变速意图写进去
@@ -349,6 +397,8 @@ export function Timeline() {
   const mergeLine = useProject((s) => s.mergeLine)
 
   const hostRef = useRef<HTMLDivElement | null>(null)
+  /** 波形那一格。它的高度由 flex 分配，量到多少就转给 wavesurfer 多少 */
+  const waveBoxRef = useRef<HTMLDivElement | null>(null)
   const rulerTrackRef = useRef<HTMLDivElement | null>(null)
   const overlayTrackRef = useRef<HTMLDivElement | null>(null)
   /** 逐字轴自己的轨道：它已经不在波形覆盖层里，但必须与波形同步平移 */
@@ -359,6 +409,11 @@ export function Timeline() {
   const waveRef = useRef<WaveformHandle | null>(null)
   const tapChipRef = useRef<HTMLDivElement | null>(null)
 
+  /**
+   * 波形当前实际有多高。由 CSS 的 flex 分配决定，这里只是把量到的结果转给
+   * wavesurfer（它要的是像素数，没法写 `height: 100%`）。
+   */
+  const [waveH, setWaveH] = useState(MIN_WAVE_H)
   const [viewportPx, setViewportPx] = useState(900)
   const [pxPerSec, setPxPerSec] = useState(24)
   const [waveDurationMs, setWaveDurationMs] = useState(0)
@@ -390,6 +445,9 @@ export function Timeline() {
   const queueRef = useRef<Promise<void>>(Promise.resolve())
   /** 「跟随」开关给逐帧回调用的镜像，免得订阅因为它变化而重挂 */
   const followRef = useRef(follow)
+  /** 同理：播放头订阅里要用 select，但不该因为它的引用变化而重挂订阅 */
+  const selectRef = useRef(select)
+  selectRef.current = select
 
   viewportRef.current = viewportPx
   followRef.current = follow
@@ -405,7 +463,7 @@ export function Timeline() {
   const contentPx = contentWidthPx(durationMs, scale, viewportPx)
   contentPxRef.current = contentPx
 
-  /** 整体偏移只读：旋钮在舞台左栏（`EditOffset`），这里只用它把工程时间换算成音频时间 */
+  /** 整体偏移只读：旋钮是工具条上的 `EditOffset`，这里只用它把工程时间换算成音频时间 */
   const globalOffset = project?.global_offset_ms ?? 0
 
   const enqueue = useCallback((fn: () => Promise<void>): Promise<void> => {
@@ -428,6 +486,23 @@ export function Timeline() {
     const ro = new ResizeObserver(() => setViewportPx(el.clientWidth))
     ro.observe(el)
     setViewportPx(el.clientWidth)
+    return () => ro.disconnect()
+  }, [])
+
+  /**
+   * 波形高度跟着分割条走。
+   *
+   * 只观察、不计算：高度是 CSS 用 flex 分出来的，这里若自己去减一遍
+   * "总高 − 刻度 − 逐字轴 − 概览 − 工具条 − 图例"，每加一条横带都要回来改这个减法，
+   * 且和真实布局必然对不齐。整数取整是必须的——wavesurfer 拿到小数会逐帧重画。
+   */
+  useEffect(() => {
+    const el = waveBoxRef.current
+    if (!el) return
+    const apply = () => setWaveH(Math.max(MIN_WAVE_H, Math.round(el.clientHeight)))
+    const ro = new ResizeObserver(apply)
+    ro.observe(el)
+    apply()
     return () => ro.disconnect()
   }, [])
 
@@ -531,6 +606,19 @@ export function Timeline() {
       // **与歌词正文调的是同一个函数**，两处不会各说各的（见其注释）
       const id = locateLineId(projectRef.current, ms)
       setPlayheadLineId((prev) => (prev === id ? prev : id))
+
+      /*
+       * 选中跟着播放走 —— 「选中的句」与「正在唱的句」是同一件事，不再分两套标记。
+       *
+       * 三条限制，缺一条就会变成骚扰：
+       * - 只在**播放中**跟：暂停时用户正对着某个字调轴，选中被挪走等于活没法干
+       * - 只在**跨行**时跟：逐字跟的话检查器每几百毫秒换一个字，读都读不清
+       * - 落到该行**首字**：选中项是 token 级的，落到行上会让检查器退化成半空
+       */
+      if (!id || !useProject.getState().playing) return
+      const cur = useProject.getState().selection
+      if (cur.kind !== 'none' && cur.lineId === id) return
+      selectRef.current({ kind: 'token', lineId: id, tokenIndex: 0 })
     }
     onPlayhead(useProject.getState().playheadMs)
     return useProject.subscribe((state, prev) => {
@@ -550,6 +638,13 @@ export function Timeline() {
    */
   useEffect(() => {
     if (selection.kind === 'none') return
+    /*
+     * 播放中不由选中来滚。选中现在跟着播放头走（见上方订阅），这条 effect 会
+     * 在每次跨行时被唤醒，与 `followPlayhead` 抢同一个 scrollLeft ——
+     * 一个要把选中的首字摆进视口、一个要把播放头居中，结果是每换一句抖一下。
+     * 播放时滚动只认播放头这一个主人。
+     */
+    if (useProject.getState().playing) return
     const line = projectRef.current?.lines.find((l) => l.id === selection.lineId)
     // 选中整行时对齐到它的首字：行的起点就是首字的起点
     const tk = selection.kind === 'token' ? line?.tokens[selection.tokenIndex] : line?.tokens[0]
@@ -614,24 +709,55 @@ export function Timeline() {
 
   // ------------------------------------------------------------ 音源
 
+  /*
+   * **波形看哪条轨，与耳朵听哪条轨是两件事。**
+   *
+   * 走带上的原声/伴奏切的是 store 的 `audioMode`（D15 的 Web Audio 混音），
+   * 这里切的只是画在屏幕上的那条曲线。二者分开是有实际用处的：
+   * 对着**人声**的波形能一眼看出每个字的起音在哪（这正是调轴要对的东西），
+   * 而耳朵里放**伴奏**才听得清节拍、不被原唱带着走。绑在一起就只能二选一。
+   */
+  const waveSource = useProject((s) => s.waveSource)
+  const setWaveSource = useProject((s) => s.setWaveSource)
+
+  /** 这个工程有哪几条轨可看。缺的轨不能只是点不动——要让人知道是"还没分离" */
+  const waveTracks = useMemo(
+    () => ({
+      audio: !!project?.audio_path,
+      instrumental: !!project?.instrumental_path,
+      vocals: !!project?.vocals_path,
+    }),
+    [project?.audio_path, project?.instrumental_path, project?.vocals_path],
+  )
+
   // 调轴时看伴奏的波形更容易分辨节拍（§5.10），有伴奏就默认切过去
   useEffect(() => {
     if (project?.instrumental_path) setAudioMode('instrumental')
   }, [project?.instrumental_path, setAudioMode])
 
+  // 选中的那条轨这个工程没有（换了工程、或还没分离）就退回原曲，
+  // 否则波形会一直卡在"加载失败"上，而用户看不出是自己选了条不存在的轨
+  useEffect(() => {
+    if (waveSource !== 'audio' && !waveTracks[waveSource]) setWaveSource('audio')
+  }, [waveSource, waveTracks, setWaveSource])
+
   const sources = useMemo(() => {
     if (!project) return []
-    const order: Array<'instrumental' | 'audio' | 'video'> =
-      audioMode === 'instrumental'
-        ? ['instrumental', 'audio', 'video']
-        : ['audio', 'instrumental', 'video']
-    const has: Record<'instrumental' | 'audio' | 'video', boolean> = {
-      instrumental: !!project.instrumental_path,
-      audio: !!project.audio_path,
+    // 首选用户挑的那条，后面几条是兜底：缺轨时仍要有波形可看，而不是一片空白
+    const order: Array<'vocals' | 'instrumental' | 'audio' | 'video'> = [
+      waveSource,
+      'instrumental',
+      'audio',
+      'video',
+    ]
+    const has: Record<'vocals' | 'instrumental' | 'audio' | 'video', boolean> = {
+      vocals: waveTracks.vocals,
+      instrumental: waveTracks.instrumental,
+      audio: waveTracks.audio,
       video: !!project.video_path,
     }
-    return order.filter((k) => has[k]).map((k) => api.mediaUrl(project.id, k))
-  }, [project, audioMode])
+    return [...new Set(order)].filter((k) => has[k]).map((k) => api.mediaUrl(project.id, k))
+  }, [project, waveSource, waveTracks])
 
   // ------------------------------------------------------------ 生效时间（草稿 + 拖动预览）
 
@@ -701,29 +827,38 @@ export function Timeline() {
         : playheadLineId
   const activeLine = project?.lines.find((l) => l.id === activeLineId) ?? null
 
-  /** 视口内的行，重叠的分排显示（行时间允许重叠，§8.5） */
-  const visibleLines = useMemo(() => {
+  /**
+   * 行号。取的是**在 `project.lines` 里的序号**（含制作名单行），与歌词正文左侧
+   * 那个数字算法完全一致——两处对不上的话，行号就没法当"这段属于哪句"的指针用。
+   */
+  const lineNo = useMemo(() => {
+    const m = new Map<string, number>()
+    project?.lines.forEach((l, i) => m.set(l.id, i + 1))
+    return m
+  }, [project])
+
+  /**
+   * 逐字轴画哪些行：**落在视口时间窗里的全部行**，不是只有选中的那一句。
+   *
+   * 虚拟化是硬要求而不是优化（§5.10）：一首 4-5 分钟的日语歌 600~900 个音节，
+   * 全部实例化会卡死。`viewWindow` 自带预渲染余量，滚动时不会每帧重建。
+   *
+   * 不假设行之间时间互斥（§8.5 允许重叠）：这里只做筛选、不做排他，
+   * 真出现重叠时两行的块会叠在同一排上——第一版编辑器本来就不支持编辑重叠行，
+   * 但代码不该因此假设它不会发生。
+   */
+  const railLines = useMemo(() => {
     if (!project) return []
-    const rowEndMs: number[] = new Array<number>(LINE_ROWS).fill(-Infinity)
-    const out: Array<{ line: Line; row: number }> = []
-    const items = project.lines
-      .filter((l) => l.tokens.length)
-      .map((line) => ({ line, b: lineBounds(line) }))
-      .filter(({ b }) => {
-        const s = toAudioMs(b.start, globalOffset)
-        return s + b.dur >= viewWindow.startMs && s <= viewWindow.endMs
-      })
-      .sort((a, b) => a.b.start - b.b.start)
-    const gapMs = scale.pxToMs(6)
-    for (const { line, b } of items) {
+    return project.lines.filter((l) => {
+      // 制作名单行（「词：xxx」「编曲：xxx」，§6.1）不进逐字轴：它们不唱、
+      // 不需要调轴，而歌词源把它们塞在正文开头几十毫秒里，铺在轴上就是开头
+      // 一坨挤成一团的方块，正好压在真正要调的第一句上
+      if (l.is_metadata || !l.tokens.length) return false
+      const b = lineBounds(l)
       const s = toAudioMs(b.start, globalOffset)
-      let row = rowEndMs.findIndex((end) => s >= end)
-      if (row < 0) row = 0
-      rowEndMs[row] = s + b.dur + gapMs
-      out.push({ line, row })
-    }
-    return out
-  }, [project, viewWindow, globalOffset, scale])
+      return s + b.dur >= viewWindow.startMs && s <= viewWindow.endMs
+    })
+  }, [project, viewWindow, globalOffset])
 
   const ticks = useMemo(
     () => buildTicks(viewWindow.startMs, viewWindow.endMs, scale),
@@ -852,9 +987,31 @@ export function Timeline() {
     prevDraggingRef.current = dragging
   }, [dragging, dragUI.delta])
 
+  /**
+   * 选中即播放位置。
+   *
+   * 「选中的那一句」和「正在唱的那一句」以前是两个独立的标记，同屏两种高亮，
+   * 用户得先记住哪个颜色是哪个意思。现在合成一件事：**点哪儿，播放头就跳到哪儿**，
+   * 于是二者在点击那一刻必然重合；播放推进时选中也跟着走（见下方订阅）。
+   *
+   * 只写 store 的播放头，真正的 seek 由 Preview 执行（D15：唯一时钟）。
+   */
+  const selectAndSeek = useCallback(
+    (sel: Parameters<typeof select>[0], projectMs: number) => {
+      select(sel)
+      setPlayhead(Math.round(clamp(toAudioMs(projectMs, globalOffset), 0, durationMs)))
+    },
+    [select, setPlayhead, globalOffset, durationMs],
+  )
+
   const onTokenPointerDown = useCallback(
     (e: ReactPointerEvent, line: Line, i: number, kind: DragConfig['kind']) => {
-      select({ kind: 'token', lineId: line.id, tokenIndex: i })
+      // 拖左右边界是"改这个字的边界"，不是"我要听这里"——那种手势不该顺带跳播放头
+      if (kind === 'token-move') {
+        selectAndSeek({ kind: 'token', lineId: line.id, tokenIndex: i }, baseTiming(line, i).start)
+      } else {
+        select({ kind: 'token', lineId: line.id, tokenIndex: i })
+      }
       if (tapMode) {
         // 打轴模式下点字 =「从这里开始打」，不进入拖动
         const pos = flat.findIndex((f) => f.lineId === line.id && f.tokenIndex === i)
@@ -883,7 +1040,7 @@ export function Timeline() {
       if (maxDelta < minDelta) maxDelta = minDelta
       beginDrag(e, { kind, lineId: line.id, index: i, minDelta, maxDelta, linked })
     },
-    [baseTiming, beginDrag, flat, linkNeighbor, moveTapCursor, select, tapMode],
+    [baseTiming, beginDrag, flat, linkNeighbor, moveTapCursor, select, selectAndSeek, tapMode],
   )
 
   // ------------------------------------------------------------ tap-to-time
@@ -1264,16 +1421,61 @@ export function Timeline() {
             ))}
           </span>
         </span>
+        {/*
+         * 以下一组都改成**纯图标**：语义单一、Ant Design 里有约定俗成的图标、
+         * 且是高频操作（docs/ui-redesign.md §六「图标只在语义明确处使用」）。
+         *
+         * 刻意**没有**图标化的：
+         * - 「手工打轴」：它是模式开关而非一次动作，§2.5 要求它是一等公民、
+         *   不能藏起来；一个人第一次打开这一步必须一眼看见它
+         * - 检查器里的「锁定时间」/「锁定读音」：同一把锁图标、锁的却是两回事，
+         *   只留图标就分不出来了
+         *
+         * 纯图标一律**同时**给 title（鼠标）与 aria-label（读屏），少一个就等于
+         * 对其中一类用户把这个按钮变成了哑谜。
+         */}
         <button
           data-role="follow"
           data-on={follow ? '1' : '0'}
           aria-pressed={follow}
           onClick={() => setFollow(!follow)}
-          title={t('align.followHint')}
+          title={`${t('align.follow')}｜${t('align.followHint')}`}
+          aria-label={t('align.follow')}
         >
           <VerticalAlignMiddleOutlined />
-          {t('align.follow')}
         </button>
+
+        <span style={S.sep} />
+
+        {/*
+         * 波形画哪条轨。**与走带上的原声/伴奏是两个独立的选择**（见 sources 的注释）：
+         * 这里改的只是屏幕上那条曲线，耳朵听什么不受影响。
+         * 缺的轨不隐藏而是禁用 —— 藏起来的话用户只会以为这个功能不存在，
+         * 而真实原因是"还没分离出人声"，那是他自己能去解决的。
+         */}
+        <span style={S.dim} title={t('align.waveSrcHint')}>
+          {t('align.waveSrc')}
+          <span className="kvm-tl-seg" role="radiogroup" aria-label={t('align.waveSrc')}>
+            {WAVE_SOURCES.map((k) => (
+              <label
+                key={k}
+                data-on={waveSource === k || undefined}
+                data-wave-src={k}
+                data-missing={!waveTracks[k] || undefined}
+                title={waveTracks[k] ? t(`align.waveSrc.${k}`) : t('align.waveSrcMissing')}
+              >
+                <input
+                  type="radio"
+                  name="kvm-tl-wavesrc"
+                  checked={waveSource === k}
+                  disabled={!waveTracks[k]}
+                  onChange={() => setWaveSource(k)}
+                />
+                {t(`align.waveSrc.${k}`)}
+              </label>
+            ))}
+          </span>
+        </span>
 
         {/*
          * 这里**不放撤销/重做**。顶栏已经有一对，点下去调的是同一个后端历史 ——
@@ -1286,20 +1488,22 @@ export function Timeline() {
         <span style={S.sep} />
 
         <button
+          data-role="split"
           onClick={doSplit}
           disabled={selection.kind !== 'token' || selection.tokenIndex <= 0}
-          title={t('align.splitHint')}
+          title={`${t('align.split')}｜${t('align.splitHint')}`}
+          aria-label={t('align.split')}
         >
           <ScissorOutlined />
-          {t('align.split')}
         </button>
         <button
+          data-role="merge"
           onClick={doMerge}
           disabled={selection.kind === 'none'}
-          title={t('align.mergeHint')}
+          title={`${t('align.merge')}｜${t('align.mergeHint')}`}
+          aria-label={t('align.merge')}
         >
           <MergeCellsOutlined />
-          {t('align.merge')}
         </button>
 
         <span style={S.sep} />
@@ -1309,11 +1513,24 @@ export function Timeline() {
           data-on={linkNeighbor ? '1' : '0'}
           aria-pressed={linkNeighbor}
           onClick={() => setLinkNeighbor((v) => !v)}
-          title={t('align.linkHint')}
+          title={`${t('align.link')}｜${t('align.linkHint')}`}
+          aria-label={t('align.link')}
         >
           <LinkOutlined />
-          {t('align.link')}
         </button>
+
+        <span style={S.sep} />
+
+        {/*
+         * 整曲偏移（三级调轴的「整体」级）。放在这里而不是舞台左栏，有两条理由：
+         *
+         * 1. 它作用于**全曲的时间轴**，与同一排的缩放/整曲是同一类东西；
+         *    改完之后波形上每一块都会动，控件和结果在同一屏里
+         * 2. 与底栏检查器的「平移」（作用于**一个字**）拉开到时间轴的一头一尾。
+         *    两者曾经都是四个 ±ms 按钮、长得一模一样，是真实发生过的误读来源；
+         *    现在除了距离，形态也不同（对称摆在数值两侧 + 图标 + 「整曲」二字）
+         */}
+        <EditOffset />
 
         <span style={{ marginLeft: 'auto' }} />
 
@@ -1331,15 +1548,16 @@ export function Timeline() {
           <ZoomInOutlined />
         </button>
         <button
+          data-role="fit"
           onClick={() => {
             setPxPerSec(minPxPerSec)
             waveRef.current?.setScrollPx(0)
             handleScrollPx(0)
           }}
-          title={t('align.fitHint')}
+          title={`${t('align.fit')}｜${t('align.fitHint')}`}
+          aria-label={t('align.fit')}
         >
           <ColumnWidthOutlined />
-          {t('align.fit')}
         </button>
       </div>
 
@@ -1460,11 +1678,12 @@ export function Timeline() {
           </div>
         </div>
 
-        <div style={{ position: 'relative', height: WAVE_H, background: 'var(--bg-canvas)' }}>
+        {/* 波形吃掉时间轴里剩下的高度：分割条往上拖，这里就跟着长高 */}
+        <div ref={waveBoxRef} data-role="wave-box" style={S.waveBox}>
           <Waveform
             ref={waveRef}
             sources={sources}
-            height={WAVE_H}
+            height={waveH}
             pxPerSec={pxPerSec}
             onStatus={(s) => {
               setStatus(s)
@@ -1494,63 +1713,13 @@ export function Timeline() {
             </div>
           )}
 
-          {/* 覆盖层：行轨 + 边界参考线 + 词轨 + 播放头 */}
+          {/*
+            覆盖层：边界参考线 + 播放头。
+            **这里不再有行轨** —— 句子文本已经从时间轴上撤掉（见文件头），
+            波形因此整块裸露，参考线也能从顶画到底。
+          */}
           <div style={S.overlayClip}>
             <div ref={overlayTrackRef} style={S.track}>
-              {/* 行轨（单句级） */}
-              {visibleLines.map(({ line, row }) => {
-                const b = effLineBounds(line)
-                const isActive = line.id === activeLineId
-                // 选中（强调色）与正在唱（播放头同色的竖条）是两件事，
-                // 视觉分开的理由与歌词正文那边完全一样，见 RubyEditor 的 CSS 注释
-                const isPlaying = line.id === playheadLineId
-                return (
-                  <div
-                    key={line.id}
-                    className="kvm-tl-line"
-                    data-line={line.id}
-                    data-playing={isPlaying || undefined}
-                    title={`${lineText(line)}｜${formatMs(b.start, true)} + ${Math.round(b.dur)}ms`}
-                    onPointerDown={(e) => {
-                      select({ kind: 'line', lineId: line.id })
-                      if (tapMode) {
-                        e.stopPropagation()
-                        return
-                      }
-                      beginDrag(e, {
-                        kind: 'line',
-                        lineId: line.id,
-                        index: -1,
-                        minDelta: -b.start,
-                        maxDelta: 600_000,
-                        linked: false,
-                      })
-                    }}
-                    style={{
-                      left: scale.msToPx(toAudioMs(b.start, globalOffset)),
-                      width: scale.durToPx(b.dur, 6),
-                      top: row * LINE_ROW_H,
-                      height: LINE_ROW_H - 2,
-                      lineHeight: `${LINE_ROW_H - 2}px`,
-                      fontSize: 'var(--fs-xs)',
-                      background: line.is_metadata
-                        ? tint('var(--fg-3)', 30)
-                        : isActive
-                          ? tint('var(--accent)', 40)
-                          : tint('var(--fg-2)', 22),
-                      border: `1px solid ${isActive ? 'var(--accent)' : 'var(--stroke-strong)'}`,
-                      // inset 而不是 borderLeft：后者会改变盒宽，块的左边界就不再等于起点时间
-                      boxShadow: isPlaying ? 'inset 3px 0 0 var(--danger)' : undefined,
-                      color: line.locked ? 'var(--warn)' : 'var(--fg)',
-                      pointerEvents: 'auto',
-                    }}
-                  >
-                    {line.locked && <LockOutlined style={S.lineLock} />}
-                    {lineText(line)}
-                  </div>
-                )
-              })}
-
               {/* 当前行的字界参考线：画到波形上，才能对着能量突变去看 */}
               {activeLine?.tokens.map((_, i) => (
                 <div
@@ -1558,8 +1727,8 @@ export function Timeline() {
                   style={{
                     position: 'absolute',
                     left: scale.msToPx(toAudioMs(effTiming(activeLine, i).start, globalOffset)),
-                    top: LINES_STRIP_H,
-                    height: WAVE_H - LINES_STRIP_H,
+                    top: 0,
+                    height: waveH,
                     borderLeft: `1px dashed ${tint('var(--fg-2)', 55)}`,
                     pointerEvents: 'none',
                   }}
@@ -1573,99 +1742,157 @@ export function Timeline() {
         </div>
 
         {/*
-          逐字轴。**只画当前行** —— 一首歌几百个音节全实例化会卡死（§5.10）。
+          逐字轴。**整首歌的字都画**，不再只画选中的那一句 —— 只画一句时，
+          时间轴上到处是空的，看不出前后句的字挨得多近、间奏有多长，
+          调轴时也没法把一句的末字和下一句的首字放在一起比。
+
+          唯一的收敛是**按视口时间窗虚拟化**：一首 4-5 分钟的日语歌有 600~900 个
+          音节，全部实例化会卡死（§5.10）。`viewWindow` 已经带了预渲染余量，
+          滚动时不必每帧重建。
+
           它与波形共用同一套坐标与同一个平移量，所以拖出来的边界与波形上看到的
           能量突变是严丝合缝的。
         */}
         <div
           style={S.railClip}
           data-role="token-rail"
-          // 逐字轴当前编的是哪一行。既是排查抓手，也让"正文高亮的行"与
+          // 逐字轴当前落在哪一行。既是排查抓手，也让"正文高亮的行"与
           // "逐字轴在编的行"是否一致这件事可以被外部直接量出来
           data-line={activeLine?.id}
           aria-label={t('align.tokenRail')}
           title={t('align.tokenRailHint')}
         >
           <div ref={railTrackRef} style={S.track}>
-            {/* 空隙先画，让 token 盖在它上面：斜纹只出现在真正没有字的地方 */}
-            {activeLine?.tokens.slice(0, -1).map((_, i) => {
-              const a = effTiming(activeLine, i)
-              const b = effTiming(activeLine, i + 1)
-              const gap = b.start - (a.start + a.dur)
-              if (gap <= 1) return null
+            {railLines.map((line) => {
+              const lb = effLineBounds(line)
+              const isActiveLine = line.id === activeLineId
               return (
-                <div
-                  key={`gap-${i}`}
-                  className="kvm-tl-gap"
-                  data-gap={i}
-                  title={t('align.gap', { ms: Math.round(gap) })}
-                  style={{
-                    left: scale.msToPx(toAudioMs(a.start + a.dur, globalOffset)),
-                    width: scale.msToPx(gap),
-                    top: 0,
-                    height: TOKEN_RAIL_H,
-                  }}
-                />
-              )
-            })}
+                <div key={line.id} style={S.contents}>
+                  {/*
+                    句柄条（单句级调轴）。只写行号，**不写句子文本**。
+                    它接手了原行轨的拖动语义：拖 = 整句平移。
+                  */}
+                  <div
+                    className="kvm-tl-lh"
+                    data-role="line-handle"
+                    data-line={line.id}
+                    data-active={isActiveLine || undefined}
+                    title={t('align.lineHandleHint', { no: lineNo.get(line.id) ?? 0 })}
+                    onPointerDown={(e) => {
+                      // 点句柄 = 选中这一句并把播放位置挪过来（见 selectAndSeek）
+                      selectAndSeek({ kind: 'line', lineId: line.id }, lb.start)
+                      if (tapMode) {
+                        e.stopPropagation()
+                        return
+                      }
+                      beginDrag(e, {
+                        kind: 'line',
+                        lineId: line.id,
+                        index: -1,
+                        minDelta: -lb.start,
+                        maxDelta: 600_000,
+                        linked: false,
+                      })
+                    }}
+                    style={{
+                      left: scale.msToPx(toAudioMs(lb.start, globalOffset)),
+                      width: scale.durToPx(lb.dur, 6),
+                      top: 0,
+                      height: LINE_HANDLE_H,
+                      color: line.locked ? 'var(--warn)' : 'var(--fg)',
+                    }}
+                  >
+                    {line.locked && <LockOutlined style={S.lineLock} />}
+                    {/* 与歌词正文左侧同一个行号 —— 这是"这段属于哪句"所需的最小信息 */}
+                    <span className="num">#{lineNo.get(line.id)}</span>
+                  </div>
 
-            {activeLine?.tokens.map((tk, i) => {
-              // 变量名不能再叫 t：那会遮住 i18n 的 t()，本行的 title 正要用它
-              const tm = effTiming(activeLine, i)
-              const meta = SOURCE_META[tk.timing_source]
-              const drafted = !!tapDraft[tokenKey(activeLine.id, i)]
-              const isSel =
-                selection.kind === 'token' &&
-                selection.lineId === activeLine.id &&
-                selection.tokenIndex === i
-              const isNext = tapMode && tapCur?.lineId === activeLine.id && tapCur.tokenIndex === i
-              // 打进草稿的字立刻按「手工」显示：它已经有用户给的真实时间了
-              const shown = drafted ? SOURCE_META.manual : meta
-              const widthPx = scale.durToPx(tm.dur, 6)
-              return (
-                <div
-                  key={i}
-                  className={`kvm-tl-tok${isNext ? ' kvm-tl-next' : ''}`}
-                  data-source={drafted ? 'manual' : tk.timing_source}
-                  data-token-index={i}
-                  data-selected={isSel || undefined}
-                  title={`${tk.text}｜${t(meta.labelKey)}：${t(meta.hintKey)}\n${formatMs(tm.start, true)} + ${Math.round(tm.dur)}ms${
-                    tk.locked_timing ? `\n${t('align.locked')}` : ''
-                  }`}
-                  onPointerDown={(e) => onTokenPointerDown(e, activeLine, i, 'token-move')}
-                  style={{
-                    left: scale.msToPx(toAudioMs(tm.start, globalOffset)),
-                    // 块宽 = 该字时长。minPx 只保底可点击宽度，不改时长本身
-                    width: widthPx,
-                    top: 0,
-                    height: TOKEN_RAIL_H,
-                    background: blockBg(shown, drafted),
-                    // 底边是来源色的主载体：块顶到底一条粗边，扫一眼就能读出整行的来源分布
-                    border: `1px ${shown.dashed ? 'dashed' : 'solid'} ${tint(shown.color, 70)}`,
-                    borderBottom: `3px ${shown.dashed ? 'dashed' : 'solid'} ${shown.color}`,
-                    outline: isSel ? '2px solid var(--fg)' : undefined,
-                    outlineOffset: isSel ? '-2px' : undefined,
-                    zIndex: isSel ? 3 : 1,
-                  }}
-                >
-                  <span style={S.tokText}>{tk.text}</span>
-                  {/* 窄块塞不下起点时间，硬塞只会得到一截被裁掉的数字 */}
-                  {widthPx >= 56 && (
-                    <span className="num" style={S.tokTime}>
-                      {formatMs(tm.start, true)}
-                    </span>
-                  )}
-                  {tk.locked_timing && <LockOutlined style={S.lock} />}
-                  <div
-                    className="kvm-tl-hnd"
-                    style={{ left: 0 }}
-                    onPointerDown={(e) => onTokenPointerDown(e, activeLine, i, 'token-start')}
-                  />
-                  <div
-                    className="kvm-tl-hnd"
-                    style={{ right: 0 }}
-                    onPointerDown={(e) => onTokenPointerDown(e, activeLine, i, 'token-end')}
-                  />
+                  {/* 空隙先画，让 token 盖在它上面：斜纹只出现在真正没有字的地方 */}
+                  {line.tokens.slice(0, -1).map((_, i) => {
+                    const a = effTiming(line, i)
+                    const b = effTiming(line, i + 1)
+                    const gap = b.start - (a.start + a.dur)
+                    if (gap <= 1) return null
+                    return (
+                      <div
+                        key={`gap-${i}`}
+                        className="kvm-tl-gap"
+                        data-gap={i}
+                        title={t('align.gap', { ms: Math.round(gap) })}
+                        style={{
+                          left: scale.msToPx(toAudioMs(a.start + a.dur, globalOffset)),
+                          width: scale.msToPx(gap),
+                          top: LINE_HANDLE_H,
+                          height: TOKEN_BLOCK_H,
+                        }}
+                      />
+                    )
+                  })}
+
+                  {line.tokens.map((tk, i) => {
+                    // 变量名不能再叫 t：那会遮住 i18n 的 t()，本行的 title 正要用它
+                    const tm = effTiming(line, i)
+                    const meta = SOURCE_META[tk.timing_source]
+                    const drafted = !!tapDraft[tokenKey(line.id, i)]
+                    const isSel =
+                      selection.kind === 'token' &&
+                      selection.lineId === line.id &&
+                      selection.tokenIndex === i
+                    const isNext = tapMode && tapCur?.lineId === line.id && tapCur.tokenIndex === i
+                    // 打进草稿的字立刻按「手工」显示：它已经有用户给的真实时间了
+                    const shown = drafted ? SOURCE_META.manual : meta
+                    const widthPx = scale.durToPx(tm.dur, 6)
+                    return (
+                      <div
+                        key={i}
+                        className={`kvm-tl-tok${isNext ? ' kvm-tl-next' : ''}`}
+                        data-source={drafted ? 'manual' : tk.timing_source}
+                        data-line={line.id}
+                        data-token-index={i}
+                        data-selected={isSel || undefined}
+                        title={`${tk.text}｜${t(meta.labelKey)}：${t(meta.hintKey)}\n${formatMs(tm.start, true)} + ${Math.round(tm.dur)}ms${
+                          tk.locked_timing ? `\n${t('align.locked')}` : ''
+                        }`}
+                        onPointerDown={(e) => onTokenPointerDown(e, line, i, 'token-move')}
+                        style={{
+                          left: scale.msToPx(toAudioMs(tm.start, globalOffset)),
+                          // 块宽 = 该字时长。minPx 只保底可点击宽度，不改时长本身
+                          width: widthPx,
+                          top: LINE_HANDLE_H,
+                          height: TOKEN_BLOCK_H,
+                          background: blockBg(shown, drafted),
+                          // 底边是来源色的主载体：块顶到底一条粗边，扫一眼就能读出整行的来源分布
+                          border: `1px ${shown.dashed ? 'dashed' : 'solid'} ${tint(shown.color, 70)}`,
+                          borderBottom: `3px ${shown.dashed ? 'dashed' : 'solid'} ${shown.color}`,
+                          outline: isSel ? '2px solid var(--fg)' : undefined,
+                          outlineOffset: isSel ? '-2px' : undefined,
+                          // 非当前句压暗一点：整曲铺开之后要一眼看出正在编的是哪一段，
+                          // 但**不能藏起来**——看见前后句正是这次改成整曲的目的
+                          opacity: isActiveLine ? 1 : 0.62,
+                          zIndex: isSel ? 3 : isActiveLine ? 2 : 1,
+                        }}
+                      >
+                        <span style={S.tokText}>{tk.text}</span>
+                        {/* 窄块塞不下起点时间，硬塞只会得到一截被裁掉的数字 */}
+                        {widthPx >= 56 && (
+                          <span className="num" style={S.tokTime}>
+                            {formatMs(tm.start, true)}
+                          </span>
+                        )}
+                        {tk.locked_timing && <LockOutlined style={S.lock} />}
+                        <div
+                          className="kvm-tl-hnd"
+                          style={{ left: 0 }}
+                          onPointerDown={(e) => onTokenPointerDown(e, line, i, 'token-start')}
+                        />
+                        <div
+                          className="kvm-tl-hnd"
+                          style={{ right: 0 }}
+                          onPointerDown={(e) => onTokenPointerDown(e, line, i, 'token-end')}
+                        />
+                      </div>
+                    )
+                  })}
                 </div>
               )
             })}
@@ -1673,12 +1900,17 @@ export function Timeline() {
             <div ref={railPlayheadRef} data-role="playhead" style={S.playhead} />
           </div>
 
-          {!activeLine && <div style={S.waveNotice}>{t('align.railEmpty')}</div>}
+          {railLines.length === 0 && <div style={S.waveNotice}>{t('align.railEmpty')}</div>}
         </div>
 
-        {/* 概览条：整曲导航 */}
+        {/*
+          概览条：整曲导航 + **换句的入口**。
+          行轨拆掉之后，"在时间轴上切到另一句"就落在这里：点某一块 = 选中那一行，
+          逐字轴随之切过去（选中项会被既有的 effect 滚进视口）。点空白仍是纯导航。
+        */}
         <div
           style={S.overview}
+          data-role="overview"
           onPointerDown={(e) => {
             e.stopPropagation()
             const rect = e.currentTarget.getBoundingClientRect()
@@ -1689,19 +1921,38 @@ export function Timeline() {
           }}
         >
           {project.lines.map((l) => {
-            if (!l.tokens.length) return null
+            // 制作名单行不上概览条，理由与逐字轴相同（都挤在开头几十毫秒里）
+            if (l.is_metadata || !l.tokens.length) return null
             const b = lineBounds(l)
+            const isActive = l.id === activeLineId
+            /*
+             * 「正在唱」不再单独画一种高亮。选中与播放位置已经是同一件事
+             * （点哪儿播放头跳哪儿、播放推进时选中跟着走），再画两种颜色只会
+             * 让人以为它们可能不一样。属性留着当排查与验收的抓手。
+             */
+            const isPlaying = l.id === playheadLineId
             return (
               <div
                 key={l.id}
+                className="kvm-tl-ov"
+                data-line={l.id}
+                data-active={isActive || undefined}
+                data-playing={isPlaying || undefined}
+                // title 里只有行号与时间，**不放句子文本** —— 句子是右侧正文的活
+                title={t('align.overviewLine', {
+                  no: lineNo.get(l.id) ?? 0,
+                  start: formatMs(b.start, true),
+                })}
+                onPointerDown={(e) => {
+                  e.stopPropagation()
+                  selectAndSeek({ kind: 'line', lineId: l.id }, b.start)
+                }}
                 style={{
-                  position: 'absolute',
                   left: `${(toAudioMs(b.start, globalOffset) / durationMs) * 100}%`,
                   width: `${Math.max(0.15, (b.dur / durationMs) * 100)}%`,
                   top: 6,
                   height: OVERVIEW_H - 12,
-                  background: l.id === activeLineId ? 'var(--accent)' : tint('var(--fg-2)', 50),
-                  borderRadius: 'var(--r-sm)',
+                  background: isActive ? 'var(--accent)' : tint('var(--fg-2)', 50),
                 }}
               />
             )
@@ -1797,12 +2048,20 @@ function dragPreviewText(
  * 属于结构尺寸而不是间距刻度，套 `--sp-*` 只会让覆盖层和波形错位。
  */
 const S: Record<string, CSSProperties> = {
+  /*
+   * 整条时间轴撑满分割条给的高度，波形那一格再吃掉其中的剩余空间。
+   * `minHeight: 0` 是这条链的必要条件（docs/ui-redesign.md §七点五）——
+   * 少写它的话 host 会被内容顶到自然高度，波形就永远只有 min 那么高。
+   */
   root: {
     display: 'flex',
     flexDirection: 'column',
     gap: 'var(--sp-2)',
     background: 'var(--bg-panel)',
     padding: 'var(--sp-2)',
+    height: '100%',
+    minHeight: 0,
+    boxSizing: 'border-box',
   },
   bar: { display: 'flex', alignItems: 'center', gap: 'var(--sp-2)', flexWrap: 'wrap' },
   sep: { width: 1, height: 18, background: 'var(--stroke)', margin: '0 var(--sp-1)' },
@@ -1813,9 +2072,21 @@ const S: Record<string, CSSProperties> = {
     border: 'var(--hairline)',
     borderRadius: 'var(--r-md)',
     background: 'var(--bg-canvas)',
+    flex: '1 1 auto',
+    minHeight: 0,
+    display: 'flex',
+    flexDirection: 'column',
+  },
+  /** 波形格：刻度/逐字轴/概览都是定高的，剩下的全归它 */
+  waveBox: {
+    position: 'relative',
+    flex: '1 1 auto',
+    minHeight: MIN_WAVE_H,
+    background: 'var(--bg-canvas)',
   },
   rulerClip: {
     position: 'relative',
+    flex: `0 0 ${RULER_H}px`,
     height: RULER_H,
     overflow: 'hidden',
     background: 'var(--bg-panel)',
@@ -1828,12 +2099,20 @@ const S: Record<string, CSSProperties> = {
    */
   railClip: {
     position: 'relative',
+    flex: `0 0 ${TOKEN_RAIL_H}px`,
     height: TOKEN_RAIL_H,
     overflow: 'hidden',
     borderTop: 'var(--hairline)',
     background: 'var(--bg-panel)',
   },
   track: { position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, willChange: 'transform' },
+  /**
+   * 逐字轴按行分组只是为了 React 的 key 稳定（行增删时不会整片重建），
+   * 视觉上不该多出一层盒子——里面全是绝对定位的块，套一个 static 的 div
+   * 会把它们的定位基准从轨道换成这层，整轨错位。`display: contents` 让这层
+   * 只存在于 React 的树里、不进布局。
+   */
+  contents: { display: 'contents' },
   tickLabel: {
     position: 'absolute',
     left: 3,
@@ -1886,6 +2165,7 @@ const S: Record<string, CSSProperties> = {
   lineLock: { marginRight: 2, fontSize: 'var(--fs-xs)' },
   overview: {
     position: 'relative',
+    flex: `0 0 ${OVERVIEW_H}px`,
     height: OVERVIEW_H,
     overflow: 'hidden',
     background: 'var(--bg-canvas)',

@@ -139,10 +139,12 @@ for (let i = 0; i < cardCount; i++) {
   // 步骤条第 3 项 = 对轴
   await page.locator('.stepbar .step').nth(2).click()
   await page.waitForTimeout(3500)
-  // 词轨只画**当前行**（一首歌几百个音节全实例化会卡死）。整曲铺满时每条行轨
-  // 只有几个像素宽，点不准；改成点波形定位播放头 —— 播放头所在的行就是当前行。
-  // 落点可能砸在间奏里，所以多试几处。
-  const lines = await page.locator('.kvm-tl-line').count()
+  // 词轨只画**当前行**（一首歌几百个音节全实例化会卡死）。点波形定位播放头 ——
+  // 播放头所在的行就是当前行。落点可能砸在间奏里，所以多试几处。
+  //
+  // 句子层数的是概览条（`.kvm-tl-ov`）：原先的行轨已经拆掉，它把整句歌词文本
+  // 画在波形上，与右侧歌词正文重复且盖住能量曲线。
+  const lines = await page.locator('.kvm-tl-ov').count()
   const box = await page.locator('[data-role="wave-host"]').boundingBox()
   let toks = 0
   for (const f of [0.25, 0.35, 0.45, 0.55, 0.15]) {
@@ -153,7 +155,7 @@ for (let i = 0; i < cardCount; i++) {
     if (toks > 0) break
   }
   const title = await page.locator('.topbar__project-name').innerText()
-  console.log(`   卡片 ${i + 1}/${cardCount}「${title}」行轨 ${lines} 条、词轨 token ${toks} 个`)
+  console.log(`   卡片 ${i + 1}/${cardCount}「${title}」概览条 ${lines} 句、词轨 token ${toks} 个`)
   if (toks > 0) {
     opened = title
     break

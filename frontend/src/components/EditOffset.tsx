@@ -1,11 +1,29 @@
 /**
- * 整体偏移 —— 三级调轴的「整体」级（CLAUDE.md §5.8「全局 offset 旋钮」）。
+ * 整曲偏移 —— 三级调轴的「整体」级（CLAUDE.md §5.8「全局 offset 旋钮」）。
  *
- * ## 为什么从时间轴里搬出来
+ * ## 为什么在时间轴工具条上
  *
- * 它原先是时间轴工具条下的一整条横带（滑块 + 四个按钮 + 数字框 + 归零），
- * 占掉的正是**逐字轴**的高度——一个全曲改一次的旋钮压着一个每个字都要动的轨道。
- * 现在它贴着画面放在舞台左栏，宽度与画面对齐，只有两行。
+ * 它搬过两次家，两次都是因为放错了地方：
+ *
+ * 1. 最早是工具条**下方一整条横带**（滑块 + 四个按钮 + 数字框 + 归零）。
+ *    一个全曲改一次的旋钮，占掉的正是**逐字轴**——每个字都要动的那条轨道。
+ * 2. 于是搬去舞台左栏、贴着画面。结果左栏本来就只有一个 191px 高的画面 +
+ *    一条走带，塞进这张 112px 的小卡片之后仍有 272px 空着——**它没有省下空间，
+ *    只是把浪费换了个位置**，还顺手把歌词正文挤窄了 220px。
+ *
+ * 现在它是工具条右段的一个**行内控件**：与同排的缩放 / 整曲同属"作用于全曲"的
+ * 一类，改完之后波形上每一块都会动，控件和结果在同一屏里。
+ *
+ * ## 与检查器的「平移」必须一眼分得开
+ *
+ * 底栏检查器上有一组**作用于单个字**的 ±ms 按钮。两组曾经长得一模一样
+ * （同样四个 -100/-10/+10/+100 并排），是真实发生过的误读来源。现在三处不同：
+ *
+ * | | 整曲偏移 | 检查器的平移 |
+ * |---|---|---|
+ * | 位置 | 时间轴**顶部**工具条 | 舞台**底栏** |
+ * | 形态 | 对称摆在数值两侧，带图标与「整曲」二字 | 四个按钮并排在标签之后 |
+ * | 范围 | 全曲，不动任何 token | 选中的那一个字 |
  *
  * ## 为什么没有滑块
  *
@@ -18,13 +36,19 @@
  * 是个高不确定性的自动环节，用户必须能随时归零重来。
  */
 
+import { ClockCircleOutlined, UndoOutlined } from '@ant-design/icons'
 import { useCallback, useRef, useState } from 'react'
 
 import { t } from '../i18n'
 import { useProject } from '../state/projectStore'
 
-/** 一次点击调多少。10ms 是听得出差别的下限，100ms 用来对付整段偏移 */
-const NUDGES = [-100, -10, 10, 100]
+/**
+ * 一次点击调多少。10ms 是听得出差别的下限，100ms 用来对付整段偏移。
+ * 拆成左右两半**对称摆在数值两侧**——这既是"往左挪 / 往右挪"的直接映射，
+ * 也让它和检查器那组"标签 + 四连按钮"在形状上就区分得开。
+ */
+const NUDGES_DOWN = [-100, -10]
+const NUDGES_UP = [10, 100]
 
 export default function EditOffset() {
   const project = useProject((s) => s.project)
@@ -58,45 +82,56 @@ export default function EditOffset() {
 
   if (!project) return null
 
+  const nudge = (ms: number) => (
+    <button
+      key={ms}
+      type="button"
+      className="small num"
+      data-role="global-nudge"
+      onClick={() => send(ms)}
+    >
+      {ms > 0 ? `+${ms}` : ms}
+    </button>
+  )
+
   return (
-    <section className="edit-offset">
-      <div className="edit-offset__head">
-        <span className="edit-offset__title" title={t('align.offsetHint')}>
-          {t('align.offset')}
-        </span>
-        <button
-          type="button"
-          className="small ghost"
-          disabled={!offset}
-          onClick={() => send(-offset)}
-        >
-          {t('align.reset')}
-        </button>
-      </div>
+    <span className="edit-offset" data-role="global-offset">
+      {/* 「整曲」两个字不能省：它是这一组按钮与检查器那一组唯一的语义差别 */}
+      <span className="edit-offset__title" title={t('align.offsetHint')}>
+        <ClockCircleOutlined />
+        {t('align.offset')}
+      </span>
 
-      <div className="edit-offset__row">
-        <input
-          type="number"
-          step={10}
-          className="num edit-offset__value"
-          aria-label={t('align.offset')}
-          value={draft ?? String(offset)}
-          onChange={(e) => setDraft(e.target.value)}
-          onBlur={commitDraft}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') commitDraft()
-          }}
-        />
-        <span className="edit-offset__unit">ms</span>
-      </div>
+      {NUDGES_DOWN.map(nudge)}
 
-      <div className="edit-offset__row">
-        {NUDGES.map((ms) => (
-          <button key={ms} type="button" className="small num edit-offset__nudge" onClick={() => send(ms)}>
-            {ms > 0 ? `+${ms}` : ms}
-          </button>
-        ))}
-      </div>
-    </section>
+      <input
+        type="number"
+        step={10}
+        className="num edit-offset__value"
+        aria-label={t('align.offset')}
+        value={draft ?? String(offset)}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commitDraft}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') commitDraft()
+        }}
+      />
+      <span className="edit-offset__unit">ms</span>
+
+      {NUDGES_UP.map(nudge)}
+
+      {/* 归零是"随时能回来"的出口（见文件头），语义单一，纯图标即可 */}
+      <button
+        type="button"
+        className="small"
+        data-role="offset-reset"
+        disabled={!offset}
+        title={t('align.reset')}
+        aria-label={t('align.reset')}
+        onClick={() => send(-offset)}
+      >
+        <UndoOutlined />
+      </button>
+    </span>
   )
 }

@@ -32,20 +32,31 @@ export const align: Record<string, string> = {
   'align.linkHint': '拖边界时连带改相邻的字，保持首尾相接',
   // 原「试听 伴奏/原声」下拉框已删：预览层的走带上本来就有同一组按钮，
   // 改的还是 store 里同一个 audioMode。文案随控件一起去掉，不留孤儿键。
+  // 波形画哪条轨，与走带上"听哪条轨"是两个独立的选择
+  'align.waveSrc': '波形',
+  'align.waveSrcHint': '只改画出来的曲线，不改试听的音轨',
+  'align.waveSrc.audio': '原曲',
+  'align.waveSrc.instrumental': '伴奏',
+  'align.waveSrc.vocals': '人声',
+  'align.waveSrcMissing': '这条轨还没分离出来',
   'align.zoomIn': '放大',
   'align.zoomOut': '缩小',
   'align.fit': '整曲',
   'align.fitHint': '缩到整曲铺满',
 
-  // ---- 歌词 / 波形分割条 ----
+  // ---- 分割条 ----
   'align.paneDivider': '歌词与波形分割条',
-  'align.paneDividerHint': '拖动调整高度，双击复位',
+  'align.sideDivider': '画面与歌词分割条',
+  'align.paneDividerHint': '拖动调整比例，双击复位',
 
   // ---- 逐字轴（这一步真正要编辑的东西，所以它是主角）----
   'align.tokenRail': '逐字轴',
   'align.tokenRailHint': '块宽 = 该字时长，拖块平移、拖两侧改边界',
   'align.railEmpty': '点歌词里的字，或按播放键',
   'align.gap': '空隙 {ms}ms',
+  // 句柄条与概览条上**只出现行号**，不出现句子文本：句子在右侧正文里已经整屏摆着
+  'align.lineHandleHint': '第 {no} 句・拖动整句平移',
+  'align.overviewLine': '第 {no} 句・{start}',
 
   // ---- 检查器的时间栏 ----
   'align.time': '时间',
@@ -55,9 +66,34 @@ export const align: Record<string, string> = {
   'align.lockTiming': '锁定时间',
   'align.selectHint': '点歌词或逐字轴里的字',
 
-  // ---- 整体偏移（三级调轴的「整体」级）----
-  'align.offset': '整体偏移',
-  'align.offsetHint': '只改这一个数，不动逐字时间',
+  // ---- 声部指派（§2.5 表格里声部那一行的自动栏写的是"暂无可靠自动方案"，
+  //      手工旁路"选中词句指派声部"因此不是锦上添花，是这一环唯一的入口）----
+  'align.voice': '声部',
+  'align.voiceScope': '作用范围',
+  'align.voiceScope.line': '本句',
+  'align.voiceScope.after': '本句起',
+  'align.voiceScope.tokens': '本字起',
+  'align.voiceSpan': '句数',
+  'align.voiceSpanTokens': '字数',
+  'align.voiceUnitLines': '句',
+  'align.voiceUnitTokens': '字',
+  'align.voiceToEnd': '到曲末',
+  'align.voiceToLineEnd': '到句末',
+  'align.voiceAffectLines': '将改 {n} 句',
+  'align.voiceAffectTokens': '将改 {n} 字',
+  'align.voiceNew': '新声部',
+  'align.voiceNewPlaceholder': '新声部名，回车指派',
+  'align.voiceClear': '清除字级',
+  // 默认声部也能改名：声部名是给人看的标签（「男」「女」「合」比 duet_a 好读得多）
+  'align.voiceRename': '改名',
+  'align.voiceRenameHint': '点击给「{part}」改名（全曲一起改）',
+  'align.voiceDone': '已把 {n} 处改为 {part}',
+
+  // ---- 整曲偏移（三级调轴的「整体」级）----
+  // 叫「整曲」而不是「整体」：底栏检查器上有一组作用于**单个字**的「平移」，
+  // 两者都是 ±ms 按钮，标签是它们唯一能靠文字讲清的差别，必须说出作用范围
+  'align.offset': '整曲偏移',
+  'align.offsetHint': '整首歌一起平移，不动逐字时间',
   'align.reset': '归零',
 
   // ---- 打轴面板 ----
