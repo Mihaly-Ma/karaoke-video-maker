@@ -4,7 +4,10 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "sync:jassub": "node scripts/sync-jassub-assets.mjs",
+    "predev": "npm run sync:jassub",
     "dev": "vite",
+    "prebuild": "npm run sync:jassub",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "lint": "eslint src --max-warnings 0",

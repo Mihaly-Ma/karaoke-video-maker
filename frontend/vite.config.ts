@@ -13,14 +13,16 @@ import { defineConfig } from 'vite'
 // 变成同源请求，jassub 的 wasm/worker 也是同源产物，所以 require-corp 的严格性
 // 在这里不构成成本，反而换来 WebKit 侧真正的跨源隔离。
 //
-// **已知代价（只在 dev server 上）**：隔离一旦生效，JASSUB 就走 emscripten 的
-// pthread 路径，在 worker 内部再起嵌套 worker；而 Vite 在 dev 会往每个被它转换过的
-// worker 文件里注入 `import '/node_modules/vite/dist/client/env.mjs'`，WebKit 拒绝
-// 加载嵌套 worker 里的这个 import（报 "Worker load was blocked by
-// Cross-Origin-Embedder-Policy"），于是 Safari 上 dev 模式看不到字幕预览。
-// 补 `Cross-Origin-Resource-Policy` 无效——这些资源本来就是同源的。
-// 生产构建没有这个注入，实测 `vite preview` 下 WebKit 隔离生效且控制台零报错，
-// 所以最终形态（Tauri 壳里跑构建产物）不受影响。
+// 隔离一旦生效，JASSUB 就走 emscripten 的 pthread 路径，在 worker 内部再起嵌套
+// worker；而 Vite 在 dev 会往每个被它转换过的 worker 文件里注入
+// `import '/node_modules/vite/dist/client/env.mjs'`，WebKit 拒绝加载嵌套 worker 里的
+// 这个 import（报 "Worker load was blocked by Cross-Origin-Embedder-Policy"），
+// 于是 Safari 上 dev 模式一度看不到字幕预览。补 `Cross-Origin-Resource-Policy` 无效
+// ——这些资源本来就是同源的。
+// 现已修复：worker/wasm 改从 public/jassub/ 加载（Vite 对 public/ 原样下发、不注入），
+// 见 scripts/sync-jassub-assets.mjs 与 src/lib/jassub.ts 的 JASSUB_ASSETS。
+// **不要因此把这里的 COEP 退回 credentialless** —— 那只是让 WebKit 拿不到跨源隔离、
+// JASSUB 退回单线程，把问题藏起来而已。
 const crossOriginIsolation = {
   'Cross-Origin-Opener-Policy': 'same-origin',
   'Cross-Origin-Embedder-Policy': 'require-corp',
@@ -56,6 +58,10 @@ export default defineConfig({
   optimizeDeps: {
     // jassub 的 worker 与 wasm 需要以资源形式产出，不能被内联
     exclude: ['jassub'],
+    // 补充：真正被加载的 worker/wasm 现在来自 public/jassub/（见 src/lib/jassub.ts 的
+    // JASSUB_ASSETS —— 那是为了绕开上面说的 WebKit 嵌套 worker 死局）。这条 exclude
+    // 仍然要留着：主线程侧的 jassub.js 照旧走正常 import，被预构建内联会连带把
+    // `new Worker(new URL(...))` 一起改写坏。
     // 但排除 jassub 会连带跳过它的依赖预构建，而 `throughput` 是 CJS 包
     // （无 type:module / exports）。浏览器直接 ESM import 一个 CJS 包会抛
     // "does not provide an export named 'default'"，整个应用白屏 ——

@@ -24,6 +24,31 @@ import { fontSubsetUrl } from '../api/client'
 const READY_TIMEOUT_MS = 20_000
 
 /**
+ * worker 与 wasm 一律从 public/jassub/ 下的静态副本加载，而不是包自带的默认路径。
+ * 副本由 scripts/sync-jassub-assets.mjs 在 predev / prebuild 时从 node_modules 复制。
+ *
+ * 起因是一个 WebKit + dev server 专有的死局：Vite 会往每个被它转换过的 worker 文件
+ * 顶部注入 `import '/node_modules/vite/dist/client/env.mjs'`；页面跨源隔离时 JASSUB
+ * 走 emscripten 的 pthread 路径、在 worker 里再起嵌套 worker，而 WebKit 拒绝加载嵌套
+ * worker 里的这个 import，JASSUB 于是超时不就绪、字幕整块不出现。Vite 对 public/
+ * 下的文件原样下发，注入不存在，问题随之消失 —— 且 COEP 仍是 require-corp、
+ * 跨源隔离与 SharedArrayBuffer 都还在（不是靠降级 COEP 绕过去的）。
+ *
+ * dev 与生产走同一份资源，不留「只在一端验证过」的分叉。
+ *
+ * 两份 wasm 必须都传：JASSUB 按运行时 SIMD 探测在 modern / legacy 之间二选一
+ * （Safari 与 Chromium 的选择结果并不相同），只传一个会让另一条路径悄悄退回包内
+ * 默认 URL，变成「有的机器走静态副本、有的机器走 Vite 产物」。
+ *
+ * 路径写成绝对形式，前提是应用挂在站点根下 —— dev、vite preview、Tauri 壳都如此。
+ */
+const JASSUB_ASSETS = {
+  workerUrl: '/jassub/worker/worker.js',
+  wasmUrl: '/jassub/wasm/jassub-worker.wasm',
+  modernWasmUrl: '/jassub/wasm/jassub-worker-modern.wasm',
+} as const
+
+/**
  * 增量更新退化为整轨重建的阈值。
  *
  * `renderer.*` 的每次调用都是跨 worker 的 IPC，而且**不 await 等于没执行**
@@ -573,6 +598,7 @@ export class SubtitleOverlay {
     let instance: JASSUB
     try {
       instance = new JASSUB({
+        ...JASSUB_ASSETS,
         video: opts.video,
         subContent: opts.ass,
         // 预加载：worker 在建轨之前就把字体灌进 libass，避免首帧无字形
@@ -591,8 +617,9 @@ export class SubtitleOverlay {
         instance.ready,
         READY_TIMEOUT_MS,
         `字幕渲染器在 ${READY_TIMEOUT_MS / 1000} 秒内没有就绪。` +
-          '可能是 jassub 的 wasm / worker 资源没被打包出来（检查 vite.config.ts 的 ' +
-          'optimizeDeps.exclude 与 worker.format 配置），或被浏览器扩展拦截。',
+          '最常见的原因是 public/jassub/ 下的 worker / wasm 静态副本不在位 —— ' +
+          '跑一次 `npm run sync:jassub` 重建（正常情况下 predev / prebuild 会自动跑）。' +
+          '其次才是被浏览器扩展拦截。',
       )
     } catch (e) {
       void instance.destroy()
