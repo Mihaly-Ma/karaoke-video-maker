@@ -1,23 +1,27 @@
-import { useEffect, useRef, useState } from 'react'
+import { InboxOutlined } from '@ant-design/icons'
+import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react'
+
 import * as api from '../api/client'
+import { t } from '../i18n'
 import { useProject } from '../state/projectStore'
-import type { JobStatus, Project, ProxyStatus } from '../api/types'
-import JobProgress from './JobProgress'
+import type { Project } from '../api/types'
+import MediaTrackCard, { type TrackKind } from './MediaTrackCard'
+import MediaVideoPreview from './MediaVideoPreview'
 
 /**
- * 视频下载与人声分离面板。
+ * 「素材」舞台：判断的是**素材质量是否合格**（docs/ui-redesign.md §四"素材"）。
  *
- * CLAUDE.md §2.5：自动环节必须有等价的手工旁路，且旁路不能藏起来。
- * 因此每个小节都是"自动入口 + 手工入口"并列展示，而不是自动失败后才露出。
+ * 布局：左侧是获取入口（下载链接 / 拖放本地文件 / 分离档位），右侧上方是画面
+ * 预览、下方是各条音轨卡片。这不是随意的两栏——判断"下载有没有坏、分离好不好"
+ * 分别要靠**眼睛**（画面）和**耳朵**（逐条试听），两者都必须在这一步的主区域
+ * 里，不能藏进次级 tab。
  *
- * 长任务（下载/分离）的 job id 由父组件（App.tsx）持有而不是本组件内部
- * state——这样切换到其它工作流步骤时，任务栏里的进度条不会跟着卸载消失。
+ * CLAUDE.md §2.5：自动环节必须有等价的手工旁路，且旁路不能藏起来——因此下载
+ * 与拖放导入并列展示，分离与"导入已分离音轨"并列展示，代理生成失败时预览
+ * 自动回退用原始视频，不阻断这一步。
  */
 
-/**
- * 一个人声分离档位，对应后端 `SeparateModelTier`
- * （`GET /api/media/separate/models`）。
- */
+/** 一个人声分离档位，对应后端 `SeparateModelTier`（`GET /api/media/separate/models`）。 */
 interface SeparateTier {
   id: string
   label: string
@@ -29,15 +33,30 @@ interface SeparateTier {
 
 /**
  * 后端不可达时的兜底档位。**只写档位 id，不写模型文件名**——模型文件名属于
- * audio-separator 的命名空间，前端硬编码它正是此前"标准"和"最佳"两档一点就报
- * `Model file ... not found in supported model files` 的根因：前端传去掉扩展名的
- * 文件名，后端按档位名建别名表，两边压根对不上。现在传输值统一为档位 id。
+ * audio-separator 的命名空间，前端硬编码它是历史上"标准"/"最佳"两档一点就报
+ * `Model file ... not found` 的根因：换模型/调档位现在只改后端一处。
  */
 const FALLBACK_TIERS: SeparateTier[] = [
-  { id: 'fast', label: '快速', model_filename: '', hint: '先出个能听的伴奏，立刻开始调轴', recommended: true, warning: '' },
-  { id: 'standard', label: '标准', model_filename: '', hint: '质量与速度平衡', recommended: false, warning: '' },
-  { id: 'best', label: '最佳', model_filename: '', hint: '质量最高，最慢', recommended: false, warning: '' },
+  { id: 'fast', label: '快速', model_filename: '', hint: '', recommended: true, warning: '' },
+  { id: 'standard', label: '标准', model_filename: '', hint: '', recommended: false, warning: '' },
+  { id: 'best', label: '最佳', model_filename: '', hint: '', recommended: false, warning: '' },
 ]
+
+/**
+ * 已知档位 id → 短选型依据（速度/质量取舍，用户真正要的决策依据）。
+ *
+ * 后端 `hint` 字段是完整说明句（例如"84MB，最快，先出个能听的伴奏立刻开始调轴；
+ * 4 声部，还会顺带产出鼓声轨"），适合当 `title` 悬浮详情，但界面主文案要短
+ * （docs/ui-redesign.md §六"文案：短，且准确"），所以可见文字用这张短表，
+ * 完整说明仍通过 title 属性保留，不丢信息。
+ */
+const TIER_SHORT_HINT: Record<string, string> = {
+  fast: 'media.tier.fast',
+  standard: 'media.tier.standard',
+  best: 'media.tier.best',
+}
+
+const TRACK_ORDER: TrackKind[] = ['audio', 'vocals', 'instrumental', 'drums']
 
 /**
  * 手工旁路：直接导入本地文件，绕开下载/分离。
@@ -73,7 +92,7 @@ async function importLocalFile(
 }
 
 interface MediaPanelProps {
-  /** 由工作流导航指定，仅做视觉高亮引导，不影响功能。 */
+  /** 由工作流导航指定，仅做视觉引导，不影响功能。 */
   focusSection?: 'download' | 'separate'
   downloadJobId: string | null
   onDownloadStart: (jobId: string) => void
@@ -93,6 +112,7 @@ export default function MediaPanel({
 
   const [url, setUrl] = useState('')
   const [downloadError, setDownloadError] = useState<string | null>(null)
+  const urlInputRef = useRef<HTMLInputElement>(null)
 
   const [tiers, setTiers] = useState<SeparateTier[]>(FALLBACK_TIERS)
   const [tiersFallback, setTiersFallback] = useState(false)
@@ -100,35 +120,57 @@ export default function MediaPanel({
   const [model, setModel] = useState<string | null>(null)
   const [separateError, setSeparateError] = useState<string | null>(null)
 
-  /**
-   * 编辑用代理视频的状态。**这一步的目的就是确认下载质量**，而原始素材
-   * （AV1 + Matroska + Opus）在 Safari 上根本出不了画面，所以代理的就绪与否
-   * 必须摆在素材面板上，不能让用户对着黑屏猜。
-   */
-  const [proxy, setProxy] = useState<ProxyStatus | null>(null)
-  /** 代理任务 id：既可能是这里点出来的，也可能是后端在下载/导入之后自动排的 */
-  const [proxyJobId, setProxyJobId] = useState<string | null>(null)
-  const [proxyError, setProxyError] = useState<string | null>(null)
-
   const [importError, setImportError] = useState<string | null>(null)
   const [importingKind, setImportingKind] = useState<
     null | 'video' | 'audio' | 'vocals' | 'instrumental' | 'drums'
   >(null)
+  const [dragOverKind, setDragOverKind] = useState<'video' | 'audio' | null>(null)
 
   const videoFileRef = useRef<HTMLInputElement>(null)
   const audioFileRef = useRef<HTMLInputElement>(null)
   const vocalsFileRef = useRef<HTMLInputElement>(null)
   const instrumentalFileRef = useRef<HTMLInputElement>(null)
   const drumsFileRef = useRef<HTMLInputElement>(null)
-  const fileRefs = {
+  // `useRef(...).current` 而不是普通对象字面量：包一层 ref 让这个查找表的
+  // 引用在渲染间保持恒定，handleImport 的 useCallback 才能放心把它当稳定依赖
+  // （不放心就得整个禁用 exhaustive-deps，这里没必要）。
+  const fileInputRefs = useRef({
     video: videoFileRef,
     audio: audioFileRef,
     vocals: vocalsFileRef,
     instrumental: instrumentalFileRef,
     drums: drumsFileRef,
-  }
+  }).current
+
+  /** 独占播放：同一时刻只有一路声音在响（画面预览的 <video> 或某一条 stem）。 */
+  const activeMediaRef = useRef<HTMLMediaElement | null>(null)
+  const claimPlayback = useCallback((el: HTMLMediaElement) => {
+    const prev = activeMediaRef.current
+    if (prev && prev !== el) prev.pause()
+    activeMediaRef.current = el
+  }, [])
+
+  /**
+   * 波形解码排队：同一时刻只让一张卡片的 wavesurfer 工作。
+   *
+   * 本工程的音频一律是未压缩 PCM WAV（见 backend/kvm/media/download.py、
+   * separate.py），一首 4-5 分钟的曲子就有几十 MB，四条 stem 同时起
+   * wavesurfer（各自完整 fetch + decode）在解码这端会有明显的主线程/内存尖峰。
+   * 用一个"已完成数"做门槛，按固定顺序（原始音频→人声→伴奏→鼓声）逐条放行，
+   * 波形是全自动出现的，用户不需要点什么，只是不会四条同时开始。
+   */
+  const [waveSettledCount, setWaveSettledCount] = useState(0)
+  const handleWaveSettled = useCallback(() => setWaveSettledCount((n) => n + 1), [])
 
   const projectId = project?.id
+
+  useEffect(() => {
+    setWaveSettledCount(0)
+  }, [projectId])
+
+  useEffect(() => {
+    if (focusSection === 'download') urlInputRef.current?.focus()
+  }, [focusSection])
 
   // 档位表由后端给（唯一真相来源），前端只认 id。取不到就退回内置 id 列表——
   // 那些 id 后端一样认，分离仍然可用，只是提示文案没那么准。
@@ -147,55 +189,7 @@ export default function MediaPanel({
     }
   }, [])
 
-  const selectedModel = model ?? tiers.find((t) => t.recommended)?.id ?? tiers[0]?.id ?? 'fast'
-
-  const videoPath = project?.video_path ?? null
-  const proxyPath = project?.proxy_video_path ?? null
-
-  // 拉一次代理状态。依赖里放 video_path / proxy_video_path 而不是定时轮询：
-  // 下载完成或本地导入之后工程会被刷新，这两个字段必然变化，正好是"后端可能
-  // 刚自动排了一个代理任务"的时刻——那个 job_id 只有后端知道，必须来这里取，
-  // 取到后交给 JobProgress 继续轮询进度。
-  useEffect(() => {
-    if (!projectId) return
-    let alive = true
-    void api
-      .proxyStatus(projectId)
-      .then((st) => {
-        if (!alive) return
-        setProxy(st)
-        if (st.job && (st.job.state === 'pending' || st.job.state === 'running')) {
-          setProxyJobId(st.job.job_id)
-        }
-      })
-      .catch(() => {
-        // 代理状态查不到不该让素材面板报错：没有代理时预览会回退用原视频
-        if (alive) setProxy(null)
-      })
-    return () => {
-      alive = false
-    }
-  }, [projectId, videoPath, proxyPath])
-
-  const startProxy = async () => {
-    if (!projectId) return
-    setProxyError(null)
-    try {
-      // 已经有代理时点这个按钮意味着"重来一次"（换了编码器、或怀疑上次产物有问题），
-      // 必须绕开缓存，否则会秒回一个"完成"却什么都没变
-      const job = await api.buildProxy(projectId, undefined, !!proxyPath)
-      setProxyJobId(job.job_id)
-    } catch (e) {
-      setProxyError(e instanceof Error ? e.message : String(e))
-    }
-  }
-
-  const onProxySettled = async (status: JobStatus) => {
-    // 刷新工程让 proxy_video_path 落进 store —— 预览的 <video> 会据此换 src
-    await refresh()
-    if (projectId) setProxy(await api.proxyStatus(projectId).catch(() => null))
-    if (status.state === 'done') setProxyJobId(null)
-  }
+  const selectedModel = model ?? tiers.find((tr) => tr.recommended)?.id ?? tiers[0]?.id ?? 'fast'
 
   const startDownload = async () => {
     if (!projectId || !url.trim()) return
@@ -219,204 +213,500 @@ export default function MediaPanel({
     }
   }
 
-  const handleImport = async (
-    kind: 'video' | 'audio' | 'vocals' | 'instrumental' | 'drums',
-    file: File | undefined,
-  ) => {
-    if (!projectId || !file) return
-    setImportError(null)
-    setImportingKind(kind)
-    try {
-      await importLocalFile(projectId, kind, file)
-      await refresh()
-    } catch (e) {
-      setImportError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setImportingKind(null)
-      const ref = fileRefs[kind]
-      if (ref.current) ref.current.value = ''
-    }
-  }
+  const handleImport = useCallback(
+    async (kind: 'video' | 'audio' | 'vocals' | 'instrumental' | 'drums', file: File | undefined) => {
+      if (!projectId || !file) return
+      setImportError(null)
+      setImportingKind(kind)
+      try {
+        await importLocalFile(projectId, kind, file)
+        await refresh()
+      } catch (e) {
+        setImportError(e instanceof Error ? e.message : String(e))
+      } finally {
+        setImportingKind(null)
+        // 清空对应的 <input type=file>，否则再次选中同一个文件时 onChange 不会
+        // 触发（浏览器只在 value 变化时才触发该事件）。
+        const ref = fileInputRefs[kind].current
+        if (ref) ref.value = ''
+      }
+    },
+    [projectId, refresh, fileInputRefs],
+  )
+
+  const onDropFile = useCallback(
+    (kind: 'video' | 'audio') => (e: DragEvent<HTMLLabelElement>) => {
+      e.preventDefault()
+      setDragOverKind(null)
+      const file = e.dataTransfer.files?.[0]
+      if (file) void handleImport(kind, file)
+    },
+    [handleImport],
+  )
 
   if (!project) {
     return (
-      <div className="panel media-panel">
-        <p className="muted">请先在顶栏创建或选择一个工程。</p>
+      <div className="panel kvm-media">
+        <p className="hint">{t('common.selectProjectFirst')}</p>
       </div>
     )
   }
 
   return (
-    <div className="panel media-panel">
-      <section className={`media-panel__section${focusSection === 'download' ? ' media-panel__section--focus' : ''}`}>
-        <h3>视频获取</h3>
-        <div className="media-panel__status">
-          <span className={`badge${project.video_path ? ' badge--ok' : ''}`}>
-            视频 {project.video_path ? '已就绪' : '未获取'}
-          </span>
-          <span className={`badge${project.audio_path ? ' badge--ok' : ''}`}>
-            音频 {project.audio_path ? '已就绪' : '未获取'}
-          </span>
-        </div>
-        {project.video_path && <code className="path">{project.video_path}</code>}
-        {project.audio_path && <code className="path">{project.audio_path}</code>}
+    <div className="panel kvm-media">
+      <style>{CSS}</style>
 
-        <div className="media-panel__row">
-          <input
-            type="text"
-            placeholder="YouTube 链接"
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') void startDownload()
-            }}
-          />
-          <button type="button" onClick={() => void startDownload()} disabled={!url.trim() || !!downloadJobId}>
-            下载
-          </button>
-        </div>
+      <div className="kvm-media__grid">
+        {/* ---- 左：获取入口 ---- */}
+        <div className="kvm-media__col">
+          <section
+            className={`kvm-media-acq${focusSection === 'download' ? ' kvm-media-acq--focus' : ''}`}
+          >
+            <h3>{t('media.acquire.title')}</h3>
 
-        <div className="media-panel__manual">
-          {/* 视频与音频分成两个明确入口，而不是共用一个 accept="video/*,audio/*"
-              的输入框固定传 kind='video'——那样选了纯音频文件会让 video_path
-              指向一个没有视频流的文件，下游渲染/预览会出问题 */}
-          <span className="muted">或直接选择本地文件：</span>
-          <label className="media-panel__file-label">
-            视频
-            <input
-              ref={videoFileRef}
-              type="file"
-              accept="video/*"
-              onChange={(e) => void handleImport('video', e.target.files?.[0])}
-            />
-          </label>
-          <label className="media-panel__file-label">
-            音频
-            <input
-              ref={audioFileRef}
-              type="file"
-              accept="audio/*"
-              onChange={(e) => void handleImport('audio', e.target.files?.[0])}
-            />
-          </label>
-          {(importingKind === 'video' || importingKind === 'audio') && (
-            <span className="muted">导入中…</span>
-          )}
-        </div>
-
-        {downloadError && <p className="error">{downloadError}</p>}
-
-        {/* 编辑用代理：下载/导入之后后端会自动跑一次，这里既显示进度也提供手工入口
-            （CLAUDE.md §2.5：每个自动环节都要有等价的手工旁路）。
-            代理只服务于编辑器预览，导出成片始终用上面那份原始素材。 */}
-        <div className="media-panel__proxy">
-          <h4>编辑用代理</h4>
-          <div className="media-panel__status">
-            <span className={`badge${proxy?.ready ? ' badge--ok' : ''}`}>
-              编辑用代理 {proxy?.ready ? '已就绪' : '未生成'}
-            </span>
-          </div>
-          <p className="hint">
-            {proxy?.note ??
-              '编辑用代理是原视频的 H.264 / MP4 低分辨率短 GOP 版本，只用于编辑器预览：' +
-                'Safari 放不了原始的 MKV / AV1，逐帧核对音节边界也需要短 GOP。导出成片仍用原始素材。'}
-          </p>
-          {proxy?.ready && proxy.path && <code className="path">{proxy.path}</code>}
-          <button type="button" onClick={() => void startProxy()} disabled={!videoPath || !!proxyJobId}>
-            {proxy?.ready ? '重新生成代理' : '生成编辑用代理'}
-          </button>
-          {proxyJobId && (
-            <JobProgress
-              jobId={proxyJobId}
-              label="生成编辑用代理"
-              onSettled={onProxySettled}
-              onDismiss={() => setProxyJobId(null)}
-            />
-          )}
-          {proxyError && <p className="error">{proxyError}</p>}
-        </div>
-      </section>
-
-      <section className={`media-panel__section${focusSection === 'separate' ? ' media-panel__section--focus' : ''}`}>
-        <h3>人声分离</h3>
-        <p className="hint">可选步骤——跳过也能导出，只是没有 ON/OFF VOCAL 双音轨。</p>
-        <div className="media-panel__status">
-          <span className={`badge${project.vocals_path ? ' badge--ok' : ''}`}>
-            人声 {project.vocals_path ? '已就绪' : '未分离'}
-          </span>
-          <span className={`badge${project.instrumental_path ? ' badge--ok' : ''}`}>
-            伴奏 {project.instrumental_path ? '已就绪' : '未分离'}
-          </span>
-        </div>
-
-        <div className="media-panel__models">
-          {tiers.map((t) => (
-            <label key={t.id} className="media-panel__model">
-              <input
-                type="radio"
-                name="separate-model"
-                value={t.id}
-                checked={selectedModel === t.id}
-                onChange={() => setModel(t.id)}
-              />
-              <span className="media-panel__model-label">
-                {t.label}
-                {t.recommended ? '（推荐）' : ''}
+            <div className="kvm-media-status">
+              <span className={`badge${project.video_path ? ' badge--ok' : ''}`}>
+                {t('media.track.video')} {project.video_path ? t('common.ready') : t('media.status.missing')}
               </span>
-              <span className="muted">{t.hint}</span>
-              {t.warning && <span className="error">{t.warning}</span>}
+              <span className={`badge${project.audio_path ? ' badge--ok' : ''}`}>
+                {t('media.track.audio')} {project.audio_path ? t('common.ready') : t('media.status.missing')}
+              </span>
+            </div>
+
+            <div className="kvm-media-row">
+              <input
+                ref={urlInputRef}
+                type="text"
+                placeholder={t('media.download.placeholder')}
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void startDownload()
+                }}
+              />
+              <button
+                type="button"
+                className="primary"
+                onClick={() => void startDownload()}
+                disabled={!url.trim() || !!downloadJobId}
+              >
+                {downloadJobId ? t('media.download.downloading') : t('media.download.button')}
+              </button>
+            </div>
+            {downloadError && <p className="error">{downloadError}</p>}
+
+            <label
+              className={`kvm-media-dropzone${dragOverKind === 'video' ? ' kvm-media-dropzone--over' : ''}`}
+              onDragOver={(e) => {
+                e.preventDefault()
+                setDragOverKind('video')
+              }}
+              onDragLeave={() => setDragOverKind((k) => (k === 'video' ? null : k))}
+              onDrop={onDropFile('video')}
+            >
+              <InboxOutlined className="kvm-media-dropzone__icon" />
+              <span>{importingKind === 'video' ? t('media.local.importing') : t('media.local.dropVideo')}</span>
+              <input
+                ref={videoFileRef}
+                type="file"
+                accept="video/*"
+                onChange={(e) => void handleImport('video', e.target.files?.[0])}
+              />
             </label>
-          ))}
+            <label
+              className={`kvm-media-dropzone${dragOverKind === 'audio' ? ' kvm-media-dropzone--over' : ''}`}
+              onDragOver={(e) => {
+                e.preventDefault()
+                setDragOverKind('audio')
+              }}
+              onDragLeave={() => setDragOverKind((k) => (k === 'audio' ? null : k))}
+              onDrop={onDropFile('audio')}
+            >
+              <InboxOutlined className="kvm-media-dropzone__icon" />
+              <span>{importingKind === 'audio' ? t('media.local.importing') : t('media.local.dropAudio')}</span>
+              <input
+                ref={audioFileRef}
+                type="file"
+                accept="audio/*"
+                onChange={(e) => void handleImport('audio', e.target.files?.[0])}
+              />
+            </label>
+            {importError && <p className="error">{importError}</p>}
+          </section>
+
+          <section
+            className={`kvm-media-acq${focusSection === 'separate' ? ' kvm-media-acq--focus' : ''}`}
+          >
+            <h3>{t('media.separate.title')}</h3>
+            <p className="hint">{t('media.separate.optional')}</p>
+
+            <div className="kvm-media-status">
+              <span className={`badge${project.vocals_path ? ' badge--ok' : ''}`}>
+                {t('media.track.vocals')} {project.vocals_path ? t('common.ready') : t('media.status.missing')}
+              </span>
+              <span className={`badge${project.instrumental_path ? ' badge--ok' : ''}`}>
+                {t('media.track.instrumental')}{' '}
+                {project.instrumental_path ? t('common.ready') : t('media.status.missing')}
+              </span>
+            </div>
+
+            <div className="kvm-media-tiers">
+              {tiers.map((tr) => (
+                <div key={tr.id}>
+                  <label className="kvm-media-tier">
+                    <input
+                      type="radio"
+                      name="separate-model"
+                      value={tr.id}
+                      checked={selectedModel === tr.id}
+                      onChange={() => setModel(tr.id)}
+                    />
+                    <span className="kvm-media-tier__label">{tr.label}</span>
+                    {tr.recommended && (
+                      <span className="kvm-media-tier__badge">{t('media.separate.recommended')}</span>
+                    )}
+                    <span className="kvm-media-tier__hint" title={tr.hint || undefined}>
+                      {t(TIER_SHORT_HINT[tr.id] ?? 'media.tier.generic')}
+                    </span>
+                  </label>
+                  {tr.warning && <p className="error">{tr.warning}</p>}
+                </div>
+              ))}
+            </div>
+            {tiersFallback && <p className="hint">{t('media.separate.fallbackNote')}</p>}
+
+            <button
+              type="button"
+              className="primary"
+              onClick={() => void startSeparate()}
+              disabled={(!project.audio_path && !project.video_path) || !!separateJobId}
+            >
+              {separateJobId ? t('media.separate.running') : t('media.separate.start')}
+            </button>
+            {separateError && <p className="error">{separateError}</p>}
+
+            <div className="kvm-media-manual">
+              <span>{t('media.separate.manualTitle')}</span>
+              <label>
+                {t('media.track.vocals')}
+                <input
+                  ref={vocalsFileRef}
+                  type="file"
+                  accept="audio/*"
+                  onChange={(e) => void handleImport('vocals', e.target.files?.[0])}
+                />
+              </label>
+              <label>
+                {t('media.track.instrumental')}
+                <input
+                  ref={instrumentalFileRef}
+                  type="file"
+                  accept="audio/*"
+                  onChange={(e) => void handleImport('instrumental', e.target.files?.[0])}
+                />
+              </label>
+              <label title={t('media.separate.drumsHint')}>
+                {t('media.track.drums')}
+                <input
+                  ref={drumsFileRef}
+                  type="file"
+                  accept="audio/*"
+                  onChange={(e) => void handleImport('drums', e.target.files?.[0])}
+                />
+              </label>
+              {(importingKind === 'vocals' || importingKind === 'instrumental' || importingKind === 'drums') && (
+                <span className="muted">{t('media.local.importing')}</span>
+              )}
+            </div>
+          </section>
         </div>
-        {tiersFallback && (
-          <p className="hint">读取不到后端的档位列表，正在用内置档位，提示文案可能不准。</p>
-        )}
 
-        <button
-          type="button"
-          onClick={() => void startSeparate()}
-          disabled={(!project.audio_path && !project.video_path) || !!separateJobId}
-        >
-          开始分离
-        </button>
+        {/* ---- 右：画面预览 + 音轨卡片 ---- */}
+        <div className="kvm-media__col">
+          <MediaVideoPreview project={project} onPlayback={claimPlayback} />
 
-        <div className="media-panel__manual">
-          <span className="muted">或导入已分离好的音轨：</span>
-          <label className="media-panel__file-label">
-            人声
-            <input
-              ref={vocalsFileRef}
-              type="file"
-              accept="audio/*"
-              onChange={(e) => void handleImport('vocals', e.target.files?.[0])}
-            />
-          </label>
-          <label className="media-panel__file-label">
-            伴奏
-            <input
-              ref={instrumentalFileRef}
-              type="file"
-              accept="audio/*"
-              onChange={(e) => void handleImport('instrumental', e.target.files?.[0])}
-            />
-          </label>
-          <label className="media-panel__file-label" title="用于节拍检测（引导旋律），跳过完整分离时可以只导入这一轨">
-            鼓声
-            <input
-              ref={drumsFileRef}
-              type="file"
-              accept="audio/*"
-              onChange={(e) => void handleImport('drums', e.target.files?.[0])}
-            />
-          </label>
-          {(importingKind === 'vocals' ||
-            importingKind === 'instrumental' ||
-            importingKind === 'drums') && <span className="muted">导入中…</span>}
+          <div className="kvm-media-tracks">
+            {(() => {
+              // 只在真实存在的 stem 之间排队（空位不占用队号，见组件头部注释），
+              // 顺序固定为原始音频→人声→伴奏→鼓声。
+              const existing = TRACK_ORDER.filter((k) => trackPath(project, k))
+              return TRACK_ORDER.map((kind) => {
+                const existingIndex = existing.indexOf(kind)
+                return (
+                  <MediaTrackCard
+                    key={kind}
+                    projectId={project.id}
+                    kind={kind}
+                    label={t(`media.track.${kind}`)}
+                    path={trackPath(project, kind)}
+                    waveTurn={existingIndex >= 0 && existingIndex <= waveSettledCount}
+                    onWaveSettled={handleWaveSettled}
+                    onPlayback={claimPlayback}
+                  />
+                )
+              })
+            })()}
+          </div>
         </div>
-
-        {separateError && <p className="error">{separateError}</p>}
-        {importError && <p className="error">{importError}</p>}
-      </section>
+      </div>
     </div>
   )
 }
+
+function trackPath(project: Project, kind: TrackKind): string | null {
+  switch (kind) {
+    case 'audio':
+      return project.audio_path
+    case 'vocals':
+      return project.vocals_path
+    case 'instrumental':
+      return project.instrumental_path
+    case 'drums':
+      return project.drums_path
+  }
+}
+
+const CSS = `
+.kvm-media {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+}
+.kvm-media__grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 320px) 1fr;
+  gap: var(--sp-5);
+  align-items: start;
+}
+@media (max-width: 720px) {
+  .kvm-media__grid { grid-template-columns: 1fr; }
+}
+.kvm-media__col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+  min-width: 0;
+}
+
+.kvm-media-acq {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.kvm-media-acq--focus {
+  outline: 1px solid var(--accent);
+  outline-offset: var(--sp-2);
+  border-radius: var(--r-md);
+}
+
+.kvm-media-row {
+  display: flex;
+  gap: var(--sp-1);
+}
+.kvm-media-row input[type='text'] {
+  flex: 1 1 auto;
+}
+
+.kvm-media-dropzone {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  border: 1px dashed var(--stroke-strong);
+  border-radius: var(--r-md);
+  color: var(--fg-2);
+  cursor: pointer;
+  font-size: var(--fs-sm);
+}
+.kvm-media-dropzone:hover,
+.kvm-media-dropzone--over {
+  border-color: var(--accent);
+  background: var(--accent-weak);
+  color: var(--fg);
+}
+.kvm-media-dropzone input[type='file'] {
+  display: none;
+}
+.kvm-media-dropzone__icon {
+  font-size: var(--fs-xl);
+  color: var(--fg-3);
+  flex: 0 0 auto;
+}
+
+.kvm-media-status {
+  display: flex;
+  gap: var(--sp-1);
+  flex-wrap: wrap;
+}
+
+.kvm-media-tiers {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+.kvm-media-tier {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border: var(--hairline);
+  border-radius: var(--r-md);
+  cursor: pointer;
+  font-size: var(--fs-sm);
+}
+.kvm-media-tier:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--bg-surface);
+}
+.kvm-media-tier__label {
+  font-weight: 600;
+  color: var(--fg);
+}
+.kvm-media-tier__badge {
+  font-size: var(--fs-xs);
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: var(--r-pill);
+  padding: 0 var(--sp-1);
+}
+.kvm-media-tier__hint {
+  margin-left: auto;
+  color: var(--fg-2);
+}
+
+.kvm-media-manual {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  font-size: var(--fs-sm);
+  color: var(--fg-2);
+  padding-top: var(--sp-2);
+  border-top: 1px dashed var(--stroke);
+}
+.kvm-media-manual label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+/* ---- 画面预览 ---- */
+
+.kvm-media-preview {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.kvm-media-preview__frame {
+  position: relative;
+  /* 预览呈现的是素材本身，不是界面外壳——这里刻意用真黑而不是 --bg-canvas，
+     与对轴舞台 Preview.tsx 的画面区保持同一观感
+     （docs/ui-redesign.md §六："预览区域不套用界面配色"）。 */
+  background: #000;
+  aspect-ratio: 16 / 9;
+  border-radius: var(--r-lg);
+  overflow: hidden;
+}
+.kvm-media-preview__video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+  background: #000;
+}
+.kvm-media-preview__empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg-3);
+  font-size: var(--fs-sm);
+  text-align: center;
+  padding: var(--sp-4);
+}
+.kvm-media-preview__meta {
+  display: flex;
+  gap: var(--sp-1);
+  flex-wrap: wrap;
+}
+.kvm-media-preview__proxybar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+}
+
+/* ---- 音轨卡片 ---- */
+
+.kvm-media-tracks {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.kvm-media-track {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  background: var(--bg-surface);
+  border: var(--hairline);
+  border-radius: var(--r-lg);
+}
+.kvm-media-track--empty {
+  opacity: 0.55;
+}
+.kvm-media-track__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.kvm-media-track__play {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--r-pill);
+  border: none;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: var(--fs-lg);
+  padding: 0;
+}
+.kvm-media-track__play:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+.kvm-media-track__play:disabled {
+  background: var(--bg-raise);
+  color: var(--fg-3);
+}
+.kvm-media-track__label {
+  font-weight: 600;
+  color: var(--fg);
+  flex: 0 0 auto;
+}
+.kvm-media-track__stats {
+  display: flex;
+  gap: var(--sp-3);
+  margin-left: auto;
+  color: var(--fg-2);
+  font-size: var(--fs-sm);
+}
+.kvm-media-track__wave {
+  height: 44px;
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  background: var(--bg-raise);
+}
+.kvm-media-track__wave-status {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg-3);
+  font-size: var(--fs-xs);
+}
+`
