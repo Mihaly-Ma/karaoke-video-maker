@@ -399,6 +399,15 @@ _NETWORK_ERRORS = (requests.RequestException, KeyError, ValueError)
 
 
 def _to_match(hit: dict) -> TrackMatch:
+    """QQ 音乐的搜索接口（smartbox / soso）只给曲目元信息，不含歌词正文。
+
+    实测同一批搜索结果里，即便都来自 QQ 音乐，也存在只有行级 LRC、
+    甚至完全没有歌词的曲目——"QQ 音乐 QRC 是逐字+带注音的主源"是对这个
+    provider **整体能力**的描述，不是对**每一条搜索结果**的保证。之前这里
+    无条件给每条结果标 `granularity="word", has_ruby=True`，前端因此会显示
+    一个不可信的"含注音"徽章，取回后经常发现 `has_ruby=False`。
+    诚实的答案是 unknown/None，真实值等 `fetch()` 解析正文后才知道。
+    """
     interval = hit.get("interval")
     return TrackMatch(
         provider="qq",
@@ -407,9 +416,9 @@ def _to_match(hit: dict) -> TrackMatch:
         artist=hit.get("singer", ""),
         album=hit.get("album", ""),
         duration_ms=int(interval) * 1000 if interval else 0,
-        granularity="word",
-        has_ruby=True,
-        note="QQ音乐 QRC：粒度与是否含注音以 /preview 实际解析结果为准",
+        granularity="unknown",
+        has_ruby=None,
+        note="QQ音乐：粒度与是否含注音需拉取歌词正文后才能确认，见 /preview",
     )
 
 

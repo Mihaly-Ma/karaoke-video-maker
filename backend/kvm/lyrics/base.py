@@ -12,9 +12,23 @@ provider **只负责"取回并归一化"，不负责选择**——把候选摆�
 不自动替他选。候选必须暴露 `granularity`（逐字/句级/纯文本）与 `has_ruby`
 （是否自带假名读音轨），这两项决定用户还要不要手工打轴/注音。
 
-`search()` 阶段还没有下载正文，`granularity`/`has_ruby` 只能是 provider
-按自身已知能力给出的**保守估计**；真实值要等 `fetch()` 解析出正文后才能
-确认（路由层的 `/preview`、`/apply` 用的就是 `fetch()` 的结果）。
+## `search()` 阶段的诚实边界（重要，别再猜了）
+
+`search()` 拿到的通常只是曲目元信息（歌手/时长/songmid 之类），**不含歌词正文**，
+因此在这个阶段不可能真正知道该曲是否有假名注音、也不知道真实粒度——之前的实现
+在这里"自信地"给 QQ 音乐的每条搜索结果都标 `granularity="word", has_ruby=True`，
+等于把"这个 provider 理论上支持逐字+注音"当成了"这一条结果确实有"，
+两者不是一回事：同一 provider 下不同曲目、乃至没有 QRC 只有 LRC 的曲目都存在。
+这正是 CLAUDE.md §5.2 铁律要防的事——**粒度可以被提升，不能被伪造**。
+
+因此：**`search()` 不确定就必须诚实给出"未知"**（`granularity="unknown"` /
+`has_ruby=None`），不能替 `fetch()` 打包票。只有 provider 确实能从搜索接口本身
+拿到可靠信息时（比如某个源本来就只提供行级歌词，那从"是这个源"就能确定
+`granularity="line"`），才允许在 `search()` 阶段给出非 unknown 的确定值。
+
+真实值要等 `fetch()` 解析出正文后才能确认（路由层的 `/preview`、`/apply`
+用的就是 `fetch()` 的结果，那里的 `granularity`/`has_ruby` 永远是解析产物，
+不是估计）。
 """
 
 from __future__ import annotations
@@ -26,8 +40,11 @@ from typing import TYPE_CHECKING, Literal
 if TYPE_CHECKING:
     from kvm.api.schemas import LineDTO
 
-Granularity = Literal["word", "line", "plain"]
-"""与 `schemas.LyricCandidate.granularity` 完全一致的取值集合，两处必须同步。"""
+Granularity = Literal["word", "line", "plain", "unknown"]
+"""与 `schemas.LyricCandidate.granularity` 完全一致的取值集合，两处必须同步。
+
+`unknown` 专用于 `search()` 阶段"确实不知道"的诚实状态，`fetch()`/`ParsedLyric`
+产出的粒度是实际解析结果，不应该是 `unknown`。"""
 
 
 class LyricProviderError(RuntimeError):
@@ -49,16 +66,25 @@ class TrackMatch:
     artist: str
     album: str = ""
     duration_ms: int = 0
-    granularity: Granularity = "line"
-    """search 阶段的保守估计，真实粒度以 fetch() 解析结果为准。"""
-    has_ruby: bool = False
+    granularity: Granularity = "unknown"
+    """search 阶段确实知道时才给确定值，不知道就是 `unknown`——
+    不能拿"这个 provider 理论上支持什么粒度"冒充"这一条结果真的是什么粒度"。
+    真实粒度以 fetch() 解析结果为准。"""
+    has_ruby: bool | None = None
+    """是否带假名注音轨。`None` = search 阶段无法确定（多数 provider 的搜索接口
+    不含歌词正文，天然不知道）；`True`/`False` = 确实知道（provider 从搜索接口
+    本身就能可靠判断，或者该源本来就不可能有注音）。真实值以 fetch() 为准。"""
     has_translation: bool = False
     note: str = ""
 
 
 @dataclass(slots=True)
 class ParsedLyric:
-    """fetch() 后已归一化解析的歌词正文。"""
+    """fetch() 后已归一化解析的歌词正文。
+
+    这里的 `granularity`/`has_ruby` 是**实际解析结果**，不是估计——
+    fetch() 已经拿到正文，没有"不知道"的余地，因此不使用 `unknown`/`None`。
+    """
 
     lines: list[LineDTO] = field(default_factory=list)
     granularity: Granularity = "line"

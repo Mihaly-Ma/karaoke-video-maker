@@ -57,6 +57,31 @@ lyrics = [
     "pycryptodome>=3.20",
 ]
 
+# 开发工具链（CLAUDE.md §11 命令表：ruff / pyright / pytest）。
+# 用 PEP 735 `[dependency-groups]` 而不是 `[project.optional-dependencies]`：
+# optional-dependencies 是给"安装本包的人"选装的功能特性（api/fonts/audio/...），
+# 而 pytest/ruff/pyright 只是本仓库自己的开发工具，不该出现在发给用户的包元数据
+# 的 extras 列表里，也不该能被 `pip install karaoke-video-maker[dev]` 装到别人的
+# 环境中。这是 uv 当前推荐做法，`uv sync` 默认就会装上这个组，不需要额外参数。
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.8",
+    "pyright>=1.1.380",
+]
+
+[tool.pyright]
+pythonVersion = "3.12"
+# 本项目不做 editable install，`kvm` 包靠 tests/*.py 开头手写的
+# `sys.path.insert(0, backend)` 才能被导入（见 tests/test_importer.py 等）。
+# pyright 不会执行那段运行时代码，不显式声明就会把每一个 `from kvm.xxx import ...`
+# 报成 reportMissingImports——这不是真实的类型问题，只是没告诉它去哪儿找包。
+extraPaths = ["backend"]
+# workspace/ 是运行时产物/实验数据目录（.gitignore 已排除，CLAUDE.md 明确写它
+# "不随仓库分发"），只在本机存在、别的检出/CI 上没有，把它纳入类型检查
+# 只会得到一堆因环境而异、无法长期维护的错误，因此排除在外。
+exclude = ["workspace"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
