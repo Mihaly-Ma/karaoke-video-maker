@@ -29,14 +29,16 @@ from __future__ import annotations
 
 import contextlib
 import json
+import mimetypes
 import subprocess
 import threading
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request, status
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from kvm.api.schemas import (
     AssResponse,
     ExportArtifactDTO,
@@ -406,6 +408,70 @@ def export_artifacts(project_id: str, request: Request) -> list[ExportArtifactDT
         return list_exports(_store(request), project_id)
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=exc.args[0]) from exc
+
+
+def _download_filename(project: ProjectDTO, artifact: ExportArtifactDTO, path: Path) -> str:
+    """给浏览器的落盘文件名。
+
+    磁盘上的名字是 `{工程id}_{任务id}.mp4`，对人毫无意义——用户下完一堆成片，
+    单看文件名分不出哪份是 OFF VOCAL、哪份带引导声。这里改用「曲名 歌手 变体名」，
+    正是产物列表里用来区分它们的那三样东西。
+    """
+    parts = [project.title.strip(), project.artist.strip(), artifact.variant_label]
+    name = " ".join(p for p in parts if p) or path.stem
+    # 路径分隔符与控制字符必须去掉：它们会让下载端把文件写到别处，或写不出来
+    cleaned = "".join(" " if ch in '/\\:*?"<>|' or ord(ch) < 32 else ch for ch in name)
+    return f"{cleaned.strip() or path.stem}{path.suffix}"
+
+
+@router.get("/exports/{project_id}/{artifact_id}/download")
+def download_export(project_id: str, artifact_id: str, request: Request) -> FileResponse:
+    """下载一条已登记的成片。
+
+    ## 为什么按 artifact_id 查而不是收一个路径
+
+    调用方**只能报 id**，真实路径由服务端从该工程自己的 `exports` 里查出来。
+    收路径参数等于把「读服务器上任意文件」开成公开接口，而这个接口本身没有
+    任何鉴权可言（桌面应用的后端就跑在 127.0.0.1 上）。id 来自导出任务的
+    job_id，前端本来就是从 `GET /exports/{project_id}` 拿到的，没有额外成本。
+
+    ## Range 与落盘
+
+    成片实测 527 MB，必须支持断点续传与拖动——`FileResponse` 自带 Range 处理，
+    不要改成一次性读进内存再返回。`Content-Disposition: attachment` 让浏览器
+    落成文件而不是在标签页里播起来；`filename*` 用 RFC 5987 的 UTF-8 形式，
+    否则中日文曲名会在响应头里变成乱码或直接被丢掉，只留下 ASCII 兜底名。
+    """
+    project = _get_project(request, project_id)
+    artifact = next((item for item in project.exports if item.id == artifact_id), None)
+    if artifact is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"工程 {project_id} 里没有登记 id 为 {artifact_id} 的成片",
+        )
+
+    path = Path(artifact.path)
+    if not path.is_file():
+        # 用户随时会把成片挪走或删掉。这不是服务端故障，别让它变成 500：
+        # 说清楚"文件没了"，前端刷新一次列表这条记录就会被剔除。
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"成片文件已不存在（可能已被移动或删除）：{path.name}",
+        )
+
+    filename = _download_filename(project, artifact, path)
+    ascii_fallback = path.name  # 磁盘名是 `{id}_{job}.mp4`，天然纯 ASCII
+    disposition = (
+        f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{quote(filename, safe='')}"
+    )
+    return FileResponse(
+        str(path),
+        media_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+        headers={
+            "Content-Disposition": disposition,
+            "Cross-Origin-Resource-Policy": "cross-origin",
+        },
+    )
 
 
 def _export_duration_ms(ffmpeg: str, out_path: Path, dto: ProjectDTO, req: RenderRequest) -> int:

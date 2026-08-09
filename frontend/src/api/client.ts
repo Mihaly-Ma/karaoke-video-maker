@@ -356,3 +356,15 @@ export const mediaUrl = (
   projectId: string,
   kind: 'video' | 'proxy' | 'audio' | 'instrumental' | 'vocals' | 'drums',
 ) => `${BASE}/media/file/${projectId}/${kind}`
+
+/**
+ * 成片下载直链（后端带 `Content-Disposition: attachment`）。
+ *
+ * 只认 `artifactId`，不接受路径：真实路径由后端从该工程自己的 `exports` 里查，
+ * 收路径参数等于把"读服务器上任意文件"开成公开接口。
+ *
+ * 用 `<a href download>` 消费它，不要 `fetch` 成 Blob——成片实测 527 MB，
+ * 走 Blob 等于把整片读进内存，而直链让浏览器自己流式落盘（后端支持 Range）。
+ */
+export const exportDownloadUrl = (projectId: string, artifactId: string) =>
+  `${BASE}/render/exports/${projectId}/${artifactId}/download`
