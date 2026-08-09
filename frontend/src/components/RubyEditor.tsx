@@ -25,7 +25,7 @@
  * 切分单位，但那是对轴那一步的事，在这里摆一条波形只会抢走屏幕。
  */
 
-import { LockOutlined } from '@ant-design/icons'
+import { EyeInvisibleOutlined, EyeOutlined, LockOutlined } from '@ant-design/icons'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 
@@ -68,13 +68,55 @@ export function RubyEditor({ className }: RubyEditorProps) {
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState('')
   const [phonetics, setPhonetics] = useState<Record<string, string>>({})
+  const [showMetadata, setShowMetadata] = useState(false)
 
   const paperRef = useRef<HTMLDivElement | null>(null)
   /** Esc 取消时不要让紧随其后的 blur 把草稿写进去 */
   const cancelRef = useRef(false)
 
   const projectId = project?.id ?? ''
-  const lineUnits = useMemo(() => buildProjectUnits(project), [project])
+
+  const metadataCount = useMemo(
+    () => (project?.lines ?? []).filter((l) => l.is_metadata).length,
+    [project],
+  )
+
+  /**
+   * 正文里显示哪些行。
+   *
+   * 制作名单行（歌词源塞进正文的「词：xxx」「编曲：xxx」，CLAUDE.md §6.1）默认不显示：
+   * 它们不需要注音，混在歌词里只是噪音，还会把「待检查」清单塞满「编曲」「制作人」
+   * 这类根本不是歌词的条目，把真正要复核的当て字淹掉。
+   *
+   * 但**不能让它们彻底消失**：`is_metadata` 是自动判定，必然有误判，而被误判的那一行
+   * 如果在这一步完全看不见，用户就无从发现（CLAUDE.md §2.5：每个自动环节都要有手工旁路）。
+   * 出口是顶栏那个带数量的开关。
+   */
+  const visibleLines = useMemo(
+    () => (project?.lines ?? []).filter((l) => showMetadata || !l.is_metadata),
+    [project, showMetadata],
+  )
+
+  /**
+   * 行号按工程原序编，不跟着筛选重排。
+   * 隐藏几行就让编号跳一号，那一跳本身就是"这里还有东西"的提示，
+   * 也让这里的行号与对轴、导出各处说的是同一件事。
+   */
+  const lineNo = useMemo(() => {
+    const m = new Map<string, number>()
+    ;(project?.lines ?? []).forEach((l, i) => m.set(l.id, i + 1))
+    return m
+  }, [project])
+
+  // 统计、待检查、候选读音全部只看可见行，三处与正文永远说同一件事
+  const lineUnits = useMemo(() => buildProjectUnits(visibleLines), [visibleLines])
+
+  // 左侧行列表仍然列出制作名单行。从那里选中一行、正文里却找不到它，
+  // 比多看几行噪音更让人困惑——这种情况下自动把它们显示出来。
+  useEffect(() => {
+    if (showMetadata || selection.kind === 'none') return
+    if (project?.lines.find((l) => l.id === selection.lineId)?.is_metadata) setShowMetadata(true)
+  }, [selection, project, showMetadata])
 
   // 发音形的本地覆盖层。换工程要整批换掉，否则会把上一首歌的读音带过来
   useEffect(() => {
@@ -98,11 +140,13 @@ export function RubyEditor({ className }: RubyEditorProps) {
   }, [selection, selectedKey, lineUnits])
 
   const selLineId = selection.kind === 'none' ? null : selection.lineId
+  // 依赖里带上 showMetadata：选中的若是制作名单行，它是上面那个 effect 展开之后
+  // 才出现在 DOM 里的，只依赖 selLineId 会在它还不存在时查一次然后再不重试
   useEffect(() => {
     if (!selLineId) return
     const el = paperRef.current?.querySelector(`[data-line="${selLineId}"]`)
     if (el instanceof HTMLElement) el.scrollIntoView({ block: 'nearest' })
-  }, [selLineId])
+  }, [selLineId, showMetadata])
 
   const review = useMemo(() => {
     const out: RubyUnit[] = []
@@ -290,24 +334,43 @@ export function RubyEditor({ className }: RubyEditorProps) {
           </span>
 
           <span className="kvm-ruby__spacer" />
+
+          {/* 制作名单行的出口。没有这种行时连按钮都不出现，免得多一个永远点不出东西的开关 */}
+          {metadataCount > 0 && (
+            <button
+              type="button"
+              className="small kvm-ruby__metatoggle"
+              aria-pressed={showMetadata}
+              data-on={showMetadata || undefined}
+              onClick={() => setShowMetadata((v) => !v)}
+            >
+              {showMetadata ? <EyeOutlined /> : <EyeInvisibleOutlined />}
+              {t('ruby.metadata.toggle', { n: metadataCount })}
+            </button>
+          )}
+
           {notice && <span className="kvm-ruby__notice">{notice}</span>}
           {storeError && <span className="error">{storeError}</span>}
         </div>
 
         <div className="kvm-ruby__paper" ref={paperRef} style={paperFont(project.style.font_name)}>
           {project.lines.length === 0 && <p className="kvm-ruby__muted">{t('ruby.empty.lines')}</p>}
+          {project.lines.length > 0 && visibleLines.length === 0 && (
+            <p className="kvm-ruby__muted">{t('ruby.empty.allMetadata')}</p>
+          )}
 
-          {project.lines.map((line, i) => {
+          {visibleLines.map((line) => {
             const units = lineUnits.get(line.id) ?? []
             return (
               <div
                 key={line.id}
                 className="kvm-ruby__line"
                 data-line={line.id}
+                data-meta={line.is_metadata || undefined}
                 data-active={selLineId === line.id || undefined}
                 style={paletteVars(project.palettes[line.voice_part] ?? project.palettes['main'])}
               >
-                <span className="kvm-ruby__no num">{i + 1}</span>
+                <span className="kvm-ruby__no num">{lineNo.get(line.id)}</span>
                 <span className="kvm-ruby__text">
                   {units.length === 0 && <span className="kvm-ruby__muted">{t('ruby.empty.line')}</span>}
                   {units.map((u) => {
@@ -457,6 +520,9 @@ const CSS = `
   color: var(--fg-2);
 }
 .kvm-ruby__spacer { flex: 1 1 auto; }
+.kvm-ruby__metatoggle { flex: 0 0 auto; }
+/* 打开时按"手工干预"着色：这是一次显式的额外显示，不是默认状态 */
+.kvm-ruby__metatoggle[data-on] { color: var(--src-manual); border-color: var(--src-manual); }
 .kvm-ruby__warn { color: var(--warn); }
 .kvm-ruby__notice { color: var(--ok); }
 .kvm-ruby__muted { color: var(--fg-3); margin: 0; }
@@ -502,6 +568,8 @@ const CSS = `
   border-radius: var(--r-md);
 }
 .kvm-ruby__line[data-active] { background: var(--accent-weak); }
+/* 展开出来的制作名单行压暗：它们在这一步不是工作对象，只是拿来核对判定对不对 */
+.kvm-ruby__line[data-meta] { opacity: 0.6; }
 .kvm-ruby__no {
   flex: 0 0 auto;
   width: var(--sp-6);

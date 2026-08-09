@@ -6,7 +6,8 @@
  * 规则全部建立在 lib/kana.ts 上，这里不重复实现任何假名知识。
  */
 
-import type { Line, Project, RubySpan } from '../api/types'
+import type { Line, RubySpan } from '../api/types'
+import { useProject } from '../state/projectStore'
 import {
   buildRenderGroups,
   charClass,
@@ -154,10 +155,16 @@ export function buildUnits(line: Line): RubyUnit[] {
   return units
 }
 
-/** 整首歌的切分结果，按行 id 索引。Map 保持行序，待检查清单直接按它遍历。 */
-export function buildProjectUnits(project: Project | null): Map<string, RubyUnit[]> {
+/**
+ * 给定这些行的切分结果，按行 id 索引。Map 保持行序，待检查清单直接按它遍历。
+ *
+ * 收的是**行数组而不是整个工程**：注音舞台默认把制作名单行排除在正文之外，
+ * 而统计、待检查清单、候选读音必须跟着同一份可见集合走。若这里仍按整个工程算，
+ * 就会出现「待检查 8 处」而正文里一处也找不到——用户没有任何办法把它清空。
+ */
+export function buildProjectUnits(lines: readonly Line[]): Map<string, RubyUnit[]> {
   const m = new Map<string, RubyUnit[]>()
-  for (const line of project?.lines ?? []) m.set(line.id, buildUnits(line))
+  for (const line of lines) m.set(line.id, buildUnits(line))
   return m
 }
 
@@ -266,10 +273,10 @@ export function readingCandidates(
 /**
  * 切换某段注音的锁定标记（CLAUDE.md §4.4：自动重算只覆盖 `locked=false` 的项）。
  *
- * **这里直接打后端而不走 `api/client.ts` 的 `setLock`**：那个函数把单条目标平铺进
- * 请求体（`{project_id, target, line_id, ruby_start, ruby_end, locked}`），而
- * `POST /api/editor/lock` 要的是 `{project_id, items:[{line_id, target, ruby_range, locked}]}`，
- * 发过去只会拿到 422。client.ts 由别处维护，等它修好后本函数删掉即可。
+ * **走 store 而不是直接打后端。** 曾经这里自己 fetch，是为了绕开 `client.ts` 里
+ * 形状写错的 `setLock`；那个 bug 修掉之后绕行就只剩坏处——store 每次写入后会
+ * 重新拉一次历史深度，绕过去撤销/重做按钮就不会刷新，锁一次注音后撤销按钮的
+ * 可用状态要滞后一拍才对得上。
  */
 export async function setRubyLock(
   projectId: string,
@@ -277,24 +284,12 @@ export async function setRubyLock(
   range: [number, number],
   locked: boolean,
 ): Promise<void> {
-  const resp = await fetch('/api/editor/lock', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      project_id: projectId,
-      items: [{ line_id: lineId, target: 'ruby', ruby_range: range, locked }],
-    }),
-  })
-  if (resp.ok) return
-  let detail = `${resp.status} ${resp.statusText}`
-  try {
-    const body: unknown = await resp.json()
-    if (body && typeof body === 'object' && 'detail' in body) {
-      const d = (body as { detail: unknown }).detail
-      detail = typeof d === 'string' ? d : JSON.stringify(d)
-    }
-  } catch {
-    /* 响应体不是 JSON 时保留状态行 */
-  }
-  throw new Error(detail)
+  // store 只认它当前打开的那个工程。对不上说明调用方拿的是过期的 projectId，
+  // 继续写下去会把锁打到别的工程上
+  if (useProject.getState().project?.id !== projectId) return
+  await useProject.getState().setLock({ target: 'ruby', line_id: lineId, ruby_range: range, locked })
+  // store 把失败收进自己的 error 字段（其余动作都靠它显示错误），这里再抛一次，
+  // 让调用方原有的"就地提示"路径继续成立
+  const err = useProject.getState().error
+  if (err) throw new Error(err)
 }

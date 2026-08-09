@@ -3,6 +3,7 @@ export const ruby: Record<string, string> = {
   'ruby.empty.project': '还没有打开工程',
   'ruby.empty.lines': '这个工程还没有歌词',
   'ruby.empty.line': '这一行没有文字',
+  'ruby.empty.allMetadata': '这些行全是制作名单',
 
   // 顶部统计与图例
   'ruby.stat.spans': '{n} 处注音',
@@ -13,6 +14,8 @@ export const ruby: Record<string, string> = {
   'ruby.src.guess': '推断',
   'ruby.src.missing': '缺注音',
   'ruby.metadata': '制作名单',
+  // 制作名单行默认不进正文，这个开关是它们唯一的出口，所以要带上数量
+  'ruby.metadata.toggle': '制作名单 {n} 行',
 
   // 辅助栏
   'ruby.inspect.title': '选中词',

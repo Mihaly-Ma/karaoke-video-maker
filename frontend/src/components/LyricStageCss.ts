@@ -15,6 +15,12 @@ export const LYRIC_STAGE_CSS = `
 /*
  * 舞台自身负责铺满：外壳（App.tsx）已不再套限宽容器，本舞台要的是左窄右宽、
  * 占满高度的工作区——候选靠窄列扫视、歌词靠大区域判断版本。
+ *
+ * overflow: hidden 是本舞台的设计意图：整页不滚，内部分区各自滚
+ * （左候选列表一条、右歌词正文一条）。整页一起滚会让底部的元信息栏与
+ * 「使用」按钮跟着歌词滚出屏幕，而那正是看完歌词后要点的东西。
+ * 代价是高度链必须一路可收缩——任何一层漏掉 min-height: 0，多出来的高度
+ * 都会在这里被裁掉且无法滚到。下面每个纵向容器的 min-height: 0 都是为此而写。
  */
 .stage--scroll:has(> .lyr-stage) { padding: 0; overflow: hidden; }
 
@@ -113,7 +119,18 @@ export const LYRIC_STAGE_CSS = `
 
 /* ---- 右侧主区 ---- */
 
-.lyr-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+/*
+ * min-height: 0 不是保险起见，是这一层必须有的。
+ *
+ * 全文编辑态里 .lyr-main 是 .lyr-stage（纵向）的直接子项，落在主轴上；
+ * flex 子项的 min-height 默认 auto，即"不得小于内容的最小高度"。歌词有
+ * 60 行时这个最小高度是三千多像素，.lyr-main 于是撑到 3449px，.lyr-film
+ * 跟着一起被撑开（clientHeight === scrollHeight），永远不会变成滚动容器，
+ * 溢出一路上交到 .stage 被 overflow: hidden 裁掉——表现就是"歌词滚不动、
+ * 后半首看不见"。选源态没暴露这个问题，只是因为那里 .lyr-main 落在
+ * .lyr-body（横向）的交叉轴上，高度由 stretch 给定，与内容无关。
+ */
+.lyr-main { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 
 .lyr-bar {
   flex: 0 0 auto;
