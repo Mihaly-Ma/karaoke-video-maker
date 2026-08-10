@@ -1,0 +1,15 @@
+{
+  "name": "karaoke-video-maker",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Tauri 外壳的构建入口。前端本体在 frontend/，这里只放壳相关的工具链。",
+  "scripts": {
+    "tauri": "tauri",
+    "shell:dev": "tauri dev",
+    "shell:build": "tauri build --config src-tauri/tauri.bundle.conf.json",
+    "shell:probe": "tauri build --debug --config src-tauri/tauri.probe.conf.json"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4"
+  }
+}

@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>WebView 能力探针</title>
+    <style>
+      body {
+        font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+        margin: 16px;
+        background: #14161a;
+        color: #e6e8ec;
+      }
+      h1 {
+        font-size: 15px;
+        margin: 0 0 12px;
+      }
+      pre {
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+      .ok {
+        color: #4ade80;
+      }
+      .bad {
+        color: #f87171;
+      }
+      video {
+        width: 240px;
+        display: block;
+        margin-top: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Tauri WebView 能力探针</h1>
+    <pre id="out">正在检测…</pre>
+    <video id="v" muted playsinline></video>
+    <script type="module">
+      // 探针服务器端口写死，和启动 probe_server.py 时给的那个保持一致（见其文档字符串）。
+      const PROBE_SERVER = 'http://127.0.0.1:8321'
+      const out = document.getElementById('out')
+      const results = {}
+      const lines = []
+      const log = (k, v) => {
+        results[k] = v
+        const good = v === true || (v && v.ok === true)
+        lines.push(`${good ? '✅' : v === 'skip' ? '·' : '❌'} ${k}: ${JSON.stringify(v)}`)
+        out.textContent = lines.join('\n')
+      }
+
+      const timeout = (p, ms, label) =>
+        Promise.race([
+          p,
+          new Promise((r) => setTimeout(() => r({ ok: false, error: `超时 ${ms}ms @ ${label}` }), ms)),
+        ])
+
+      // ---- A. 跨源隔离 / SharedArrayBuffer（JASSUB 的硬前提） ----
+      log('userAgent', navigator.userAgent)
+      log('location.origin', location.origin)
+      // 安全上下文是 SAB 的前置条件之一；自定义协议是否被判为可信只能实测
+      log('isSecureContext', globalThis.isSecureContext === true)
+      log('crossOriginIsolated', globalThis.crossOriginIsolated === true)
+      log('SharedArrayBuffer.exists', typeof SharedArrayBuffer !== 'undefined')
+      try {
+        const sab = new SharedArrayBuffer(1024)
+        log('SharedArrayBuffer.alloc', { ok: sab.byteLength === 1024 })
+      } catch (e) {
+        log('SharedArrayBuffer.alloc', { ok: false, error: String(e) })
+      }
+      // 这条才是 JASSUB 的真正判据：它的 wasm 是带 pthread 编译的，
+      // glue 里写死了 `new WebAssembly.Memory({..., shared: true})`，
+      // 没有共享内存就根本实例化不了——不是"退回单线程"，是完全跑不起来。
+      try {
+        const mem = new WebAssembly.Memory({ initial: 1, maximum: 2, shared: true })
+        log('WebAssembly.Memory.shared', {
+          ok: true,
+          bufferIsSAB: mem.buffer.constructor.name,
+        })
+      } catch (e) {
+        log('WebAssembly.Memory.shared', { ok: false, error: String(e) })
+      }
+      log('Atomics.wait', typeof Atomics !== 'undefined' && typeof Atomics.wait === 'function')
+
+      // ---- B. rVFC（播放头驱动，D15 明确不用 video.currentTime） ----
+      log('rVFC.exists', 'requestVideoFrameCallback' in HTMLVideoElement.prototype)
+
+      // ---- C. OffscreenCanvas（JASSUB 的渲染路径） ----
+      log('OffscreenCanvas.exists', typeof OffscreenCanvas !== 'undefined')
+      log(
+        'transferControlToOffscreen.exists',
+        'transferControlToOffscreen' in HTMLCanvasElement.prototype,
+      )
+
+      // ---- D. 同源 worker 连起 4 次（复刻 WebKit 的 304/COEP 坑） ----
+      const spawnWorker = (url, type) =>
+        new Promise((resolve) => {
+          let w
+          const t = setTimeout(() => resolve('超时'), 4000)
+          try {
+            w = new Worker(url, { type })
+          } catch (e) {
+            clearTimeout(t)
+            resolve('构造抛异常:' + String(e))
+            return
+          }
+          w.onmessage = () => {
+            clearTimeout(t)
+            w.terminate()
+            resolve('ok')
+          }
+          w.onerror = (e) => {
+            clearTimeout(t)
+            w.terminate()
+            resolve('❌' + (e.message ? ':' + e.message : ''))
+          }
+        })
+
+      for (const type of ['classic', 'module']) {
+        const seq = []
+        for (let i = 0; i < 4; i++) seq.push(await spawnWorker('/worker.js', type))
+        log(`worker.appProtocol.${type}.x4`, { ok: seq.every((s) => s === 'ok'), seq })
+      }
+
+      // ---- E. app 协议的响应头 / 有没有条件请求（304 缺 COEP 是否会重现） ----
+      try {
+        const r1 = await fetch('/worker.js', { cache: 'reload' })
+        const h1 = {
+          status: r1.status,
+          etag: r1.headers.get('etag'),
+          lastModified: r1.headers.get('last-modified'),
+          coep: r1.headers.get('cross-origin-embedder-policy'),
+          coop: r1.headers.get('cross-origin-opener-policy'),
+          cacheControl: r1.headers.get('cache-control'),
+        }
+        log('appProtocol.headers.200', h1)
+        const cond = await fetch('/worker.js', {
+          headers: {
+            'If-None-Match': h1.etag ?? 'W/"x"',
+            ...(h1.lastModified ? { 'If-Modified-Since': h1.lastModified } : {}),
+          },
+        })
+        log('appProtocol.conditional', {
+          status: cond.status,
+          coep: cond.headers.get('cross-origin-embedder-policy'),
+          // 只有当它真的返回 304 且不带 COEP 时才是隐患
+          risk: cond.status === 304 && !cond.headers.get('cross-origin-embedder-policy'),
+        })
+      } catch (e) {
+        log('appProtocol.headers', { ok: false, error: String(e) })
+      }
+
+      // ---- F. OffscreenCanvas 真 transfer + worker 内绘制 ----
+      try {
+        const canvas = document.createElement('canvas')
+        canvas.width = 32
+        canvas.height = 32
+        const off = canvas.transferControlToOffscreen()
+        const w = new Worker('/offscreen-worker.js', { type: 'classic' })
+        const res = await timeout(
+          new Promise((resolve) => {
+            w.onmessage = (e) => resolve(e.data)
+            w.onerror = (e) => resolve({ ok: false, error: 'worker error:' + (e.message ?? '') })
+            w.postMessage({ canvas: off }, [off])
+          }),
+          4000,
+          'offscreen',
+        )
+        w.terminate()
+        log('offscreen.transferAndDraw', res)
+      } catch (e) {
+        log('offscreen.transferAndDraw', { ok: false, error: String(e) })
+      }
+
+      // ---- G. 本地媒体（app 协议）能不能放、能不能 seek ----
+      const video = document.getElementById('v')
+      const waitEvent = (el, ev, ms) =>
+        timeout(
+          new Promise((r) => el.addEventListener(ev, () => r({ ok: true }), { once: true })),
+          ms,
+          ev,
+        )
+      try {
+        video.src = '/sample.mp4'
+        const meta = await waitEvent(video, 'loadedmetadata', 8000)
+        log('video.appProtocol.loadedmetadata', {
+          ok: meta.ok === true,
+          duration: video.duration,
+          error: video.error ? video.error.code + ':' + video.error.message : null,
+        })
+        if (meta.ok) {
+          video.currentTime = 5
+          const sk = await waitEvent(video, 'seeked', 8000)
+          log('video.appProtocol.seek', {
+            ok: sk.ok === true && Math.abs(video.currentTime - 5) < 0.5,
+            currentTime: video.currentTime,
+          })
+          // rVFC 真的会回调吗？只看 prototype 上有没有这个方法是不够的
+          const rvfc = await timeout(
+            new Promise((r) => {
+              if (!('requestVideoFrameCallback' in video)) return r({ ok: false, error: '无此方法' })
+              video.requestVideoFrameCallback((now, meta) =>
+                r({ ok: typeof meta.mediaTime === 'number', mediaTime: meta.mediaTime }),
+              )
+              video.play().catch((e) => r({ ok: false, error: 'play 被拒:' + String(e) }))
+            }),
+            6000,
+            'rvfc',
+          )
+          video.pause()
+          log('video.appProtocol.rVFC.fires', rvfc)
+        }
+      } catch (e) {
+        log('video.appProtocol', { ok: false, error: String(e) })
+      }
+
+      // ---- H. 跨源到本地 HTTP 后端（真实形态：FastAPI 在 127.0.0.1 上） ----
+      try {
+        const r = await timeout(
+          fetch(PROBE_SERVER + '/health').then(async (x) => ({
+            ok: x.ok,
+            body: await x.json(),
+          })),
+          5000,
+          'health',
+        )
+        log('backend.fetch.crossOrigin', r)
+      } catch (e) {
+        log('backend.fetch.crossOrigin', { ok: false, error: String(e) })
+      }
+
+      // ---- I. 跨源 HTTP 媒体 + Range seek（编辑用代理视频走的就是这条路） ----
+      try {
+        const v2 = document.createElement('video')
+        v2.muted = true
+        v2.playsInline = true
+        v2.crossOrigin = 'anonymous'
+        v2.src = PROBE_SERVER + '/video.mp4'
+        document.body.appendChild(v2)
+        const meta = await waitEvent(v2, 'loadedmetadata', 8000)
+        let seekOk = null
+        if (meta.ok) {
+          v2.currentTime = 6
+          const sk = await waitEvent(v2, 'seeked', 8000)
+          seekOk = sk.ok === true && Math.abs(v2.currentTime - 6) < 0.5
+        }
+        log('video.httpCrossOrigin', {
+          ok: meta.ok === true && seekOk === true,
+          duration: v2.duration,
+          seek: seekOk,
+          error: v2.error ? v2.error.code + ':' + v2.error.message : null,
+        })
+      } catch (e) {
+        log('video.httpCrossOrigin', { ok: false, error: String(e) })
+      }
+
+      // ---- J. 复刻「304 不带 COEP → worker 被拒」那条 WebKit 缺陷 ----
+      // 页面来自 app 协议时这是跨源请求（必然失败，同源策略拦的，与 COEP 无关）；
+      // 页面来自 http://127.0.0.1:8321 时才是同源，那一次才真的在测 304 这个变量。
+      // 判读结论时**必须先看 location.origin**，否则会把同源策略的失败误读成 COEP 问题。
+      try {
+        const seq = []
+        for (let i = 0; i < 4; i++) seq.push(await spawnWorker(PROBE_SERVER + '/etag-worker.js', 'classic'))
+        log('worker.etag304.x4', { ok: seq.every((s) => s === 'ok'), seq })
+      } catch (e) {
+        log('worker.etag304.x4', { ok: false, error: String(e) })
+      }
+
+      results.__lines = lines
+      // 两条回传通道都试：IPC 在打包后的壳里对远程页面是关着的（除非在
+      // capability 里放行 remote urls），而 app 协议下探针服务器又可能没起。
+      // 谁成谁上，不能让一条挂掉就丢结果。
+      const invoke = globalThis.__TAURI__?.core?.invoke
+      results.__ipcAvailable = typeof invoke === 'function'
+      if (invoke) {
+        try {
+          await invoke('probe_report', { report: results })
+        } catch (e) {
+          results.__ipcError = String(e)
+        }
+      }
+      await fetch(PROBE_SERVER + '/report', {
+        method: 'POST',
+        body: JSON.stringify(results),
+      }).catch(() => {})
+      out.textContent = lines.join('\n') + '\n\n—— 检测完成 ——'
+    </script>
+  </body>
+</html>

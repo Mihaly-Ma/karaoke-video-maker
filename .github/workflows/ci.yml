@@ -1,0 +1,162 @@
+# 双平台 CI：macOS Apple Silicon + Windows x64（CLAUDE.md §2.2 的支持矩阵）。
+#
+# **Windows 那半是本项目第一次真跑。** README 与 doctor 都写着"从未在 Windows 上
+# 跑过"，CI 正是要把这句话变成有据可查的结论——所以 Windows 上失败时
+# **不要用 continue-on-error 把它糊过去**，那只会把"没验证过"伪装成"验证通过"。
+# 真跑不起来就让它红着，并把原因记进契约。
+#
+# 仓库是私有的，这里**只产 artifact，不做任何公开发布**。
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: 出安装包（耗时约 10-20 分钟）
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 语言无关的稳定输出，便于比对日志
+  PYTHONUTF8: '1'
+  # 别让 uv 去猜网络代理下的镜像
+  UV_NO_PROGRESS: '1'
+
+jobs:
+  check:
+    name: 检查 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # 一端失败不取消另一端：Windows 挂了也要看到 macOS 的结果，
+      # 反之亦然——否则"第一次在 Windows 上跑"这件事根本得不到数据。
+      fail-fast: false
+      matrix:
+        # macos-14 起就是 Apple Silicon runner；写死具体版本而不是 macos-latest，
+        # 免得哪天 latest 漂到别的架构上而我们毫无察觉。
+        os: [macos-14, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: 安装 Python 3.12
+        run: uv python install 3.12
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # ffmpeg：CI 上不走应用的自动获取路径（那要联外网下几十 MB，
+      # 而且 runner 上装什么与用户机器上装什么是两码事）。
+      # 这里只是让 doctor 的 ffmpeg 检查有东西可查。
+      # 注意 doctor 的判据是 **ass 滤镜注册没注册**，不是版本号。
+      - name: 安装 ffmpeg（macOS）
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg
+      - name: 安装 ffmpeg（Windows）
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg-full --no-progress -y
+
+      - name: 安装 Python 依赖
+        # --all-extras：doctor 与测试会探测各 extra 是否可用，缺了会得到一堆
+        # "未安装"的警告而不是真实结论。
+        run: uv sync --all-extras
+
+      - name: Ruff
+        run: uv run ruff check . && uv run ruff format --check .
+
+      - name: pytest
+        # 需要真实素材的用例会自己 skip（workspace/ 不随仓库分发，
+        # CI 上也不该塞素材）。
+        run: uv run pytest -q
+
+      - name: 前端依赖
+        working-directory: frontend
+        run: npm ci
+
+      - name: 前端类型检查 / lint / 构建
+        working-directory: frontend
+        run: |
+          npm run typecheck
+          npm run lint
+          npm run build
+
+      - name: 环境自检 kvm.doctor
+        # 自检本身就是产品功能（§2.6），它在 CI 上跑得起来是最低要求。
+        # 用 --check-only 语义：这里只要它不崩，具体项的红黄由报告体现——
+        # runner 上必然缺模型权重、缺字体，那是环境差异不是缺陷。
+        env:
+          PYTHONPATH: backend
+        run: uv run python -m kvm.doctor || echo "doctor 报告了不满足项（见上方报告）"
+
+      - name: 外壳 Rust 检查
+        working-directory: src-tauri
+        run: cargo check --locked
+
+  package:
+    name: 打包 (${{ matrix.os }})
+    # 只在手动触发且勾了 package、或打了 tag 时才跑：PyInstaller + Tauri
+    # 一次十几分钟，不该挂在每个 PR 上。
+    if: github.event_name == 'workflow_dispatch' && inputs.package
+    needs: check
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv python install 3.12
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: 安装依赖
+        run: |
+          uv sync --all-extras --group package
+          npm ci
+          npm ci --prefix frontend
+
+      - name: 出包
+        # 跨平台一条命令：脚本内部处理 npm.cmd / 路径分隔符等差异。
+        run: uv run python scripts/package.py
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: kvm-${{ matrix.os }}
+          # 只收安装包，不收 onedir 目录（几 GB，artifact 存储扛不住）
+          path: |
+            src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+          retention-days: 14

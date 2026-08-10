@@ -31,6 +31,18 @@ output/
 # 实验产物
 experiments/out/
 
+# Tauri 外壳
+src-tauri/target/
+# 探针素材：本地用 ffmpeg 现生成，不进仓库（生成命令见 probe_server.py 文档字符串）。
+# 合成信号即可——这里测的是容器/编码能不能放、能不能 seek，
+# 不是分离质量，§5.4「绝不用合成信号测分离模型」那条不适用于此。
+src-tauri/probe/sample.mp4
+
+# PyInstaller 打包产物
+/dist-backend/
+/build-backend/
+*.spec.bak
+
 # 系统
 .DS_Store
 

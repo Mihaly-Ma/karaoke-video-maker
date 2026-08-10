@@ -331,11 +331,16 @@ def check_ffmpeg() -> list[CheckResult]:
                 "ffmpeg（带 libass）",
                 "fail",
                 detail,
+                # 首选让应用自己去取（§2.6：用户不该为了跑起这个工具手动 brew install
+                # 任何东西），系统包管理器的写法作为退路一并给出。
                 fix=(
                     probe.override_rejected
                     and f"unset {ffmpeg_mod.ENV_FFMPEG}  # 或把它指向一个带 libass 的 ffmpeg"
                 )
-                or f"{ffmpeg_mod.install_hint()}    # 验证：ffmpeg -h filter=ass 必须打印参数而非 Unknown filter",
+                or (
+                    "PYTHONPATH=backend uv run python -m kvm.bootstrap --fetch ffmpeg"
+                    f"    # 自动装进应用私有目录；或手动：{ffmpeg_mod.install_hint()}"
+                ),
                 blocking=True,
             )
         ]

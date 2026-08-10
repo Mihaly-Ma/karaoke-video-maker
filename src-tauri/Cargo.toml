@@ -1,0 +1,35 @@
+[package]
+name = "kvm-shell"
+version = "0.1.0"
+description = "一站式日式卡拉OK视频制作工具的桌面外壳"
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+# Tauri 2 的标准布局：真正的逻辑放在 lib 里，main.rs 只是入口。
+# 这样 Android/iOS 的入口点也能复用同一份代码（本项目暂不做移动端，但保持惯例）。
+name = "kvm_shell"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 只为了 killpg：退出时要把后端**整个进程组**带走，否则它派生的 ffmpeg /
+# 分离作业会变成孤儿继续跑（scripts/dev.py 已经吃过这个亏）。
+# std 里没有等价 API。
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[profile.release]
+# 外壳本身逻辑很少，体积不是瓶颈；但 LTO + strip 能把二进制从 ~12MB 压到 ~6MB，
+# 而 Windows 的 NSIS 安装包有 2GB 硬上限（tauri-apps/tauri#7372），
+# PyInstaller 产物已经很大，外壳这边能省则省。
+lto = true
+opt-level = "s"
+strip = true
+codegen-units = 1

@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Karaoke Video Maker</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #14161a;
+        --fg: #e6e8ec;
+        --dim: #8b93a1;
+        --accent: #4ea1ff;
+        --bad: #ff6b6b;
+        --line: #262a31;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--bg);
+        color: var(--fg);
+        font: 14px/1.7 -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', sans-serif;
+      }
+      main {
+        width: min(640px, 88vw);
+      }
+      h1 {
+        font-size: 17px;
+        font-weight: 600;
+        margin: 0 0 4px;
+      }
+      .sub {
+        color: var(--dim);
+        margin: 0 0 24px;
+      }
+      .bar {
+        height: 6px;
+        border-radius: 3px;
+        background: var(--line);
+        overflow: hidden;
+      }
+      .bar > i {
+        display: block;
+        height: 100%;
+        width: 0;
+        background: var(--accent);
+        transition: width 0.25s ease;
+      }
+      .bar.indet > i {
+        width: 35%;
+        animation: slide 1.4s ease-in-out infinite;
+      }
+      @keyframes slide {
+        0% {
+          transform: translateX(-100%);
+        }
+        100% {
+          transform: translateX(300%);
+        }
+      }
+      .row {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        margin-top: 10px;
+        color: var(--dim);
+      }
+      .panel {
+        margin-top: 22px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 14px 16px;
+        display: none;
+      }
+      .panel.show {
+        display: block;
+      }
+      .panel h2 {
+        font-size: 14px;
+        margin: 0 0 8px;
+        color: var(--bad);
+      }
+      dl {
+        margin: 0;
+        display: grid;
+        grid-template-columns: 5.5em 1fr;
+        gap: 4px 12px;
+      }
+      dt {
+        color: var(--dim);
+      }
+      dd {
+        margin: 0;
+      }
+      pre {
+        margin: 10px 0 0;
+        padding: 10px;
+        background: #0e1013;
+        border-radius: 6px;
+        max-height: 160px;
+        overflow: auto;
+        white-space: pre-wrap;
+        word-break: break-all;
+        font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: var(--dim);
+      }
+      button {
+        margin-top: 12px;
+        margin-right: 8px;
+        padding: 6px 14px;
+        border-radius: 6px;
+        border: 1px solid var(--line);
+        background: #1b1f26;
+        color: var(--fg);
+        font: inherit;
+        cursor: pointer;
+      }
+      button:hover {
+        border-color: var(--accent);
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1 id="title">正在启动</h1>
+      <p class="sub" id="sub">准备运行环境…</p>
+      <div class="bar indet" id="bar"><i></i></div>
+      <div class="row"><span id="stage"></span><span id="amount"></span></div>
+
+      <section class="panel" id="err">
+        <h2 id="errTitle">启动失败</h2>
+        <dl>
+          <dt>缺什么</dt>
+          <dd id="errWhat">—</dd>
+          <dt>为什么</dt>
+          <dd id="errWhy">—</dd>
+          <dt>怎么办</dt>
+          <dd id="errHow">—</dd>
+        </dl>
+        <pre id="errDetail"></pre>
+        <button id="retry">重试</button>
+        <button id="copy">复制诊断信息</button>
+      </section>
+    </main>
+
+    <script>
+      // 启动页：在后端就绪之前顶上，就绪后把窗口交给真界面。
+      //
+      // 它**不是**主界面的一部分——主界面由后端在 http://127.0.0.1:<port> 上同源下发
+      // （实测 tauri:// 自定义协议下没有 SharedArrayBuffer 全局，JASSUB 跑不起来）。
+      // 这一页由 Tauri 的 app 协议下发，所以它跨源访问后端，靠后端 CORS 白名单里的
+      // tauri:// 那两条放行。
+      //
+      // 用户不需要知道内部走了 HTTP：这里**不显示任何地址**，也绝不打开系统浏览器。
+      const boot = globalThis.__KVM_BOOT__ ?? {}
+      const $ = (id) => document.getElementById(id)
+      const state = { origin: boot.origin || '', log: [], failed: false }
+
+      const note = (line) => {
+        state.log.push(`[${new Date().toISOString().slice(11, 19)}] ${line}`)
+        if (state.log.length > 200) state.log.shift()
+      }
+
+      const setStage = (text, sub) => {
+        $('stage').textContent = text
+        if (sub !== undefined) $('sub').textContent = sub
+      }
+
+      const setProgress = (done, total) => {
+        const bar = $('bar')
+        if (!total) {
+          bar.classList.add('indet')
+          $('amount').textContent = ''
+          return
+        }
+        bar.classList.remove('indet')
+        bar.firstElementChild.style.width = `${Math.min(100, (done / total) * 100)}%`
+        const mb = (n) => (n / 1048576).toFixed(1)
+        $('amount').textContent = `${mb(done)} / ${mb(total)} MB`
+      }
+
+      // 失败展示严格按 §2.6：缺什么 / 为什么 / 能怎么办，外加可复制的诊断。
+      // 绝不能只写一句"初始化失败"。
+      const fail = ({ what, why, how, detail }) => {
+        state.failed = true
+        $('title').textContent = '没能启动'
+        $('sub').textContent = '下面是具体原因'
+        $('bar').style.display = 'none'
+        $('stage').textContent = ''
+        $('amount').textContent = ''
+        $('errWhat').textContent = what
+        $('errWhy').textContent = why
+        $('errHow').textContent = how
+        $('errDetail').textContent = (detail || '') + '\n' + state.log.join('\n')
+        $('err').classList.add('show')
+      }
+
+      // Rust 侧推进来的壳级事件（后端进程直接退出、超时等）。
+      // 用 eval 单向推送而不是 IPC：少一个需要在 capability 里放行的通道。
+      globalThis.__kvmShellEvent = (evt) => {
+        note(`shell: ${evt.kind} ${evt.detail || ''}`)
+        if (evt.kind === 'backend-exited') {
+          fail({
+            what: '后端服务进程',
+            why: `它在启动过程中退出了（退出码 ${evt.code ?? '未知'}）`,
+            how: '点「重试」再试一次；仍然失败请复制诊断信息并附到问题反馈里',
+            detail: evt.stderr || '',
+          })
+        } else if (evt.kind === 'backend-missing') {
+          fail({
+            what: '应用自带的后端程序',
+            why: '安装包里没有找到它，这通常意味着安装包不完整或被安全软件删掉了文件',
+            how: '重新下载并安装一次；如果杀毒软件有拦截记录，请把应用目录加入白名单',
+            detail: evt.detail || '',
+          })
+        }
+      }
+
+      const jget = async (path) => {
+        const r = await fetch(state.origin + path, { cache: 'no-store' })
+        if (!r.ok) throw new Error(`${path} → HTTP ${r.status}`)
+        return r.json()
+      }
+
+      const waitBackend = async (timeoutMs) => {
+        const deadline = Date.now() + timeoutMs
+        let lastErr = ''
+        while (Date.now() < deadline) {
+          if (state.failed) return false
+          try {
+            await jget('/api/health')
+            note('后端已就绪')
+            return true
+          } catch (e) {
+            lastErr = String(e)
+          }
+          await new Promise((r) => setTimeout(r, 300))
+        }
+        note(`等待后端超时：${lastErr}`)
+        return false
+      }
+
+      // 环境准备：缺 ffmpeg 就下，全程显示进度。
+      // 失败时**不**卡在这里转圈——转圈是最糟的失败方式，用户不知道该等还是该退出。
+      const prepareEnvironment = async () => {
+        let st = await jget('/api/bootstrap/status')
+        const need = st.components.filter((c) => !c.ready)
+        if (!need.length) return true
+
+        for (const comp of need) {
+          if (!comp.available) {
+            fail({
+              what: 'ffmpeg（带 libass 的构建）',
+              why: `当前平台（${st.platform}）没有可自动获取的构建`,
+              how: '请自行安装一个带 libass 的 ffmpeg，或把已下好的压缩包放进应用数据目录后重启',
+              detail: `安装目录：${st.install_dir}`,
+            })
+            return false
+          }
+          setStage('正在下载运行所需组件', '首次启动需要准备环境，只做一次')
+          await fetch(state.origin + '/api/bootstrap/fetch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ component: comp.key }),
+          })
+          // 轮询到这个组件就绪或报错为止
+          for (;;) {
+            await new Promise((r) => setTimeout(r, 400))
+            st = await jget('/api/bootstrap/status')
+            if (st.error) {
+              fail({
+                what: 'ffmpeg（带 libass 的构建）',
+                why: BOOTSTRAP_REASON[st.error.code] || st.error.code,
+                how: BOOTSTRAP_FIX[st.error.code] || '检查网络后点「重试」；也可以自行下载后放进应用数据目录',
+                detail: `${st.error.message}\n安装目录：${st.install_dir}`,
+              })
+              return false
+            }
+            if (st.progress) {
+              setStage(STAGE_TEXT[st.progress.stage] || st.progress.stage)
+              setProgress(st.progress.downloaded, st.progress.total)
+            }
+            if (!st.running) break
+          }
+          st = await jget('/api/bootstrap/status')
+          if (!st.components.every((c) => c.ready || !c.available)) {
+            fail({
+              what: 'ffmpeg（带 libass 的构建）',
+              why: '下载完成了，但装好的这份不能渲染 ASS 字幕（ass 滤镜没有注册）',
+              how: '这多半是下载源换了构建；请反馈这个问题，或自行安装带 libass 的 ffmpeg',
+              detail: `安装目录：${st.install_dir}`,
+            })
+            return false
+          }
+        }
+        return true
+      }
+
+      const STAGE_TEXT = {
+        downloading: '下载中',
+        verifying: '校验完整性',
+        extracting: '解压安装',
+        probing: '验证可用性',
+        done: '完成',
+      }
+      const BOOTSTRAP_REASON = {
+        'bootstrap.download_failed': '下载没能完成（网络不通或下载源暂时不可用）',
+        'bootstrap.hash_mismatch': '下载到的文件校验和与预期不符，出于安全考虑没有使用它',
+        'bootstrap.size_mismatch': '下载到的文件大小与预期不符',
+        'bootstrap.unsafe_archive': '下载到的压缩包里有可疑路径，已拒绝解压',
+        'bootstrap.member_missing': '压缩包里缺少预期的文件',
+        'bootstrap.capability_check_failed': '装好的 ffmpeg 不带 libass，无法烧录字幕',
+      }
+      const BOOTSTRAP_FIX = {
+        'bootstrap.download_failed': '检查网络（含代理设置）后点「重试」',
+        'bootstrap.hash_mismatch': '稍后重试；如果一直失败，说明上游文件变了，请反馈这个问题',
+        'bootstrap.size_mismatch': '稍后重试；若持续失败请检查是否有代理改写了下载内容',
+      }
+
+      const run = async () => {
+        state.failed = false
+        $('err').classList.remove('show')
+        $('bar').style.display = ''
+        $('title').textContent = '正在启动'
+        setStage('等待服务就绪', '准备运行环境…')
+        setProgress(0, 0)
+
+        if (!state.origin) {
+          fail({
+            what: '后端服务地址',
+            why: '外壳没有把服务地址传进来，应用没有正常初始化',
+            how: '请完全退出应用后重新打开；仍然失败请复制诊断信息反馈',
+            detail: '',
+          })
+          return
+        }
+        // 后端起不来时**必须有超时**，不能永远转圈：
+        // 真正的原因往往在后端 stderr 里，而那份日志没人会主动去看。
+        if (!(await waitBackend(45000))) {
+          if (!state.failed) {
+            fail({
+              what: '后端服务',
+              why: '它在 45 秒内没有响应',
+              how: '点「重试」；若反复如此，可能是安全软件拦截了本机回环连接',
+              detail: '',
+            })
+          }
+          return
+        }
+        if (!(await prepareEnvironment())) return
+
+        setStage('即将进入', '环境已就绪')
+        // 把窗口交给真界面。**由外壳来导航，不是这里 `location.replace`**：
+        // 页面自己做跨源跳转实测时灵时不灵（同一份代码有的运行就停在启动页上），
+        // 而且目标地址留在 Rust 侧，页面改不了它。
+        const invoke = globalThis.__TAURI__?.core?.invoke
+        if (!invoke) {
+          fail({
+            what: '与外壳的通信通道',
+            why: '页面没有跑在应用外壳里（或外壳没有初始化完成）',
+            how: '请完全退出应用后重新打开',
+            detail: '',
+          })
+          return
+        }
+        try {
+          await invoke('enter_app')
+        } catch (e) {
+          fail({
+            what: '主界面',
+            why: `外壳拒绝了进入主界面的请求：${e}`,
+            how: '点「重试」；仍然失败请复制诊断信息反馈',
+            detail: String(e),
+          })
+        }
+      }
+
+      $('retry').addEventListener('click', run)
+      $('copy').addEventListener('click', async () => {
+        const text = [
+          'Karaoke Video Maker 启动诊断',
+          `平台: ${navigator.userAgent}`,
+          `服务地址: ${state.origin || '(未传入)'}`,
+          `缺什么: ${$('errWhat').textContent}`,
+          `为什么: ${$('errWhy').textContent}`,
+          $('errDetail').textContent,
+        ].join('\n')
+        try {
+          await navigator.clipboard.writeText(text)
+          $('copy').textContent = '已复制'
+          setTimeout(() => ($('copy').textContent = '复制诊断信息'), 1500)
+        } catch {
+          // 剪贴板被拒时退回选中，让用户自己 Cmd+C——不要静默失败
+          const pre = $('errDetail')
+          pre.textContent = text
+          const range = document.createRange()
+          range.selectNodeContents(pre)
+          const sel = getSelection()
+          sel.removeAllRanges()
+          sel.addRange(range)
+        }
+      })
+
+      run()
+    </script>
+  </body>
+</html>
