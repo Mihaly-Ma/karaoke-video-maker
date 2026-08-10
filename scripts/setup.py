@@ -253,10 +253,7 @@ def _torch_is_cuda() -> bool:
     py = venv_python()
     if not py.is_file():
         return False
-    code = (
-        "import importlib.metadata as m;"
-        "print(m.version('torch'))"
-    )
+    code = "import importlib.metadata as m;print(m.version('torch'))"
     try:
         out = subprocess.run(
             [str(py), "-c", code],
@@ -377,11 +374,31 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--skip-torch", action="store_true", help="自检时跳过 torch 探测（省几秒）")
     p.add_argument("--json", action="store_true", help="输出机器可读的自检结果")
     p.add_argument("--copy", action="store_true", help="把自检报告复制到剪贴板")
+    p.add_argument(
+        "--install-cuda-torch",
+        action="store_true",
+        help=(
+            "强制把 torch 换成 CUDA 版然后退出，不做别的。"
+            "给 CI 出 GPU 包用——构建机没有 N 卡，探测不到，只能显式指定"
+        ),
+    )
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    if args.install_cuda_torch:
+        # 单独一条路径：CI 出 GPU 包时用。构建机没有 N 卡，`detect_nvidia_gpu()`
+        # 什么也探不到，所以不能走自动那条；而 index URL 与包列表只在本文件里
+        # 有一份，CI 里不该再抄一遍（抄了就会漂移）。
+        try:
+            install_cuda_torch(uv_bin())
+        except SetupError as exc:
+            print(f"[失败] {exc}", file=sys.stderr)
+            return 1
+        return 0 if _torch_is_cuda() else 1
+
     doctor_args: list[str] = []
     if args.skip_torch:
         doctor_args.append("--skip-torch")

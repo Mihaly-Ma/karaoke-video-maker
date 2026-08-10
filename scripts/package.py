@@ -312,17 +312,52 @@ def build_shell() -> None:
     )
 
 
+# NSIS 与 WiX 都在**安装包超过 2 GB** 时失败（tauri-apps/tauri#7372，至今 open），
+# 报的是 `error mmapping file is out of range` —— 一句看不出与体积有关的话。
+_INSTALLER_HARD_LIMIT = 2 * 1024**3
+# 到 85% 就开始喊。GPU 版实测压完 1.63 GB（solid LZMA2），离上限只剩 375 MB，
+# torch 升一次版就可能吃掉——余量必须是**可见**的，而不是等某天打包突然红了。
+_INSTALLER_WARN_AT = int(_INSTALLER_HARD_LIMIT * 0.85)
+
+
+def _check_installer_limit(items: list[tuple[str, int]]) -> None:
+    """Windows 安装包体积的硬闸门。
+
+    只管 `.exe`/`.msi`：dmg 没有这个限制。超限直接失败而不是打印一句提醒——
+    这个数字一旦越界，产物就是坏的，让它悄悄过去只会把问题推到用户机器上。
+    """
+    for name, size in items:
+        if not name.endswith((".exe", ".msi")):
+            continue
+        if size > _INSTALLER_HARD_LIMIT:
+            over = (size - _INSTALLER_HARD_LIMIT) / 1024**2
+            msg = (
+                f"{name} 有 {human(size)}，超过 NSIS/WiX 的 2 GB 硬上限 {over:.0f} MB。\n"
+                "    这不是能忽略的警告：Tauri 的打包器会以一句与体积无关的\n"
+                "    `error mmapping file is out of range` 失败（tauri#7372）。\n"
+                "    要么减体积（CUDA 版 torch 的 DLL 是大头），要么换成不受此限的安装器。"
+            )
+            raise SystemExit(f"[失败] {msg}")
+        if size > _INSTALLER_WARN_AT:
+            left = (_INSTALLER_HARD_LIMIT - size) / 1024**2
+            log(f"⚠ {name} 距 2 GB 上限只剩 {left:.0f} MB，再加东西就要撞穿了")
+
+
 def report() -> None:
     log("产物体积")
     if DIST_BACKEND.is_dir():
         print(f"    后端 onedir      {human(dir_size(DIST_BACKEND))}")
     bundle_root = REPO_ROOT / "src-tauri" / "target" / "release" / "bundle"
+    installers: list[tuple[str, int]] = []
     if bundle_root.is_dir():
         for item in sorted(bundle_root.rglob("*")):
             if item.suffix in {".dmg", ".exe", ".msi", ".AppImage", ".deb"} and item.is_file():
-                print(f"    {item.name:<40} {human(item.stat().st_size)}")
+                size = item.stat().st_size
+                print(f"    {item.name:<40} {human(size)}")
+                installers.append((item.name, size))
             elif item.suffix == ".app" and item.is_dir():
                 print(f"    {item.name:<40} {human(dir_size(item))}")
+    _check_installer_limit(installers)
 
 
 def main(argv: list[str] | None = None) -> int:

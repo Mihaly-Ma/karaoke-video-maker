@@ -171,6 +171,14 @@ jobs:
             plat: macos-arm64
           - os: windows-latest
             plat: windows-x64
+          # GPU 版：同一份代码，只把 torch 换成 CUDA 轮子。
+          # **不能靠 setup.py 的自动探测**——构建机没有 N 卡，探不到就会装成 CPU 版，
+          # 然后出一个名字叫 cuda、里面却是 CPU 的包，比没有更糟。所以显式指定。
+          #
+          # macOS 没有对应项：Apple Silicon 走 MPS，包里那份 torch 本来就支持。
+          - os: windows-latest
+            plat: windows-x64-cuda
+            cuda: true
 
     steps:
       - uses: actions/checkout@v4
@@ -200,6 +208,24 @@ jobs:
           uv sync --all-extras --group package
           npm ci
           npm ci --prefix frontend
+
+      # index URL 与包列表只在 scripts/setup.py 里有一份，这里不抄第二遍——
+      # 抄了就会漂移，而漂移的表现是"GPU 包里装的是另一个 CUDA 小版本"。
+      # 该命令装不成会以非零码退出（它自己会核对装完是不是真的 +cuXXX），
+      # 所以这一步失败就整个 job 失败，不会出一个名不副实的包。
+      - name: 换成 CUDA 版 torch
+        if: matrix.cuda
+        shell: bash
+        run: uv run python scripts/setup.py --install-cuda-torch
+
+      # GPU 包很吃盘：CUDA venv 约 3.5 GB + onedir 3.1 GB + Rust target + NSIS
+      # 的临时文件，估计 10 GB 上下，而 runner 只有十几 GB。磁盘满了的报错通常
+      # 出现在某个无关的步骤里（PyInstaller 写一半、或者 NSIS 压缩失败），
+      # 所以先把余量打出来——真撞上时才不用从头猜。
+      - name: 磁盘余量
+        if: matrix.cuda
+        shell: pwsh
+        run: Get-PSDrive C | Select-Object Used, Free
 
       - name: 出包
         # 跨平台一条命令：脚本内部处理 npm.cmd / 路径分隔符等差异。
