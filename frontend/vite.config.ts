@@ -61,10 +61,21 @@ const crossOriginIsolation = {
  * （返回函数才是装在之后），这正是需要的顺序：先 setHeader，后面无论谁
  * `writeHead(304)` 都会把已设的头一起发出去（Node 的 writeHead 不会清掉 setHeader）。
  *
- * 残留风险：套 Tauri 壳后前端由 Tauri 的协议处理器下发，这段中间件不在链路上。
- * 若那边实现了 ETag/条件请求且同样漏发 COEP，同一个坑会在 Safari 引擎的 WKWebView 上重现
- * （CLAUDE.md §9 第 12 条本就把 Tauri 壳列为未测项）。届时先用
- * `scripts/probe-coep-headers.mjs` 的判据核 304 上有没有 COEP。
+ * ## Tauri 壳那边的情况（已实测，2026-08-10）
+ *
+ * 打好包的应用里，前端**不由 Tauri 的协议处理器下发**，而是由 Python 后端在
+ * `http://127.0.0.1:<port>` 上同源下发（原因见 `backend/kvm/api/app.py` 的模块注释：
+ * `tauri://` 自定义协议下没有 `SharedArrayBuffer` 全局，JASSUB 起不来）。
+ * 后端那边的 COOP/COEP 由 FastAPI 中间件在 `call_next` **之后**统一补，实测
+ * 条件请求命中的 **304 上照样带着这两个头**，所以同一个坑在成品链路上不存在。
+ *
+ * 顺带实测到的：Tauri 的 app 协议**根本没有条件请求**（永远 200，不发 ETag），
+ * 而 WKWebView 在"304 不带 COEP"时连起 4 个 worker 也全都成功了。
+ *
+ * **但绝不要拿这两条去删掉上面那个中间件。** 本文件服务的是 Vite dev/preview，
+ * 那两条结论来自 WKWebView 与 Tauri 协议，与这里是两套链路；而"304 缺 COEP →
+ * worker 被拒"是在**真 Safari** 上实测出来的（playwright 的 webkit 与系统
+ * WKWebView 也不是一回事）。判据仍以 `scripts/probe-coep-headers.mjs` 为准。
  */
 const applyIsolationHeaders: Connect.NextHandleFunction = (_req, res, next) => {
   for (const [name, value] of Object.entries(crossOriginIsolation)) res.setHeader(name, value)
