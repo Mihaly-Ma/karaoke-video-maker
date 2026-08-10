@@ -344,6 +344,7 @@ export default function StylePanel() {
           <StyleFontPicker
             value={draft.font_names}
             charset={charset}
+            bold={draft.bold}
             onChange={(chain) => setNow('font_names', chain)}
           />
         </section>

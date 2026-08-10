@@ -164,7 +164,11 @@ export default function ExportPanel({ exportJobId, onExportStart, exportResult }
 
   // 字形预检：查的是成片上会出现的全部字符（含制作名单），只查当前字体
   const charset = useMemo(() => renderedCharset(project), [project])
-  const coverage = useFontCoverage(project?.style.font_name ?? '', charset)
+  const coverage = useFontCoverage(
+    project?.style.font_name ?? '',
+    charset,
+    project?.style.bold ?? false,
+  )
   const missing = coverage.kind === 'done' ? coverage.result.missing : []
   const previewMissing = coverage.kind === 'done' ? coverage.result.preview_missing : []
 

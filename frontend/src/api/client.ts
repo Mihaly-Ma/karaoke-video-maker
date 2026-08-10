@@ -401,10 +401,17 @@ export const fontSubsetUrl = (
  * 副作用（刻意的）：后端借这次调用**预热整条链的子集产物**。这一刻用户还在
  * 字体列表里挑，离切到预览还有几秒到几十秒，正是把十秒级的裁剪塞进去的地方。
  */
-export const checkFontCoverage = (families: string | string[], text: string) =>
+export const checkFontCoverage = (
+  families: string | string[],
+  text: string,
+  bold = false,
+) =>
   post<FontCoverageResult>('/fonts/coverage', {
     families: typeof families === 'string' ? [families] : families,
     text,
+    // 预热要按将来真正会取的那一档字重来裁，否则勾了粗体的工程等于没预热：
+    // 切到预览时要的是 Bold 产物，而预热裁的是 Regular
+    bold,
   })
 
 // ---- 渲染 ----

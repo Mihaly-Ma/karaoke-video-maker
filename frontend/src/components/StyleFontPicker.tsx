@@ -80,8 +80,16 @@ interface FontRow {
  *
  * **齐全时也要显式说一句**：预检默默通过与预检根本没跑，在界面上长得一模一样。
  */
-function CoverageNote({ chain, charset }: { chain: string[]; charset: string }) {
-  const state = useFontCoverage(chain, charset)
+function CoverageNote({
+  chain,
+  charset,
+  bold,
+}: {
+  chain: string[]
+  charset: string
+  bold: boolean
+}) {
+  const state = useFontCoverage(chain, charset, bold)
   if (state.kind === 'idle') return null
   if (state.kind === 'checking') return <div className="sty-note">{t('style.font.covChecking')}</div>
   if (state.kind === 'failed') {
@@ -112,8 +120,18 @@ function CoverageNote({ chain, charset }: { chain: string[]; charset: string }) 
  * 链上某个字体承担了多少字。链尾承担 0 字时要说出来——
  * 那说明这一环当前没起作用，用户才好判断留不留。
  */
-function ShareNote({ chain, charset, family }: { chain: string[]; charset: string; family: string }) {
-  const state = useFontCoverage(chain, charset)
+function ShareNote({
+  chain,
+  charset,
+  bold,
+  family,
+}: {
+  chain: string[]
+  charset: string
+  bold: boolean
+  family: string
+}) {
+  const state = useFontCoverage(chain, charset, bold)
   if (state.kind !== 'done') return null
   const share = state.result.shares.find((s) => s.family === family)
   if (!share) return null
@@ -131,10 +149,17 @@ export interface StyleFontPickerProps {
   value: string[]
   /** 成片上会出现的全部字符（去重排序，由 `renderedCharset` 产出），供字形预检 */
   charset: string
+  /** 是否勾了粗体。只影响**预热哪一档字重**的子集产物，不影响覆盖率结论 */
+  bold?: boolean
   onChange: (chain: string[]) => void
 }
 
-export default function StyleFontPicker({ value, charset, onChange }: StyleFontPickerProps) {
+export default function StyleFontPicker({
+  value,
+  charset,
+  bold = false,
+  onChange,
+}: StyleFontPickerProps) {
   const [status, setStatus] = useState<FontScanStatus | null>(null)
   const [presets, setPresets] = useState<FontPreset[]>([])
   const [fonts, setFonts] = useState<FontInfo[]>([])
@@ -272,7 +297,7 @@ export default function StyleFontPicker({ value, charset, onChange }: StyleFontP
 
       {/* 结论说的是**当前这条链**，所以排在最前：先看现状，再决定改不改 */}
       <div className="sty-covbox" data-testid="font-coverage">
-        <CoverageNote chain={chain} charset={charset} />
+        <CoverageNote chain={chain} charset={charset} bold={bold} />
       </div>
 
       <div className="sty-chain" data-testid="font-chain">
@@ -285,7 +310,7 @@ export default function StyleFontPicker({ value, charset, onChange }: StyleFontP
               {i === 0 ? t('style.font.primary') : t('style.font.fallbackN', { n: i })}
             </span>
             <span className="sty-chain__name">{family}</span>
-            <ShareNote chain={chain} charset={charset} family={family} />
+            <ShareNote chain={chain} charset={charset} bold={bold} family={family} />
             <span className="sty-chain__ops">
               <button
                 type="button"

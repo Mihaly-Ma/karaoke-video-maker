@@ -953,6 +953,13 @@ class FontCoverageRequest(BaseModel):
     family: str = ""
     """**兼容入口**：只查一个字体时用它。给了 `families` 就以后者为准。"""
 
+    bold: bool = False
+    """本工程勾了粗体没有——决定**预热哪一档字重的产物**。
+
+    不传的话预热裁的是 Regular，而用户切到预览时要的是 Bold：预热白做一遍，
+    他照样对着"字体准备中"等十秒。这个字段只影响预热，覆盖率判定与它无关
+    （同一族各字重的 cmap 一致）。"""
+
     families: list[str] = []
     """要检查的整条字体链，按优先级排列。"""
 
@@ -1031,7 +1038,7 @@ def check_coverage(req: FontCoverageRequest) -> FontCoverage:
         covered.update(owned)
         shares.append(FontShare(family=match.family, count=len(owned), chars="".join(owned)))
 
-    preheat_chain(chain, "".join(checked))
+    preheat_chain(chain, "".join(checked), BOLD_WEIGHT if req.bold else REGULAR_WEIGHT)
 
     return FontCoverage(
         family=chain[0] if chain else "",
