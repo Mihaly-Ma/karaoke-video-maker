@@ -195,7 +195,7 @@ LDDC / pykakasi / qqmusic-api-python 时的推论，而这些依赖最终一条�
 
 | 决策点 | 结论 |
 |---|---|
-| ffmpeg | **GPL 构建即可**，直接用 Homebrew `ffmpeg-full` / Windows 的 gyan.dev full 构建。它是运行时下载、以独立进程调用的外部程序（§2.6「获取」阶段），不进安装包、不与本项目代码链接，因此不给本项目带来许可证义务 |
+| ffmpeg | **GPL 构建即可**。它是运行时下载、以独立进程调用的外部程序（§2.6「获取」阶段），不进安装包、不与本项目代码链接，因此不给本项目带来许可证义务。**具体用哪个构建以 `kvm.bootstrap` 里的清单为准**（macOS 取 martin-riedl，Windows 取 gyan.dev 的 **essentials**——它已含 `libass libfreetype libfribidi libharfbuzz`，而 full 是 266 MB、多出来的库本项目一个都用不到）|
 | UVR / Roformer 权重（社区惯例授权，多数无 LICENSE） | **可用**。仍按 D11 运行时下载，理由是体积而非许可证 |
 | 代码签名 / notarization | **仍然不做**，但理由变了，见下 |
 | Tauri `externalBin` + notarization 冲突（issue #11992） | 仍不是阻断项。且 §5.15 另有一条独立理由（`--onedir` 产物是目录，`externalBin` 只收单文件），所以将来真去公证也不会被这条卡住 |

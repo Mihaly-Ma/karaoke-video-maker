@@ -133,8 +133,13 @@ def _platform_key() -> str:
 #   `GyanD/codexffmpeg` 的**版本 tag**（不是 `latest`）。GitHub release 资产
 #   在 tag 下不会被改写，所以哈希可以长期固定。essentials 已含
 #   `libass libfreetype libfribidi libharfbuzz`（官方构建说明），够本项目用；
-#   full 构建 266 MB 属实浪费。**未在 Windows 上实测**：哈希是在 macOS 上
-#   下载同一份 zip 算出来的，能力探测要等真机上跑 `kvm.doctor` 才算数。
+#   full 构建 266 MB 属实浪费。
+#   **期望哈希有独立来源**（§2.6 三条要求之一）：GitHub 把资产的 sha256 发布在
+#   release 元数据里（`gh api repos/GyanD/codexffmpeg/releases/tags/8.1.2`
+#   的 `assets[].digest`），2026-08-10 比对与下面写死的值逐字相同、体积也相同。
+#   这比"自己下载算一遍"强——后者只锁得住"此后不被篡改"，证明不了第一次就下对了。
+#   **但能力仍未在 Windows 上实测**：装完要跑 `kvm.doctor` 看 `ass` 滤镜注册没有，
+#   包上写着含 libass 不算数（§2.6 判据是实际能力而非存在性）。
 #   **这条不跟着 macOS 换源**：GitHub release 资产在 tag 下不会被改写，
 #   osxexperts 那两个毛病（无官方校验和、URL 原地替换）它本来就没有。
 #   而且 martin-riedl **只出 macOS 与 Linux，没有 Windows 构建**（2026-08-10 实测），
