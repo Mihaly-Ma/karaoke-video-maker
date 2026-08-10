@@ -555,8 +555,9 @@ def check_torch(timeout: float = 120.0) -> CheckResult:
             "warn",
             detail + "——纯 CPU 分离会很慢（数分钟起）",
             fix=(
-                "Windows + NVIDIA 显卡请按 https://docs.astral.sh/uv/guides/integration/pytorch/ "
-                "配 PyTorch index 后重装：PyPI 的 Windows torch wheel 是 CPU-only"
+                "有 N 卡的话跑一次 `python3 scripts/setup.py`：它会探测显卡与驱动，"
+                "自动换成 CUDA 版 torch（约 2.7 GB）。"
+                "PyPI 的 Windows torch wheel 是 CPU-only，不换就一直是 CPU"
             ),
             affects="人声分离耗时可能是 GPU 的十倍以上",
         )

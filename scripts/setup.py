@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -117,6 +118,78 @@ def venv_python() -> Path:
 # ---------------------------------------------------------------------------
 
 
+# torch 的 CUDA 轮子从这里取。**不写进 pyproject.toml / uv.lock**：那会让 CI 与
+# 打包也拉 CUDA 版，而单个 wheel 解开就有 2.7 GB，装进安装包必然撞穿 NSIS 的
+# 2 GB 上限（CLAUDE.md §5.15）。所以它只是本机开发环境的一次覆盖安装。
+_TORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu130"
+
+# 这三个必须一起换：混着装（torch 是 CUDA 版、torchvision 是 CPU 版）会在
+# import 时才报符号缺失，而错误信息与"装错了 torch"毫无关系。
+_TORCH_PACKAGES = ("torch", "torchvision", "torchaudio")
+
+# 驱动报告的 CUDA 版本低于这个数就不装 CUDA 版：cu130 的 wheel 需要足够新的
+# 驱动，老驱动上装了也只会在运行时报错，不如老老实实用 CPU 版。
+_MIN_DRIVER_CUDA = (13, 0)
+
+
+def detect_nvidia_gpu() -> tuple[str, tuple[int, int]] | None:
+    """探测本机的 N 卡与驱动支持的 CUDA 版本。返回 (显卡名, (主, 次))。
+
+    **判据是 `nvidia-smi` 跑得通**，不是"装没装 CUDA Toolkit"——用 pip 装的
+    torch 自带全套 CUDA 运行时（Windows 上就打在那 2.7 GB 里），用户不需要
+    另外装 Toolkit，只要驱动够新。
+    """
+    exe = shutil.which("nvidia-smi")
+    if exe is None:
+        return None
+
+    def _run(args: list[str]) -> str:
+        try:
+            return subprocess.run(
+                [exe, *args],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+                check=False,
+            ).stdout
+        except (OSError, subprocess.SubprocessError):
+            return ""
+
+    # CUDA 版本只在默认输出的表头里，没有对应的 --query 字段
+    ver = re.search(r"CUDA Version:\s*(\d+)\.(\d+)", _run([]))
+    if ver is None:
+        return None
+    # 型号走结构化输出：默认输出是画出来的表格，按空白切会切到表头上
+    names = [ln.strip() for ln in _run(["--query-gpu=name", "--format=csv,noheader"]).splitlines()]
+    name = next((n for n in names if n), "NVIDIA GPU")
+    return name, (int(ver.group(1)), int(ver.group(2)))
+
+
+def install_cuda_torch(uv: str) -> None:
+    """把 torch 三件套换成 CUDA 版，装进同一个 `.venv`。
+
+    **下载量约 2.7 GB**，所以要先把这件事说出来再动手——静默的长下载会被当成
+    程序卡死（§5.14 记的就是这个教训）。
+    """
+    log("检测到 N 卡，安装 CUDA 版 torch（约 2.7 GB，首次较慢）")
+    cmd = [
+        uv,
+        "pip",
+        "install",
+        "--python",
+        str(venv_python()),
+        "--reinstall",
+        *_TORCH_PACKAGES,
+        "--index-url",
+        _TORCH_CUDA_INDEX,
+    ]
+    if run(cmd, cwd=REPO_ROOT) != 0:
+        # 不抛错：CPU 版已经装好了，分离照样能跑，只是慢（§2.5 降级不终止）
+        log("CUDA 版 torch 安装失败，继续用 CPU 版（分离会慢很多）")
+
+
 def install_python_deps(uv: str, extras: tuple[str, ...]) -> None:
     """装 Python 3.12 与全部所需 extras，装进仓库根的 `.venv/`。
 
@@ -135,11 +208,68 @@ def install_python_deps(uv: str, extras: tuple[str, ...]) -> None:
             fix=f"uv python install {PYTHON_VERSION}",
         )
 
+    gpu = detect_nvidia_gpu()
+    want_cuda = gpu is not None and gpu[1] >= _MIN_DRIVER_CUDA
+
     extra_args = [arg for extra in extras for arg in ("--extra", extra)]
     log(f"安装 Python 依赖（extras: {', '.join(extras)}）")
     cmd = [uv, "sync", "--python", PYTHON_VERSION, *extra_args]
+    if want_cuda:
+        # **把 torch 三件套排除在 sync 之外**，否则每次跑 setup 都会按 uv.lock
+        # 把已经装好的 CUDA 版覆盖回 CPU 版——而且一声不吭，用户只会发现
+        # 分离忽然又变慢了（实测 `uv sync --dry-run` 确实是
+        # `- torch==2.13.0+cu130  + torch==2.13.0`）。装 CUDA 版那一步在下面单独做。
+        #
+        # **两个开关缺一不可，这是实测出来的**：只给 `--no-install-package`，
+        # uv 仍会把"不符合 lock"的 CUDA 版**卸掉却不装回任何东西**，环境里直接
+        # 没有 torch；只给 `--inexact`，它照样执行替换。两个一起才是"这三个包
+        # 原样别动"。
+        cmd.append("--inexact")
+        cmd += [arg for pkg in _TORCH_PACKAGES for arg in ("--no-install-package", pkg)]
     if run(cmd, cwd=REPO_ROOT) != 0:
         raise SetupError("`uv sync` 失败", fix=" ".join(cmd))
+
+    if gpu is None:
+        return
+    name, (major, minor) = gpu
+    if not want_cuda:
+        log(
+            f"发现 {name}，但驱动只支持到 CUDA {major}.{minor}"
+            f"（需要 {_MIN_DRIVER_CUDA[0]}.{_MIN_DRIVER_CUDA[1]}+），继续用 CPU 版 torch"
+        )
+        return
+    if _torch_is_cuda():
+        log(f"CUDA 版 torch 已就绪（{name}）")
+        return
+    install_cuda_torch(uv)
+
+
+def _torch_is_cuda() -> bool:
+    """当前 venv 里装的是不是 CUDA 版 torch。
+
+    只读包元数据里的版本号（`2.13.0+cu130`），**不 import torch**：那要几秒，
+    而且装坏的 torch 会直接把进程带走（§2.6 要求 torch 一律隔在子进程里问）。
+    """
+    py = venv_python()
+    if not py.is_file():
+        return False
+    code = (
+        "import importlib.metadata as m;"
+        "print(m.version('torch'))"
+    )
+    try:
+        out = subprocess.run(
+            [str(py), "-c", code],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+            check=False,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "+cu" in out
 
 
 def frontend_needs_install() -> bool:
