@@ -90,8 +90,13 @@ def ffprobe_for(ffmpeg_bin: str) -> str:
 
     **必须与 ffmpeg 同源**：ffprobe 报的时长/起始偏移会直接进时间轴计算，
     两个不同构建之间的差异会变成对不上的轴。
+
+    **扩展名跟着 ffmpeg 走**：Windows 上私有目录里的文件是 `ffprobe.exe`，
+    写死无后缀名会找不到它，从而静默退回 PATH 里的另一个构建——正是这个函数
+    要防的事。
     """
-    candidate = Path(ffmpeg_bin).with_name("ffprobe")
+    ffmpeg_path = Path(ffmpeg_bin)
+    candidate = ffmpeg_path.with_name(f"ffprobe{ffmpeg_path.suffix}")
     return str(candidate) if candidate.is_file() else "ffprobe"
 
 
