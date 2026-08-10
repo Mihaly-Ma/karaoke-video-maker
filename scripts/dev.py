@@ -115,6 +115,12 @@ class Service:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            # 编码必须显式给，不能吃系统 locale：中文 Windows 默认 cp936，而 npm
+            # 会输出 0x92（Windows-1252 的右单引号），一解码就抛 UnicodeDecodeError
+            # 把转发线程打死；dev.py 随即把它当成"前端已退出"，连后端一起停掉。
+            # errors="replace" 是兜底——转发日志绝不该有能力终止服务。
+            encoding="utf-8",
+            errors="replace",
             bufsize=1,
             **_spawn_kwargs(),
         )

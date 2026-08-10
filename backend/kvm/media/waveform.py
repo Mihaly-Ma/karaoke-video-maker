@@ -129,6 +129,9 @@ def _ffprobe_audio_info(ffprobe_bin: str, path: Path) -> tuple[int, float]:
             ],
             capture_output=True,
             text=True,
+            # 见 probe.py 同处注释：中文 Windows 的 cp936 解不了 ffprobe 的输出。
+            encoding="utf-8",
+            errors="replace",
             timeout=120,
             check=True,
         )

@@ -90,6 +90,9 @@ def _ffprobe_json(ffprobe_bin: str, path: Path) -> dict[str, Any]:
         [ffprobe_bin, "-v", "error", "-show_format", "-show_streams", "-of", "json", str(path)],
         capture_output=True,
         text=True,
+        # 见 probe.py 同处注释：中文 Windows 的 cp936 解不了 ffprobe 的输出。
+        encoding="utf-8",
+        errors="replace",
         timeout=120,
         check=True,
     )

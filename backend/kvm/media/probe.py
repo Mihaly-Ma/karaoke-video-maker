@@ -88,6 +88,11 @@ def _ffprobe_json(ffprobe_bin: str, path: Path) -> dict[str, Any]:
         [ffprobe_bin, "-v", "error", "-show_format", "-show_streams", "-of", "json", str(path)],
         capture_output=True,
         text=True,
+        # 编码必须显式给，不能吃系统 locale：中文 Windows 默认 cp936，而 ffprobe 的
+        # JSON 里会出现非 GBK 字节（日文标题、编码器名里的排版符号），解码当场抛
+        # UnicodeDecodeError——症状是探测整个失败，而错误看起来与媒体无关。
+        encoding="utf-8",
+        errors="replace",
         timeout=60,
         check=True,
     )
