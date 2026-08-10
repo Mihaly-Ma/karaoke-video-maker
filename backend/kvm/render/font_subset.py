@@ -37,6 +37,20 @@ nameID 6（PostScript 名）以及 Mac 平台（platformID=1）的记录一概�
 **调用方请求什么族名，字体就自称什么族名**，不再指望系统字体的命名习惯
 （CLAUDE.md §5.12"给打包字体使用唯一的 family name 以降低误匹配"）。
 
+## 字体链：一个族不够时落到下一个
+
+字体是**有序候选链**而不是单个族（`KaraokeStyle.font_names`）：链首缺哪个字形，
+libass 就在**已加载的其它字体**里找谁有。这条回退发生在 libass 内部，
+两端都靠它，所以两端拿到的**字体集合与顺序必须完全一致**，否则同一个字
+在预览与成片里会由不同字体画出来——而这正是 §5.12 要杜绝的分叉。
+
+两端的喂法不同，但喂的是同一批字节：
+
+| 端 | 怎么拿到字体 | 为什么这么做 |
+|---|---|---|
+| 预览（JASSUB） | `GET /fonts/subset` 逐个取，构造时 `fonts: [...]` 全部喂进去 | ASS 里塞字节的话每次编辑都要重传几 MB |
+| 导出（ffmpeg） | 同一批字节 UUEncode 进 ASS 的 `[Fonts]` 段 | ffmpeg 侧无法禁用系统字体回退，只有把字节摆在它面前才控制得住选谁 |
+
 ## 依赖
 
 需要 `fonttools`（含 woff2 支持时可直接产出 woff2）。属于 §2.6 的自动获取范畴：
@@ -45,14 +59,17 @@ nameID 6（PostScript 名）以及 Mac 平台（platformID=1）的记录一概�
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import unicodedata
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - 仅供类型标注，运行期不导入
     from fontTools.ttLib import TTFont
 
-SUBSET_VERSION = 3
+SUBSET_VERSION = 5
 """子集产物的生成逻辑版本。**改动 `subset_font` 的产物内容时必须 +1。**
 
 调用方（`kvm.api.routes.fonts`）把它算进磁盘缓存键，否则老用户的缓存目录里
@@ -63,7 +80,81 @@ v3 的这一次 +1 并没有改变产物内容，改变的是**产物的保证**
 而这类坏文件的症状恰恰是"预览空白且刷新页面也修不好"——因为坏的是缓存本身，
 每次请求都稳定命中同一份。加版本号是唯一能把它们从用户磁盘上赶走的手段。
 **"内容没变就不用 +1" 在这里是错的**：判断依据是"旧产物还能不能信"，不是字节是否相同。
+
+v4：产物开始按**本曲字符集**加裁（`extra_charset`）。旧产物只含 `default_charset()`，
+「鷗」「𠮷」「①」这类落在 JIS X 0208 之外的字在里面一个都没有——留着它们会让
+"预览空白、成片正常"的反向分叉继续存在。
+
+v5：字型声明（字重 / fsSelection / macStyle）一并归一，字体链的顺序才真正说了算。
+旧产物只归一了字重，`bold=True` 时链首会落选（见 `_rewrite_family_name`）。
 """
+
+
+def charset_digest(chars: Iterable[str]) -> str:
+    """字符集合的稳定短摘要，用于缓存键。
+
+    先排序去重再算，**顺序不影响结果**：同一批字符不论来自哪一行、以什么顺序
+    收集，都必须命中同一份缓存产物，否则每改一个字就要重裁一次字体。
+    """
+    joined = "".join(sorted(set(chars)))
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:12]
+
+
+# ---------------------------------------------------------------------------
+# ASS `[Fonts]` 段：把字体字节直接摆进字幕文件
+# ---------------------------------------------------------------------------
+
+_UU_LINE_WIDTH = 80
+"""`[Fonts]` 段每行的字符数上限。VSFilter / libass 都按 80 切，别改。"""
+
+
+def uuencode_font(data: bytes) -> list[str]:
+    """把字体字节编码成 ASS `[Fonts]` 段的行列表。
+
+    这是 SSA 家族自带的一种**变体 UU 编码**，不是标准 uuencode、更不是 base64：
+    每 3 字节打成 24 位，再切成 4 个 6 位组，每组加 33（`!`）落进可打印区。
+    末尾不足 3 字节时，只输出 `字节数 + 1` 个字符——libass 的 `decode_chars`
+    正是按这个数量反推剩余字节数的，多输出一个字符会让它多解出一个垃圾字节。
+
+    编码后体积约为原始的 4/3，再加换行。一份 5 MB 的子集字体嵌进 ASS 约 6.8 MB，
+    所以**只用于导出**：预览侧每次编辑都要重传字幕文本，塞不起。
+    """
+    chars: list[str] = []
+    for i in range(0, len(data), 3):
+        chunk = data[i : i + 3]
+        value = chunk[0] << 16
+        if len(chunk) > 1:
+            value |= chunk[1] << 8
+        if len(chunk) > 2:
+            value |= chunk[2]
+        for j in range(len(chunk) + 1):
+            chars.append(chr(((value >> (18 - 6 * j)) & 0x3F) + 33))
+    return [
+        "".join(chars[i : i + _UU_LINE_WIDTH]) for i in range(0, len(chars), _UU_LINE_WIDTH)
+    ]
+
+
+def fonts_section(entries: Sequence[tuple[str, bytes]]) -> str:
+    """由 `(族名, 字体字节)` 列表生成完整的 `[Fonts]` 段（含段头，末尾带空行）。
+
+    `fontname:` 后面那个文件名 libass 只当标识符用，真正的族名它自己从字体的
+    name 表里读（所以 `subset_font(family_name=...)` 的改名才是匹配的依据）。
+    这里仍然把族名编进文件名，**纯为排查方便**：出问题时能直接从 ASS 里看出
+    这一段是谁。文件名里的非 ASCII 与空格一律替换掉——VSFilter 系工具对
+    `[Fonts]` 的文件名格式假设很多，没必要去试它们的边界。
+
+    条目为空时返回空串：不要产出一个空的 `[Fonts]` 段，那只会让 ASS 多两行噪声。
+    """
+    if not entries:
+        return ""
+    out = ["[Fonts]"]
+    for order, (family, data) in enumerate(entries):
+        safe = "".join(ch if ch.isascii() and ch.isalnum() else "_" for ch in family) or "font"
+        out.append(f"fontname: kvm{order}_{safe}_0.ttf")
+        out.extend(uuencode_font(data))
+    out.append("")
+    return "\n".join(out) + "\n"
+
 
 # 常见的系统字体位置。TTC 是字体集合，需要按 family 挑出其中一个。
 _FONT_CANDIDATES = [
@@ -145,7 +236,37 @@ def _rewrite_family_name(font: TTFont, family: str) -> None:
 
     **不动 nameID 6（PostScript 名）**：PS 名有"不含空格、纯 ASCII"的格式约束，
     按族名硬凑容易造出非法值；它只是一条额外别名，与族名不一致不影响匹配。
+
+    ## 同时把**全部字型声明**归一成"常规字重、非粗非斜"
+
+    字体链让**同一个族名下同时存在好几个字面**（链首、链尾……），此时 libass 要在
+    它们之间挑一个当这个族的代表。只要各字面在字型声明上还有差别，它就会拿差别
+    去打分，而打分的结果**不是我们想要的链序**：
+
+    - 只归一 `usWeightClass`（W8=800 vs 明朝 W3=300）还不够。实测 `bold=True` 时
+      链首（`fsSelection` 带 BOLD 位）反而落选，`あ`（两个字体都有的字）由链尾画出，
+      **用户选的主字体在自己有的字上都不生效**；而 `bold=False` 时链首正常胜出。
+      同一份数据因为一个开关就换了字体，这种不确定性正是 §5.12 要消掉的。
+    - 因此三处一起归一：`usWeightClass` → 400、`fsSelection` 的 BOLD/ITALIC 位清掉
+      并置 REGULAR 位、`head.macStyle` → 0。三者是 FreeType 合成 `style_flags` 的
+      全部来源，都抹平之后各字面在打分上**完全无从区分**，剩下的只有加入顺序，
+      而加入顺序就是链序。
+
+    这只改**声明**，不改字形轮廓：W8 的字仍然是 W8 那么粗。
+
+    **副作用要说清楚**：libass 只在"请求粗体且该字面未声明粗体"时合成粗体。
+    归一之后所有字面都不声明粗体，于是 Bold 开关对**每个字体**都会走合成粗体——
+    在此之前，声明了粗体的字面（如 ヒラギノ角ゴ StdN W8）会**静默忽略** Bold 开关，
+    而绝大多数字体（Noto Sans CJK JP Regular 等）本来就走合成。也就是说这一改让
+    Bold 的行为从"看字体脸色"变成一致，代价是那少数几个字体开粗体后比以前更粗。
     """
+    with contextlib.suppress(KeyError):  # 没有 OS/2 表的字体极罕见，跳过即可
+        os2 = font["OS/2"]
+        os2.usWeightClass = 400
+        # bit5 = BOLD、bit0 = ITALIC、bit6 = REGULAR（三者互斥，置 REGULAR 前先清掉另两个）
+        os2.fsSelection = (os2.fsSelection & ~0x0021) | 0x0040
+    with contextlib.suppress(KeyError):
+        font["head"].macStyle = 0
     name = font["name"]
     for record in list(name.names):
         if record.nameID in (1, 4):

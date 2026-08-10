@@ -67,14 +67,49 @@
 
 from __future__ import annotations
 
+import functools
+import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from kvm.models.karaoke import KaraokeProject, Line, RubySpan, Token
+from kvm.render.font_subset import default_charset, fonts_section
 from kvm.render.text_metrics import FontSpec, LibassMetrics
+
+
+@functools.cache
+def _default_preview_charset() -> frozenset[str]:
+    """预览子集默认保留的字符集（进程内只算一次）。
+
+    `default_charset()` 要遍历两万多个码位试 shift_jis 编码，而每次生成 ASS 都要用它
+    来算"哪些字落在默认集合之外"。它在进程生命周期内不会变。
+    """
+    return frozenset(default_charset())
+
+
+PREVIEW_FONTS_TAG = "; kvm-preview-fonts:"
+"""预览侧字体契约的声明前缀，值是一行 JSON：`{"chain": [...], "extra": "..."}`。
+
+## 为什么把它写进 ASS
+
+导出侧把字体字节直接嵌进 `[Fonts]`，预览侧不能这么干——预览 ASS 每编辑一下就要
+重传一次，一份子集字体 UUEncode 后约 6.8 MB，拖一次滑块就是几 MB 往返。
+于是预览需要另一条途径知道"该去取哪几个字体、按什么族名、还要补哪些字"。
+
+写在 ASS 里而不是另开一个接口，是因为**它必须与这份 ASS 严格同步**：
+字体链是随样式一起改的，多一次往返就多一个"字幕已经换了字体、字体还没换过来"
+的窗口期。前端 `lib/jassub.ts` 已经在解析 ASS（做增量更新），顺手读一行注释
+不引入新机制。
+
+这不违反"ASS 永不被反向解析回工程"（CLAUDE.md §4.1）：读的是**渲染契约**
+（这份 ASS 要用哪些字体），不是工程状态。
+
+libass 只忽略 `[Script Info]` 里以 `;` 开头的行，所以它对渲染完全无害。
+"""
 
 _HEADER_TMPL = """[Script Info]
 ; 由 karaoke-video-maker 生成 —— 请勿手工编辑，改动会在下次生成时丢失
-ScriptType: v4.00+
+{preview_fonts}ScriptType: v4.00+
 PlayResX: {w}
 PlayResY: {h}
 LayoutResX: {w}
@@ -91,7 +126,7 @@ Style: Title,{font},{title_size},{unsung_fill},{unsung_fill},{unsung_outline},&H
 Style: Credit,{font},{credit_size},{unsung_fill},{unsung_fill},{unsung_outline},&H00000000&,0,0,0,0,100,100,0,0,1,{ruby_outline},0,8,0,0,0,1
 Style: Dot,{font},{dot_size},{sung_fill},{sung_fill},{sung_outline},&H00000000&,-1,0,0,0,100,100,0,0,1,{ruby_outline},0,7,0,0,0,1
 
-[Events]
+{fonts_section}[Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
 
@@ -128,9 +163,46 @@ class _LaidOutLine:
 class AssBuilder:
     """把 KaraokeProject 渲染成 ASS 文本。"""
 
-    def __init__(self, project: KaraokeProject, metrics: LibassMetrics) -> None:
+    def __init__(
+        self,
+        project: KaraokeProject,
+        metrics: LibassMetrics,
+        *,
+        embedded_fonts: Sequence[tuple[str, bytes]] | None = None,
+    ) -> None:
         self._p = project
         self._m = metrics
+        self._embedded = list(embedded_fonts or [])
+
+    def rendered_charset(self) -> str:
+        """成片上会出现的全部字符（去重排序）。
+
+        **不只是歌词正文**：制作名单（曲名 / 歌手 / 词曲编曲那几行）同样会被烧进
+        画面（`_emit_credits`），漏掉它就会出现"歌词都好、片头曲名是豆腐块"。
+        注音假名也算。
+
+        前端 `lib/fontCoverage.ts` 的 `renderedCharset` 与这里是**同一个集合的
+        两份实现**，各自服务于自己那侧的时机（前端要在没发请求前就算出缓存键）。
+        两边漏掉同一类文本的风险是真的，所以修改任一处都要看另一处。
+        """
+        chars = {c for c in self._p.title + self._p.artist if c.strip()}
+        for line in self._p.lines:
+            for tok in line.tokens:
+                chars.update(c for c in tok.text if c.strip())
+            for rb in line.ruby:
+                chars.update(c for c in rb.text if c.strip())
+        return "".join(sorted(chars))
+
+    def _preview_fonts_line(self) -> str:
+        """预览侧的字体契约声明，见 `PREVIEW_FONTS_TAG`。"""
+        base = _default_preview_charset()
+        payload = {
+            "chain": list(self._p.style.font_names),
+            # 只列默认子集之外的字：绝大多数歌这里是空串，于是同一个字体的子集
+            # 产物能在工程之间共用，而不是每首歌各裁一份
+            "extra": "".join(c for c in self.rendered_charset() if c not in base),
+        }
+        return f"{PREVIEW_FONTS_TAG} {json.dumps(payload, ensure_ascii=False)}\n"
 
     def build(self) -> str:
         p = self._p
@@ -149,7 +221,11 @@ class AssBuilder:
         head = _HEADER_TMPL.format(
             w=p.video_width,
             h=p.video_height,
-            font=st.font_name,
+            preview_fonts=self._preview_fonts_line(),
+            # 整条链在子集化时都被改写成主字体的族名（见 font_subset 模块文档），
+            # 所以这里写主字体一个名字就够，libass 会在同名的几个字面里挑带该字形的那个
+            fonts_section=fonts_section(self._embedded),
+            font=st.primary_font,
             size=st.font_size,
             ruby_size=ruby_size,
             unsung_fill=head_pal.unsung_fill,
@@ -210,7 +286,7 @@ class AssBuilder:
         """
         p = self._p
         st = p.style
-        font = FontSpec(name=st.font_name, size=st.font_size, bold=st.bold)
+        font = FontSpec(name=st.primary_font, size=st.font_size, bold=st.bold)
         avail = p.video_width - st.margin_h * 2
 
         out: list[Line] = []
@@ -507,7 +583,7 @@ class AssBuilder:
     def _layout(self, lines: list[Line]) -> list[_LaidOutLine]:
         p = self._p
         st = p.style
-        font = FontSpec(name=st.font_name, size=st.font_size, bold=st.bold)
+        font = FontSpec(name=st.primary_font, size=st.font_size, bold=st.bold)
 
         texts = [ln.text for ln in lines]
         all_adv = self._m.advances_many(texts, font)
@@ -624,7 +700,7 @@ class AssBuilder:
 
         # 注音行
         ruby_y = lo.y - ruby_size - st.ruby_gap
-        font_ruby = FontSpec(name=st.font_name, size=ruby_size, bold=st.bold)
+        font_ruby = FontSpec(name=st.primary_font, size=ruby_size, bold=st.bold)
         if ln.ruby:
             rubies = [r.text for r in ln.ruby]
             widths = [a[-1] if a else 0 for a in self._m.advances_many(rubies, font_ruby)]
@@ -696,7 +772,7 @@ class AssBuilder:
         必须应用该行的水平缩放，否则超宽行的注音会与压缩后的基字错位。
         """
         st = self._p.style
-        font = FontSpec(name=st.font_name, size=st.font_size, bold=st.bold)
+        font = FontSpec(name=st.primary_font, size=st.font_size, bold=st.bold)
         adv = self._m.advances(lo.line.text, font)
         f = lo.scale / 100.0
         return [lo.x0] + [lo.x0 + int(a * f) for a in adv]

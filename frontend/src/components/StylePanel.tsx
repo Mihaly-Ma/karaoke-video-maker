@@ -337,10 +337,14 @@ export default function StylePanel() {
 
         <section className="sty-sec">
           <div className="sty-sec__head">{t('style.section.font')}</div>
+          {/*
+            改字体一律走 `font_names`（整条链），不发 `font_name`——后者是后端的
+            派生量，只在兼容老前端时才用得上，从这里发只会让"改链尾"表达不出来。
+          */}
           <StyleFontPicker
-            value={draft.font_name}
+            value={draft.font_names}
             charset={charset}
-            onPick={(f) => setNow('font_name', f)}
+            onChange={(chain) => setNow('font_names', chain)}
           />
         </section>
 

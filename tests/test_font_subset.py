@@ -34,7 +34,9 @@ from kvm.api.routes.fonts import _subset_cache_key  # noqa: E402
 from kvm.render.font_subset import (  # noqa: E402
     SUBSET_VERSION,
     FontFamilyMismatchError,
+    fonts_section,
     subset_font,
+    uuencode_font,
 )
 
 # 复刻 macOS 日文字体的命名习惯：nameID 1 带字重后缀，真族名只在 nameID 16
@@ -163,13 +165,71 @@ def test_subset_without_family_name_keeps_original(tmp_path: Path) -> None:
     assert _names(out, 16) == [FAMILY]
 
 
+def test_subset_normalizes_weight_class(tmp_path: Path) -> None:
+    """改写族名时必须把 `usWeightClass` 归一到 400。
+
+    字体链让**同一个族名下同时躺着好几个字面**（链首、链尾……），libass 在它们之间
+    挑一个时会比"声明字重与请求字重的距离"。链首若是 W8（800）、链尾是明朝 W3（300），
+    而 ASS 请求常规字重（400），链尾反而更近——实测结果是链首彻底失去优先权，
+    用户选的字体连自己有的字都轮不到它画（`experiments/ass_embedded_fonts.py`）。
+    """
+    src = tmp_path / "src.ttf"
+    _make_source_font(src)
+    heavy = TTFont(str(src))
+    heavy["OS/2"].usWeightClass = 800
+    heavy.save(str(src))
+
+    dest = tmp_path / "out.otf"
+    subset_font(src, dest, charset={"A"}, family_name=FAMILY)
+    assert TTFont(str(dest))["OS/2"].usWeightClass == 400
+
+
+def test_uuencode_roundtrips(tmp_path: Path) -> None:
+    """ASS `[Fonts]` 的变体 UU 编码必须能被 libass 的解码规则原样还原。
+
+    这不是"随便找个编码"：末尾不足 3 字节时只能输出 `字节数 + 1` 个字符，
+    libass 正是靠这个数量反推剩余字节数。多输出一个字符，解出来就多一个垃圾字节，
+    而字体多一个尾字节的后果是整份字体解析失败——预览与成片同时空白。
+    所以三种余数（0/1/2）都要覆盖。
+    """
+
+    def decode(lines: list[str]) -> bytes:
+        chars = "".join(lines)
+        out = bytearray()
+        for i in range(0, len(chars), 4):
+            group = chars[i : i + 4]
+            value = 0
+            for j in range(4):
+                value |= (ord(group[j]) - 33 if j < len(group) else 0) << (18 - 6 * j)
+            for j in range(len(group) - 1):
+                out.append((value >> (16 - 8 * j)) & 0xFF)
+        return bytes(out)
+
+    for size in (0, 1, 2, 3, 4, 5, 6, 79, 80, 81, 4096):
+        data = bytes((i * 37 + 11) % 256 for i in range(size))
+        lines = uuencode_font(data)
+        assert all(len(line) <= 80 for line in lines), size
+        assert decode(lines) == data, size
+
+
+def test_fonts_section_shape(tmp_path: Path) -> None:
+    """`[Fonts]` 段的形状：有段头、每份字体一条 `fontname:`、空列表不产出空段。"""
+    assert fonts_section([]) == ""
+    text = fonts_section([("ヒラギノ角ゴ", b"abcdef"), ("Noto", b"xyz")])
+    assert text.startswith("[Fonts]\n")
+    names = [ln for ln in text.splitlines() if ln.startswith("fontname:")]
+    assert len(names) == 2
+    # 文件名必须是纯 ASCII：VSFilter 系工具对这里的格式假设很多，没必要去试边界
+    assert all(ln.isascii() for ln in names), names
+
+
 def test_cache_key_invalidates_legacy_entries() -> None:
     """带版本号的缓存键不能命中旧版留在磁盘上的产物。
 
     只改生成代码而不动缓存键，装过旧版的用户会永远拿到那份坏字体 ——
     这正是本次修复必须连带处理的部分。
     """
-    args = (FAMILY, 1, 1_700_000_000_000_000_000, 5_988_268)
+    args = (FAMILY, 1, 1_700_000_000_000_000_000, 5_988_268, FAMILY, "")
     legacy = hashlib.sha256(f"{args[0]}|{args[1]}|{args[2]}|{args[3]}".encode()).hexdigest()[:16]
     assert _subset_cache_key(*args) != legacy
 
@@ -182,8 +242,25 @@ def test_cache_key_invalidates_legacy_entries() -> None:
 
 def test_cache_key_tracks_source_file_changes() -> None:
     """源字体被系统更新（mtime / 大小变化）后仍必须重新生成。"""
-    base = _subset_cache_key(FAMILY, 1, 111, 222)
-    assert base != _subset_cache_key(FAMILY, 1, 112, 222)
-    assert base != _subset_cache_key(FAMILY, 1, 111, 223)
-    assert base != _subset_cache_key(FAMILY, 2, 111, 222)
-    assert base != _subset_cache_key("Other Family", 1, 111, 222)
+    base = _subset_cache_key(FAMILY, 1, 111, 222, FAMILY, "")
+    assert base != _subset_cache_key(FAMILY, 1, 112, 222, FAMILY, "")
+    assert base != _subset_cache_key(FAMILY, 1, 111, 223, FAMILY, "")
+    assert base != _subset_cache_key(FAMILY, 2, 111, 222, FAMILY, "")
+    assert base != _subset_cache_key("Other Family", 1, 111, 222, FAMILY, "")
+
+
+def test_cache_key_covers_chain_rewrite_and_extra_chars() -> None:
+    """产物字节由 `as_family` 与 `extra` 共同决定，两者都必须进缓存键。
+
+    漏掉 `as_family`：换主字体后链尾仍自称旧族名，libass 匹配不上，预览整块空白。
+    漏掉 `extra`：换一首含生僻字的歌，命中的是上一首裁好的产物，
+    那些字在里面根本没有——症状是"预览空白、成片正常"，看成片发现不了。
+    """
+    base = _subset_cache_key(FAMILY, 0, 111, 222, FAMILY, "")
+    assert base != _subset_cache_key(FAMILY, 0, 111, 222, "Other Head", "")
+    assert base != _subset_cache_key(FAMILY, 0, 111, 222, FAMILY, "鷗")
+    # 字符集合的顺序不该影响命中：同一批字符必须共用一份产物，
+    # 否则用户每改一个字的位置就要重裁一次字体
+    assert _subset_cache_key(FAMILY, 0, 111, 222, FAMILY, "鷗𠮷") == _subset_cache_key(
+        FAMILY, 0, 111, 222, FAMILY, "𠮷鷗鷗"
+    )

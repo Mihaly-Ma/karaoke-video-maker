@@ -238,6 +238,48 @@ export const STYLE_STAGE_CSS = `
 /* 缺字清单本身按原样断行：生僻字连成一片时不换行会把整栏撑宽 */
 .sty-cov span { word-break: break-all; }
 
+/*
+ * 字体链：现状在上、改它的入口在下。竖着排是刻意的——链是**有序**的，
+ * 横排读不出"前面缺了才用后面"这层意思。
+ */
+.sty-chain {
+  margin-top: var(--sp-2);
+  margin-bottom: var(--sp-3);
+  border: var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--bg-surface);
+}
+.sty-chain__row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  border-bottom: 1px solid var(--stroke);
+  font-size: var(--fs-sm);
+  color: var(--fg-2);
+}
+.sty-chain__row--head { color: var(--fg); font-weight: 600; }
+.sty-chain__rank {
+  flex: 0 0 auto;
+  min-width: 52px;
+  font-size: var(--fs-xs);
+  font-weight: 400;
+  color: var(--fg-3);
+}
+.sty-chain__name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sty-chain__share { flex: 0 0 auto; font-size: var(--fs-xs); color: var(--fg-3); }
+.sty-chain__ops { flex: 0 0 auto; display: flex; gap: 2px; }
+.sty-chain__ops button {
+  padding: 2px var(--sp-1);
+  background: transparent;
+  border: none;
+  color: var(--fg-3);
+  font-size: var(--fs-xs);
+}
+.sty-chain__ops button:hover:not(:disabled) { color: var(--fg); background: var(--bg-raise); }
+.sty-chain__ops button:disabled { opacity: 0.3; }
+.sty-chain__hint { padding: var(--sp-1) var(--sp-2); font-size: var(--fs-xs); color: var(--fg-3); }
+
 .sty-fontgrid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-2); }
 .sty-fontpreset {
   display: flex;
@@ -262,28 +304,84 @@ export const STYLE_STAGE_CSS = `
   border-radius: var(--r-md);
   background: var(--bg-surface);
 }
+/*
+ * 一行两个操作：点名字＝设为主字体，点右侧加号＝加为兜底。
+ * 两者都常用，藏一个到悬停或右键都会让人找不到。
+ */
 .sty-fontitem {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-2);
+  gap: var(--sp-1);
   width: 100%;
+  border-bottom: 1px solid var(--stroke);
+  color: var(--fg-2);
+  font-size: var(--fs-sm);
+}
+.sty-fontitem:last-child { border-bottom: none; }
+.sty-fontitem:hover { background: var(--bg-raise); color: var(--fg); }
+.sty-fontitem--on { background: var(--accent-weak); color: var(--fg); font-weight: 600; }
+.sty-fontitem__pick {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  flex: 1 1 auto;
+  min-width: 0;
   padding: var(--sp-1) var(--sp-2);
   background: transparent;
   border: none;
   border-radius: 0;
-  border-bottom: 1px solid var(--stroke);
-  color: var(--fg-2);
-  font-size: var(--fs-sm);
+  color: inherit;
+  font: inherit;
   text-align: left;
 }
-.sty-fontitem:last-child { border-bottom: none; }
-.sty-fontitem:hover:not(:disabled) { background: var(--bg-raise); color: var(--fg); }
-.sty-fontitem--on { background: var(--accent-weak); color: var(--fg); font-weight: 600; }
+.sty-fontitem__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 日文名比英文族名更容易被认出来，但它是补充信息，不能抢主名的位置 */
+.sty-fontitem__alt {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-xs);
+  font-weight: 400;
+  color: var(--fg-3);
+}
 .sty-fontitem__warn { flex: 0 0 auto; font-size: var(--fs-xs); color: var(--warn); }
+.sty-fontitem__add {
+  flex: 0 0 auto;
+  padding: var(--sp-1) var(--sp-2);
+  background: transparent;
+  border: none;
+  color: var(--fg-3);
+  font-size: var(--fs-xs);
+}
+.sty-fontitem__add:hover:not(:disabled) { color: var(--accent); }
+.sty-fontitem__add:disabled { opacity: 0.4; }
 
 .sty-fontbar { display: flex; align-items: center; gap: var(--sp-2); margin-top: var(--sp-3); font-size: var(--fs-xs); color: var(--fg-3); }
 .sty-fontbar__spacer { flex: 1 1 auto; }
+.sty-search {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: var(--sp-1) var(--sp-2);
+  border: var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--bg-surface);
+  color: var(--fg-3);
+}
+.sty-search:focus-within { border-color: var(--accent); }
+.sty-search input {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--fg);
+  font-size: var(--fs-sm);
+}
 
 /* ---- 声部配色 ---- */
 

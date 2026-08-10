@@ -14,12 +14,12 @@
 
 缓存键包含字体文件的 mtime 与大小，字体被替换后会自动重新生成。
 
-## 冷扫描 41 秒的处理：后台预热 + 可查询进度
+## 冷扫描 40 余秒的处理：后台预热 + 可查询进度
 
-本机实测冷扫描 **40.9 秒**（862 个 family / 900 余个字体文件），二次启动命中
-磁盘缓存只要 8ms。但首次安装、或系统字体增删改之后仍然要等这 41 秒，期间
-如果同步阻塞在接口里，用户看到的就是"界面卡死"——这正是 CLAUDE.md §2.5
-所说的"自动环节失败时要降级、不能终止"的反面。
+本机实测冷扫描 **43.6 秒**（862 个 family / 902 个字体文件，含读取各语言别名），
+二次启动命中磁盘缓存只要 **52ms**。但首次安装、或系统字体增删改之后仍然要等这
+40 余秒，期间如果同步阻塞在接口里，用户看到的就是"界面卡死"——这正是
+CLAUDE.md §2.5 所说的"自动环节失败时要降级、不能终止"的反面。
 
 所以扫描一律**后台线程预热**（应用启动时由 `kvm.api.app` 的 lifespan 触发，
 任何字体接口被调用时也会兜底触发），并且：
@@ -34,6 +34,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -41,13 +42,16 @@ import platform
 import subprocess
 import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
+from typing import NamedTuple
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 from kvm import paths
+from kvm.models.karaoke import normalize_font_chain
 from kvm.render import font_cache
-from kvm.render.font_subset import SUBSET_VERSION, subset_font
+from kvm.render.font_subset import SUBSET_VERSION, charset_digest, default_charset, subset_font
 from pydantic import BaseModel
 
 _log = logging.getLogger(__name__)
@@ -62,15 +66,26 @@ def _cache_dir() -> Path:
     return d
 
 
-def _subset_cache_key(family: str, index: int, mtime_ns: int, size: int) -> str:
+def _subset_cache_key(
+    family: str, index: int, mtime_ns: int, size: int, as_family: str, extra: str
+) -> str:
     """子集产物的磁盘缓存键。
 
     带上源文件的 mtime 与大小，字体被系统更新后会自动重新生成；还要带上
     `SUBSET_VERSION` —— 生成逻辑一改，老用户缓存目录里那份按旧逻辑产出的字体
     不会自己过期，会一直被当成命中直接下发。族名改写这个 bug 就踩在这上面：
     只改生成代码而不动缓存键，装过旧版的人永远拿不到修好的字体。
+
+    `as_family`（产物对外自称的族名）与 `extra`（本曲额外字符）都会改变产物字节，
+    所以两者都必须进键。代价是**换主字体会让整条链的产物全部失效重裁**——
+    链上每个字体都要改名成新的链首。这是族名统一那条机制的必然开销
+    （见 `subset_font` 与 `experiments/ass_embedded_fonts.py`），
+    靠 `POST /coverage` 的预热把它挪到用户还在挑字体的时候完成。
     """
-    payload = f"v{SUBSET_VERSION}|{family}|{index}|{mtime_ns}|{size}"
+    payload = (
+        f"v{SUBSET_VERSION}|{family}|{index}|{mtime_ns}|{size}"
+        f"|as={as_family}|extra={charset_digest(extra)}"
+    )
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
@@ -84,6 +99,19 @@ class FontInfo(BaseModel):
     path: str
     index: int = 0
     """TTC 字体集合内的族下标；非集合为 0。"""
+
+    alt_names: list[str] = []
+    """同一个字体在 name 表里的其它语言写法（已去掉与 `family` 重复的那条）。
+
+    **搜索必须认这些名字**：日文字体普遍中英双名——ヒラギノ角ゴシック 的
+    `family` 是英文的 `Hiragino Kaku Gothic ProN`，用户却多半会打「ヒラギノ」
+    或「ひらぎの」。只按 `family` 搜的话，界面上看得见的名字反而搜不到，
+    用户会以为本机没装这个字体。
+
+    取的是 nameID 1（Family）与 16（Typographic Family）的**全部**平台/语言记录。
+    也带上 16 是因为 macOS 日文字体的真族名常常只出现在那里
+    （ヒラギノ丸ゴ ProN 的 nameID 1 是带字重后缀的 `... W4`）。
+    """
 
     is_cjk: bool = False
     """是否覆盖日文字形。不覆盖的字体拿来排日语歌词只会渲染成豆腐块。"""
@@ -114,6 +142,16 @@ def _candidate_font_files(dirs: list[str]) -> list[Path]:
     return out
 
 
+SCAN_CACHE_VERSION = 2
+"""扫描结果**记录格式**的版本。**给 `FontInfo` 加字段时必须 +1。**
+
+它算进磁盘缓存签名里。不加的话，老缓存会照常命中，新字段一律取默认值——
+`alt_names` 这次就是：用户机器上躺着 v1 的缓存，升级后搜索框永远搜不到日文名，
+而且**看起来一切正常**（列表照常、扫描照常"已就绪"），没有任何东西提示要重扫。
+判据与 `SUBSET_VERSION` 一样：不是"内容变没变"，而是"旧记录还够不够用"。
+"""
+
+
 def _scan_signature(files: list[Path]) -> str:
     """基于候选字体文件的路径 / mtime / 大小算一个签名，判断磁盘缓存是否过期。
 
@@ -121,7 +159,7 @@ def _scan_signature(files: list[Path]) -> str:
     实测 stat 一遍约 5ms，而解析 name 表要 7~8 秒），字体被替换 / 增删后签名
     自然变化，缓存自动失效重新生成。
     """
-    parts: list[str] = []
+    parts: list[str] = [f"scan-v{SCAN_CACHE_VERSION}"]
     for p in sorted(files):
         try:
             st = p.stat()
@@ -154,14 +192,49 @@ def _save_disk_cache(signature: str, fonts: list[FontInfo]) -> None:
         pass  # 写缓存失败不影响本次扫描结果，下次再重试
 
 
-def _regular_weight_rank(item: tuple[int, str, str, int, bool]) -> tuple[int, int]:
+class _Face(NamedTuple):
+    """扫描过程中记下的一个字面。聚合成 `FontInfo` 之前的中间形态。"""
+
+    weight: int
+    subfamily: str
+    path: str
+    index: int
+    is_cjk: bool
+    alt_names: tuple[str, ...]
+
+
+def _regular_weight_rank(item: _Face) -> tuple[int, int]:
     """越接近常规字重（usWeightClass=400）越优先，"Regular" 一类标签在等距时优先。"""
-    weight, sub, _path, _idx, _is_cjk = item
-    is_regular_label = sub.strip().lower() in ("regular", "roman", "normal", "book")
-    return (abs(weight - 400), 0 if is_regular_label else 1)
+    is_regular_label = item.subfamily.strip().lower() in ("regular", "roman", "normal", "book")
+    return (abs(item.weight - 400), 0 if is_regular_label else 1)
 
 
-def _aggregate(candidates: dict[str, list[tuple[int, str, str, int, bool]]]) -> list[FontInfo]:
+def _alt_family_names(face: object, family: str) -> tuple[str, ...]:
+    """字体 name 表里除 `family` 之外的族名写法，供搜索匹配。
+
+    同时收 nameID 1 与 16 的**全部**平台/语言记录：日文字体的日文名往往只在
+    Mac 平台（platformID=1）或日语 langID 的记录里，只读 `getDebugName` 拿到的
+    是英文那条。带字重后缀的写法（`... W4`）一并留着——用户照着字体册打字时
+    很可能连字重一起打。
+    """
+    out: list[str] = []
+    try:
+        records = face["name"].names  # type: ignore[index]
+    except Exception:
+        return ()
+    for record in records:
+        if record.nameID not in (1, 16):
+            continue
+        try:
+            text = str(record.toUnicode()).strip()
+        except Exception:
+            continue
+        if text and text != family and text not in out:
+            out.append(text)
+    return tuple(out)
+
+
+def _aggregate(candidates: dict[str, list[_Face]]) -> list[FontInfo]:
     """把 `family -> 各字重面` 的中间结果聚合成对外的字体列表。
 
     ASS 的 `Fontname` 用的是 family 名，字重由 Bold 标志控制——日文字体的字重
@@ -174,12 +247,20 @@ def _aggregate(candidates: dict[str, list[tuple[int, str, str, int, bool]]]) -> 
     out: dict[str, FontInfo] = {}
     for family, items in candidates.items():
         rep = min(items, key=_regular_weight_rank)
+        # 别名取全部字面的并集：同一 family 下不同字重的 name 表内容可能不一样
+        # （日文名只写在其中一个字重上是常见情况），只看代表字面会漏掉。
+        alt: list[str] = []
+        for item in items:
+            for name in item.alt_names:
+                if name not in alt:
+                    alt.append(name)
         out[family] = FontInfo(
             family=family,
-            path=rep[2],
-            index=rep[3],
-            is_cjk=any(item[4] for item in items),
-            weights=sorted({item[1] for item in items}),
+            path=rep.path,
+            index=rep.index,
+            alt_names=alt,
+            is_cjk=any(item.is_cjk for item in items),
+            weights=sorted({item.subfamily for item in items}),
         )
     return sorted(out.values(), key=lambda x: (not x.is_cjk, x.family))
 
@@ -262,8 +343,7 @@ def _run_scan() -> None:
             )
             return
 
-        # family -> [(usWeightClass, subfamily, path, index, is_cjk), ...]
-        candidates: dict[str, list[tuple[int, str, str, int, bool]]] = {}
+        candidates: dict[str, list[_Face]] = {}
 
         for n, p in enumerate(files, start=1):
             try:
@@ -294,9 +374,12 @@ def _run_scan() -> None:
                         weight = int(f["OS/2"].usWeightClass)
                     except Exception:
                         weight = 400
+                    alt = _alt_family_names(f, family)
                 except Exception:
                     continue
-                candidates.setdefault(family, []).append((weight, sub, str(p), idx, is_cjk))
+                candidates.setdefault(family, []).append(
+                    _Face(weight, sub, str(p), idx, is_cjk, alt)
+                )
 
         result = _aggregate(candidates)
         _publish(result, done=len(files))
@@ -430,13 +513,34 @@ def list_fonts(cjk_only: bool = Query(default=False)) -> list[FontInfo]:
 
 
 _subset_lock = threading.Lock()
-_subset_jobs: dict[Path, threading.Thread] = {}
-"""正在后台裁剪的产物路径 → 线程。同一份产物只裁一次，重复请求共用同一个作业。"""
+_subset_jobs: dict[Path, Future[None]] = {}
+"""正在后台裁剪的产物路径 → 作业。同一份产物只裁一次，重复请求共用同一个作业。"""
 
 _subset_errors: dict[Path, str] = {}
 """裁剪失败的原因。**必须留着**：否则前端会一直收到 503 重试到超时，
 而真正的原因（比如族名对不上）没有任何人看得到——那正是 §2.5 说的
 "自动环节的错误必须可见"。"""
+
+SUBSET_WORKERS = 2
+"""同时进行的裁剪作业数上限。
+
+**必须有上限。**一条链有几个字体，前端就会并发发起几个请求（`loadFonts` 用的是
+`Promise.all`），一人一条线程地裁下去，五个字体就是五份 fontTools 同时在跑，
+每份都把整个字体读进内存（源字体动辄几十 MB），还把 API 线程挤没了——
+用户那边表现成"连字体列表都刷不出来"。
+
+**这个上限买的是资源封顶，不是速度。**本机实测冷裁剪整条链的墙钟时间：
+单字体 **4.4s**、两字体 **12.0s**、三字体 **19.4s**——基本是线性叠加，
+并没有并行收益。原因是裁剪是纯 Python 的 CPU 活，被 GIL 串起来了。
+把数字调大不会更快，只会更占内存。
+
+**真正解决排队的是预热**（`POST /coverage` 触发 `preheat_chain`）：用户在字体
+列表里挑的那几秒到几十秒，正好把这段裁剪跑完，切到预览时已是缓存命中（**0.0s**）。
+真要压缩这段时间，方向是换成子进程池（§5.13 的作业架构本就如此），
+不是加线程——但那要先有值得付出的理由，目前预热已经把它盖住了。
+"""
+
+_subset_pool = ThreadPoolExecutor(max_workers=SUBSET_WORKERS, thread_name_prefix="kvm-font-subset")
 
 
 def _subset_failure(dest: Path) -> str | None:
@@ -444,22 +548,32 @@ def _subset_failure(dest: Path) -> str | None:
         return _subset_errors.pop(dest, None)
 
 
-def _run_subset_job(match: FontInfo, src: Path, dest: Path) -> None:
+def _run_subset_job(match: FontInfo, src: Path, dest: Path, as_family: str, extra: str) -> None:
     """后台裁剪一份子集。
 
     **写临时文件再 rename**，不直接写 `dest`：`get_subset` 判断"有没有裁好"
     靠的就是 `dest.exists()`，直接写的话，文件一创建就会被认为已就绪，
     而此时里面还只有半截字节——下发出去就是一份坏字体，libass 画不出任何东西
     且不报错。rename 在同一文件系统内是原子的，要么没有、要么完整。
+
+    临时文件名带上产物键（`dest.name`），不能是固定后缀：两个作业若共用同一个
+    临时名，先完成的那个会被后完成的覆盖掉半截。
     """
     tmp = dest.with_name(dest.name + ".part")
     try:
-        subset_font(src, tmp, family_index=match.index, flavor=None, family_name=match.family)
+        subset_font(
+            src,
+            tmp,
+            charset=set(default_charset()) | set(extra),
+            family_index=match.index,
+            flavor=None,
+            family_name=as_family,
+        )
         tmp.replace(dest)
         # 刚裁完，正是做容量清理的时机（用户本来就在等下一次轮询）。
         # `protect` 保住刚生成的这份，否则会出现"裁完就被自己删掉、下次再裁"的抖动
         font_cache.prune_font_cache(_cache_dir(), protect=dest)
-    except Exception as exc:  # 线程里任何异常都要留痕，不能静默死掉
+    except Exception as exc:  # 作业里任何异常都要留痕，不能静默死掉
         _log.warning("字体子集化失败：%s（%s）", match.family, exc)
         with _subset_lock:
             _subset_errors[dest] = str(exc)
@@ -469,33 +583,71 @@ def _run_subset_job(match: FontInfo, src: Path, dest: Path) -> None:
             _subset_jobs.pop(dest, None)
 
 
-def _ensure_subset_job(match: FontInfo, src: Path, dest: Path) -> None:
-    """确保该产物正在后台裁剪。已经在裁就什么都不做——重复请求不该重复开工。"""
+def _ensure_subset_job(match: FontInfo, src: Path, dest: Path, as_family: str, extra: str) -> None:
+    """确保该产物正在（或已排队等待）后台裁剪。重复请求不该重复开工。"""
     with _subset_lock:
         job = _subset_jobs.get(dest)
-        if job is not None and job.is_alive():
+        if job is not None and not job.done():
             return
-        thread = threading.Thread(
-            target=_run_subset_job,
-            args=(match, src, dest),
-            name=f"kvm-font-subset-{match.family}",
-            daemon=True,
+        _subset_jobs[dest] = _subset_pool.submit(
+            _run_subset_job, match, src, dest, as_family, extra
         )
-        _subset_jobs[dest] = thread
-    thread.start()
+
+
+def _subset_target(family: str, as_family: str, extra: str) -> tuple[FontInfo, Path, Path]:
+    """解析出 `(字体记录, 源文件, 产物路径)`。找不到字体时抛 HTTPException。"""
+    match = _require_font(family)
+    src = Path(match.path)
+    try:
+        st = src.stat()
+    except OSError as exc:
+        raise HTTPException(status_code=404, detail=f"字体文件不可读：{src}") from exc
+    key = _subset_cache_key(
+        match.family, match.index, st.st_mtime_ns, st.st_size, as_family, extra
+    )
+    return match, src, _cache_dir() / font_cache.artifact_name(key)
+
+
+def _normalize_extra(extra: str) -> str:
+    """本曲额外字符：排序去重、丢掉空白与已在默认集合里的字符。
+
+    排序去重让缓存键与字符出现顺序无关；剔掉默认集合里的字符则让绝大多数歌
+    的 `extra` 直接变成空串——同一个字体的产物于是能在工程之间共用，
+    而不是每首歌各裁一份。
+    """
+    base = default_charset()
+    return "".join(sorted({c for c in extra if c.strip() and c not in base}))
 
 
 @router.get("/subset")
-def get_subset(family: str = Query(...)) -> FileResponse:
+def get_subset(
+    family: str = Query(...),
+    as_family: str = Query(default="", alias="as"),
+    extra: str = Query(default=""),
+) -> FileResponse:
     """按族名产出可供 JASSUB 使用的子集字体。
 
     产出必须是 **OTF/TTF**：JASSUB 把字节直接喂给 libass，而 libass 不认 woff2 ——
     用 woff2 会表现为"加载成功但一个字都渲染不出来"且不报错。
 
-    产物的族名被改写成**这里请求的 `family`**（`subset_font(family_name=...)`）：
-    libass 只按 name 表的 nameID 1 匹配，而系统字体的 nameID 1 常带字重后缀
-    （ヒラギノ丸ゴ ProN 是 `Hiragino Maru Gothic ProN W4`），不改写就匹配不上，
-    预览会整块空白且不报错。详见 `kvm.render.font_subset` 的模块文档。
+    ## 产物自称什么族名，由 `as` 决定
+
+    默认（`as` 为空）自称 `family` 本身。**字体链场景下调用方必须显式传 `as`
+    并填链首的族名**：libass 不会在族名互不相同的已加载字体之间做缺字回退
+    （`experiments/ass_embedded_fonts.py` 的 distinct 组实测：内嵌一份带该字形、
+    族名不同的字体，ffmpeg 侧照样去用系统字体）。让整条链共用一个族名，
+    它们就成了同一个族的多个字面，libass 在其中挑一个带该字形的——
+    这是字体匹配的基本功能，不是回退启发式，两端行为一致。
+
+    不改写族名也不行：系统字体的 nameID 1 常带字重后缀（ヒラギノ丸ゴ ProN 是
+    `Hiragino Maru Gothic ProN W4`），libass 按 nameID 1 匹配，对不上就整块空白
+    且不报错。详见 `kvm.render.font_subset` 的模块文档。
+
+    ## `extra` 补的是本曲用到、但默认集合裁不到的字
+
+    默认集合是 ASCII + 假名 + JIS X 0208 第一/第二水准，「鷗」「𠮷」「①」「㍿」
+    都在集合外。不补的话这些字**预览空白、成片正常**——与缺字相反的一种分叉，
+    只看预览发现不了原因，只看成片根本发现不了。
 
     扫描尚未覆盖到该字体时返回 503 + 中文进度说明（见 `_require_font`）。
 
@@ -510,23 +662,15 @@ def get_subset(family: str = Query(...)) -> FileResponse:
     上一次的还在占着线程池。**表现出来就是"只有某几个字体能用"**，
     而"能用"的恰好是缓存里已经有的那几个。
 
-    所以改成：**后台线程裁，请求立刻返回 503 + `Retry-After`**。
+    所以改成：**后台裁，请求立刻返回 503 + `Retry-After`**。
     前端 `lib/jassub.ts` 的 `fetchFontData` 本来就认这个协议（最长等 60 秒），
     不需要新增任何前端机制；用户看到的是"字体准备中"，而不是一块空白。
     """
-    match = _require_font(family)
-
-    src = Path(match.path)
-    try:
-        st = src.stat()
-    except OSError as exc:
-        raise HTTPException(status_code=404, detail=f"字体文件不可读：{src}") from exc
-
-    key = _subset_cache_key(match.family, match.index, st.st_mtime_ns, st.st_size)
-    dest = _cache_dir() / font_cache.artifact_name(key)
+    clean_extra = _normalize_extra(extra)
+    match, src, dest = _subset_target(family, as_family or family, clean_extra)
 
     if not dest.exists():
-        _ensure_subset_job(match, src, dest)
+        _ensure_subset_job(match, src, dest, as_family or family, clean_extra)
         failure = _subset_failure(dest)
         if failure is not None:
             raise HTTPException(status_code=500, detail=f"字体子集化失败：{failure}")
@@ -544,6 +688,66 @@ def get_subset(family: str = Query(...)) -> FileResponse:
             "Cache-Control": "public, max-age=31536000, immutable",
         },
     )
+
+
+def preheat_chain(chain: list[str], extra: str) -> None:
+    """把整条链的子集产物排进后台裁剪队列。**不等结果、不抛异常。**
+
+    这是"多字体冷裁剪"唯一像样的解法：真正的等待发生在用户切到预览的那一刻，
+    而选字体与看预览之间总有几秒到几十秒的间隙——预检（`POST /coverage`）
+    正好在用户还在字体列表里挑的时候被调用，把这段间隙用上，链再长也不必排队等。
+
+    失败不上报：预热本来就是尽力而为，真正需要这份产物时 `/subset` 会重新触发
+    并把错误如实告诉调用方（§2.5：降级，不终止）。
+    """
+    head = chain[0] if chain else ""
+    if not head:
+        return
+    clean_extra = _normalize_extra(extra)
+    for family in chain:
+        try:
+            match, src, dest = _subset_target(family, head, clean_extra)
+        except HTTPException:
+            continue  # 还没扫到 / 文件不可读：等真正要用时再报
+        if not dest.exists():
+            _ensure_subset_job(match, src, dest, head, clean_extra)
+
+
+def chain_font_bytes(chain: list[str], extra: str, *, timeout_s: float = 180.0) -> list[tuple[str, bytes]]:
+    """取整条链的子集字节，供导出时嵌进 ASS 的 `[Fonts]` 段。
+
+    与预览侧 `GET /subset` 走**同一套缓存键、同一份产物文件**，所以两端拿到的
+    是逐字节相同的字体——§5.12 要的"两端同源"落在这里，而不是靠两边各自
+    再做一次相同的裁剪（那样只要有一处参数漂移就会分叉，且分叉不可见）。
+
+    这里**可以同步等**：导出本来就是几分钟量级的作业，多等十几秒无所谓，
+    而预览侧一秒都不能阻塞。等不到就跳过该字体——宁可这一个字用系统回退，
+    也不要整场导出失败（§2.5）。
+    """
+    head = chain[0] if chain else ""
+    if not head:
+        return []
+    clean_extra = _normalize_extra(extra)
+    out: list[tuple[str, bytes]] = []
+    deadline = time.monotonic() + timeout_s
+    for family in chain:
+        try:
+            match, src, dest = _subset_target(family, head, clean_extra)
+        except HTTPException as exc:
+            _log.warning("导出内嵌字体：跳过「%s」（%s）", family, exc.detail)
+            continue
+        if not dest.exists():
+            _ensure_subset_job(match, src, dest, head, clean_extra)
+            with _subset_lock:
+                job = _subset_jobs.get(dest)
+            if job is not None:
+                with contextlib.suppress(Exception):
+                    job.result(timeout=max(1.0, deadline - time.monotonic()))
+        if dest.exists():
+            out.append((family, dest.read_bytes()))
+        else:
+            _log.warning("导出内嵌字体：「%s」未能在限时内裁好，本次跳过", family)
+    return out
 
 
 class PresetInfo(BaseModel):
@@ -583,20 +787,54 @@ def list_presets() -> list[PresetInfo]:
     return presets
 
 
+class FontShare(BaseModel):
+    """链上一个字体实际承担了哪些字形。"""
+
+    family: str
+    count: int
+    chars: str
+    """该字体承担的字形。按链序判定：前面的字体有，就轮不到后面的。
+
+    只列**它是第一个能提供该字形**的那些字。这样各条 `chars` 互不重叠，
+    加起来正好是"查过的字符 − 全链都缺的字符"。
+    """
+
+
 class FontCoverage(BaseModel):
     family: str
+    """链首族名。老调用方（导出面板）只认这一个字段，保留它。"""
+
+    families: list[str] = []
+    """本次检查的整条链。"""
 
     missing: list[str]
-    """字体本身就没有的字形：**预览与成片都会缺**。"""
+    """**整条链都没有**的字形：预览与成片都会缺。
+
+    语义随字体链变了：以前问的是"这一个字体够不够"，现在问的是"这条链够不够"。
+    链尾补上的字不再算缺字——那正是加链尾的目的。
+    """
 
     preview_missing: list[str]
-    """字体有、但预览用的子集字体裁掉了的字形：**只有预览缺，成片是好的**。
+    """链里有、但预览无论如何都拿不到的字形：**只有预览缺，成片是好的**。
 
-    预览走 `GET /fonts/subset`，产物按 `default_charset()`（ASCII + 假名 +
-    JIS X 0208 第一/第二水准）裁剪；系统原字体的字符集远大于这个集合。
-    于是「鷗」「𠮷」「α」「①」这类字会出现"预览空白、成片正常"的反向分叉——
-    症状与缺字相反，只报 `missing` 会给出一个假的全绿。
+    这一项**现在恒为空**，因为子集会按本曲字符集加裁（`GET /subset` 的 `extra`）：
+    凡是链里有的字，预览的子集里就有。字段保留是为了两件事：接口兼容
+    （导出面板读它），以及把这条差异记在契约里——它曾经非空，
+    症状是"预览空白、成片正常"，与缺字相反的分叉，只看成片根本发现不了。
+
+    要知道哪些字是靠加裁才补上的，看 `extra_chars`，那是**提示**不是**缺陷**。
     """
+
+    extra_chars: str = ""
+    """本曲用到、但落在默认子集（ASCII + 假名 + JIS X 0208 一/二水准）之外的字。
+
+    预览要靠 `GET /subset?extra=` 把它们补进子集才画得出来。**不是问题清单**——
+    非空只说明这首歌用到了生僻字，一切正常。放在这里是为了排查：
+    真出现"预览空白成片正常"时，第一件事就是看这些字有没有被送进 `extra`。
+    """
+
+    shares: list[FontShare] = []
+    """逐字体的承担情况，链序排列。回答的是"每个字实际由哪个字体画"。"""
 
     total_checked: int
 
@@ -610,8 +848,16 @@ class FontCoverageRequest(BaseModel):
     调用方仍应先去重（只送不重复字符），两层保险各自独立。
     """
 
-    family: str
+    family: str = ""
+    """**兼容入口**：只查一个字体时用它。给了 `families` 就以后者为准。"""
+
+    families: list[str] = []
+    """要检查的整条字体链，按优先级排列。"""
+
     text: str
+
+    def chain(self) -> list[str]:
+        return normalize_font_chain(self.families or ([self.family] if self.family else []))
 
 
 _preview_charset: frozenset[str] | None = None
@@ -631,25 +877,7 @@ def _subset_charset() -> frozenset[str]:
     return _preview_charset
 
 
-@router.post("/coverage", response_model=FontCoverage)
-def check_coverage(req: FontCoverageRequest) -> FontCoverage:
-    """检查字体能否覆盖给定文本的全部字形。
-
-    CLAUDE.md §2.6 / §6.3 要求**字体缺字必须在渲染前拦截** —— 预览与导出若因缺字
-    fallback 到不同字体，WYSIWYG 就失效了，而这种问题通常到成片才暴露。
-
-    两条渲染链路的字体来源不同，所以要分别回答：
-
-    - 导出走 ffmpeg + 系统 fontconfig，用的是**系统原字体**，判据是它的 cmap；
-    - 预览走 JASSUB（`ASS_FONTPROVIDER_NONE`），吃的是本服务子集化后的字体，
-      判据是 cmap **与** `default_charset()` 的交集。
-
-    因此返回两份清单：`missing`（两边都缺）与 `preview_missing`（只有预览缺）。
-
-    扫描尚未覆盖到该字体时返回 503 + 中文进度说明（见 `_require_font`）。
-    """
-    match = _require_font(req.family)
-
+def _font_cmap(match: FontInfo) -> dict[int, str]:
     try:
         from fontTools.ttLib import TTCollection, TTFont
 
@@ -657,19 +885,61 @@ def check_coverage(req: FontCoverageRequest) -> FontCoverage:
             font = TTCollection(match.path).fonts[match.index]
         else:
             font = TTFont(match.path, lazy=True)
-        cmap = font.getBestCmap()
+        return font.getBestCmap()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"读取字体失败：{exc}") from exc
 
+
+@router.post("/coverage", response_model=FontCoverage)
+def check_coverage(req: FontCoverageRequest) -> FontCoverage:
+    """检查**整条字体链**能否覆盖给定文本的全部字形，以及每个字由谁承担。
+
+    CLAUDE.md §2.6 / §6.3 要求**字体缺字必须在渲染前拦截** —— 预览与导出若因缺字
+    fallback 到不同字体，WYSIWYG 就失效了，而这种问题通常到成片才暴露。
+
+    链让问题从"这个字体够不够"变成两个问题，界面上要分开说：
+
+    - **整条链够不够**（`missing`）：链尾都补不上的字，换字体或加字体才能解决；
+    - **每个字由谁画**（`shares`）：链首没覆盖住多少字、是谁在兜底。
+      这一条不是锦上添花——用户配了链却不知道链尾有没有真的被用到，
+      等于配了个不知道有没有生效的东西。
+
+    `preview_missing` 保留原义（链里有、预览子集裁掉了），正常情况下恒为空，
+    见该字段的说明。
+
+    扫描尚未覆盖到链里某个字体时返回 503 + 中文进度说明（见 `_require_font`）。
+
+    顺带**预热整条链的子集产物**：这一刻用户还在字体列表里挑，离切到预览
+    还有几秒到几十秒，正是把十秒级的裁剪塞进去的地方（见 `preheat_chain`）。
+    """
+    chain = req.chain()
+    matches = [_require_font(family) for family in chain]
+
     # 空白字符不计：缺一个空格不影响观感，而全角空格之类算进来只会制造噪声
-    checked = {c for c in req.text if c.strip()}
+    checked = sorted({c for c in req.text if c.strip()})
     subset = _subset_charset()
-    missing = sorted(c for c in checked if ord(c) not in cmap)
-    preview_missing = sorted(c for c in checked if ord(c) in cmap and c not in subset)
+
+    remaining = set(checked)
+    covered: set[str] = set()
+    shares: list[FontShare] = []
+    for match in matches:
+        cmap = _font_cmap(match)
+        owned = sorted(c for c in remaining if ord(c) in cmap)
+        remaining.difference_update(owned)
+        covered.update(owned)
+        shares.append(FontShare(family=match.family, count=len(owned), chars="".join(owned)))
+
+    preheat_chain(chain, "".join(checked))
+
     return FontCoverage(
-        family=req.family,
-        missing=missing,
-        preview_missing=preview_missing,
+        family=chain[0] if chain else "",
+        families=chain,
+        missing=sorted(remaining),
+        # 子集按 extra 加裁之后，"链里有而预览没有"这种字已经不存在了。
+        # 保留字段与含义，见 `FontCoverage.preview_missing`。
+        preview_missing=[],
+        extra_chars="".join(sorted(c for c in covered if c not in subset)),
+        shares=shares,
         total_checked=len(checked),
     )
 

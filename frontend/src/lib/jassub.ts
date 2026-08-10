@@ -376,10 +376,56 @@ function sameEvent(a: AssEvent, b: AssEvent): boolean {
 // ---------------------------------------------------------------------------
 
 export interface PreviewFontSource {
-  /** ASS 里引用的字体族名，必须与后端 style.font_name 对得上 */
+  /** 这一份字体取自哪个系统字体族（仅用于提示与去重，不是它在 ASS 里的名字） */
   family: string
   /** 字体文件 URL */
   url: string
+}
+
+/** ASS 头部声明的预览字体契约，见后端 `render.ass_builder.PREVIEW_FONTS_TAG` */
+export interface PreviewFontSpec {
+  /** 有序字体候选链，首项即主字体 */
+  chain: string[]
+  /** 本曲用到、但默认子集裁不到的字（「鷗」「𠮷」「①」） */
+  extra: string
+}
+
+const PREVIEW_FONTS_TAG = '; kvm-preview-fonts:'
+
+/**
+ * 从 ASS 头部读出这份字幕需要哪几个字体。
+ *
+ * ## 为什么字体链要从 ASS 里读，而不是由调用方传进来
+ *
+ * 字体链是随样式一起改的。让每个挂预览的地方各自去工程里取一次，就多一个
+ * "字幕已经换了字体、字体还没换过来"的窗口期，而那个窗口期里画面是**空白**的
+ * （libass 匹配不上族名时每帧返回 0 张图，且不报错）。ASS 与它需要的字体
+ * 从同一次生成里出来，天然对齐。
+ *
+ * 这不违反"ASS 永不被反向解析回工程"（CLAUDE.md §4.1）：读的是**渲染契约**
+ * ——这份 ASS 要用哪些字体——不是工程状态。本模块本来就在解析 ASS 做增量更新。
+ *
+ * 解析失败一律返回 null 交给调用方降级：预览缺字体是"难看"，
+ * 预览直接崩掉是"用不了"（CLAUDE.md §2.5）。
+ */
+export function parseFontSpec(ass: string): PreviewFontSpec | null {
+  for (const raw of ass.split('\n')) {
+    const line = raw.trim()
+    if (!line.startsWith(PREVIEW_FONTS_TAG)) {
+      // 声明就在 [Script Info] 头几行；扫到事件区就不必再找了
+      if (line.startsWith('[Events]')) break
+      continue
+    }
+    try {
+      const parsed = JSON.parse(line.slice(PREVIEW_FONTS_TAG.length)) as Partial<PreviewFontSpec>
+      const chain = (parsed.chain ?? []).filter((f) => typeof f === 'string' && f.trim())
+      if (!chain.length) return null
+      return { chain, extra: typeof parsed.extra === 'string' ? parsed.extra : '' }
+    } catch {
+      return null
+    }
+  }
+  return null
 }
 
 /**
@@ -387,14 +433,23 @@ export interface PreviewFontSource {
  * （CLAUDE.md §5.12）。它自带的 default.woff2 只有 145KB，不含任何 CJK 字形，
  * 所以不显式喂字体文件，日文歌词会整片渲染成豆腐块。
  *
- * 字体不预打包（CLAUDE.md §2.6：一律经后端从本机系统按需提取），默认字体来源
- * 就是当前工程的 `style.font_name`，经 `GET /api/fonts/subset?family=` 子集化，
- * 与导出侧 ffmpeg 用的是同一份字节，WYSIWYG 才成立。传入空 family（工程还没
- * 设置字体）时返回空数组，交由 `loadFonts` 走"没有字体可用"的降级路径。
+ * 字体不预打包（CLAUDE.md §2.6：一律经后端从本机系统按需提取）。**整条链都要喂**：
+ * 链上每份产物都被后端改写成了链首的族名，于是它们在 libass 眼里是同一个族的
+ * 多个字面，缺字时它会挑一个带该字形的——这是字体匹配的基本功能，不是回退启发式，
+ * 与 ffmpeg 侧把同一批字节嵌进 `[Fonts]` 得到的行为一致（§5.12）。
+ *
+ * 只喂链首的话，链尾形同虚设：libass **不会**去找族名不同的已加载字体
+ * （`experiments/ass_embedded_fonts.py` 的 distinct 组实测）。
+ *
+ * 链为空（工程还没设置字体）时返回空数组，交由 `loadFonts` 走降级路径。
  */
-export function defaultFontSources(fontFamily: string): PreviewFontSource[] {
-  const family = fontFamily.trim()
-  return family ? [{ family, url: fontSubsetUrl(family) }] : []
+export function defaultFontSources(spec: PreviewFontSpec | string): PreviewFontSource[] {
+  const { chain, extra } =
+    typeof spec === 'string' ? { chain: [spec], extra: '' } : spec
+  const clean = chain.map((f) => f.trim()).filter(Boolean)
+  const head = clean[0]
+  if (!head) return []
+  return clean.map((family) => ({ family, url: fontSubsetUrl(family, { as: head, extra }) }))
 }
 
 interface LoadedFont {
@@ -472,21 +527,30 @@ async function loadFonts(
         {
           level: 'warn',
           title: '工程未设置字体',
-          detail: '工程的 style.font_name 为空，无法确定该加载哪个字体；请在样式面板里选择字体。',
+          detail: '工程的字体链为空，无法确定该加载哪个字体；请在样式面板里选择字体。',
         },
       ],
     }
   }
 
-  const fonts: LoadedFont[] = []
+  const fonts: (LoadedFont | null)[] = new Array(sources.length).fill(null)
   const missing: string[] = []
   const pending: string[] = []
 
+  /*
+   * 整条链**并发取**。后端的裁剪作业本身有并发闸门（`SUBSET_WORKERS`），
+   * 这里再串行一次只会把等待时间乘以链长：冷裁剪一份约 10 秒，
+   * 三个字体串起来就是半分钟的空白预览。每个请求各自按 `Retry-After` 轮询，
+   * 谁先裁好谁先返回。
+   */
   await Promise.all(
-    sources.map(async (source) => {
+    sources.map(async (source, index) => {
       const result = await fetchFontData(source.url)
       if (result.kind === 'ok') {
-        fonts.push({ family: source.family, data: result.data })
+        // 按下标回填而不是 push：**加载顺序必须等于链序**。
+        // libass 在同族的几个字面里挑一个时，字重打平后由加入顺序决定，
+        // 顺序乱了就等于链的优先级是随机的。
+        fonts[index] = { family: source.family, data: result.data }
       } else if (result.kind === 'pending') {
         pending.push(`${source.family}：${result.detail}`)
       } else {
@@ -494,6 +558,7 @@ async function loadFonts(
       }
     }),
   )
+  const loaded = fonts.filter((f): f is LoadedFont => f !== null)
 
   const warnings: PreviewIssue[] = []
   if (pending.length) {
@@ -505,7 +570,7 @@ async function loadFonts(
         '字体准备完成后重新打开工程或切换一次字体即可恢复正常。',
     })
   }
-  if (!fonts.length && !pending.length) {
+  if (!loaded.length && !pending.length) {
     warnings.push({
       level: 'warn',
       title: '预览缺少字体文件，日文字形会渲染成豆腐块',
@@ -517,12 +582,14 @@ async function loadFonts(
   } else if (missing.length) {
     warnings.push({
       level: 'warn',
-      title: '部分字体缺失，可能与导出结果不一致',
-      detail: `没取到：${missing.join('、')}。缺字时 libass 会回退到已加载的其它字体。`,
+      title: '字体链缺了一环，可能与导出结果不一致',
+      detail:
+        `没取到：${missing.join('、')}。导出会把整条链的字节嵌进成片，预览这边少一个，` +
+        '主字体覆盖不到的生僻字就会两端不一致——预览空白而成片正常。',
     })
   }
 
-  return { fonts, warnings }
+  return { fonts: loaded, warnings }
 }
 
 // ---------------------------------------------------------------------------
@@ -532,10 +599,16 @@ async function loadFonts(
 interface OverlayCommonOptions {
   /** 初始 ASS 文本，来自后端 /api/render/ass */
   ass: string
-  /** 工程使用的字体族名（project.style.font_name），用于挑选默认字体 */
+  /**
+   * 主字体族名（`project.style.font_name`）。
+   *
+   * **只是兜底**：字体链与生僻字补集由 `ass` 头部的声明提供
+   * （见 `parseFontSpec`），那份声明与这份 ASS 同源、不会脱节。
+   * 本字段仅在声明缺失（后端是旧版、或 ASS 被手工改过）时用来撑住单字体路径。
+   */
   fontFamily: string
   /**
-   * 覆盖默认字体来源；不传时按 `fontFamily` 经 `GET /api/fonts/subset` 动态取字体
+   * 覆盖字体来源；不传时按 ASS 里声明的字体链经 `GET /api/fonts/subset` 动态取字体
    * （见 `defaultFontSources`），仅用于测试或需要额外候选字体的场景。
    */
   fontSources?: PreviewFontSource[]
@@ -618,6 +691,18 @@ export class SubtitleOverlay {
   /** 最近一次更新是否退化成了整轨重建 */
   lastUpdateWasFullReload = false
 
+  /** 已经灌进 libass 的字体 URL。同一个 URL 只灌一次 */
+  private readonly loadedFontUrls = new Set<string>()
+  /** 当前实例是按哪个主字体建的。它一变就只能重建实例，见 `syncFonts` */
+  private fontHead = ''
+  /**
+   * 字体链要求的字体已经无法在原实例上补齐，必须由调用方重建实例。
+   *
+   * 挂在实例上而不是抛异常：字幕本身是对的，只是某些字形会缺——
+   * 这是"降级"不是"终止"（CLAUDE.md §2.5）。
+   */
+  fontsNeedReload = false
+
   private constructor(
     private readonly instance: JASSUB,
     private readonly mount: Mount,
@@ -626,19 +711,25 @@ export class SubtitleOverlay {
   ) {}
 
   static async create(opts: OverlayOptions): Promise<SubtitleOverlay> {
-    const { fonts, warnings } = await loadFonts(opts.fontSources ?? defaultFontSources(opts.fontFamily))
+    // ASS 里的声明优先：它与这份字幕同源，不存在"字幕换了字体、字体还没换"的窗口期
+    const spec = parseFontSpec(opts.ass) ?? { chain: [opts.fontFamily], extra: '' }
+    const { fonts, warnings } = await loadFonts(opts.fontSources ?? defaultFontSources(spec))
 
-    // 工程指定的字体优先；它没加载上就退到任意一个已加载字体，
-    // 一个都没有时干脆不设 defaultFont，让 JASSUB 用自带的 Liberation Sans
-    // 至少把拉丁字符画出来，而不是整块空白。
-    const wanted = fonts.find(
-      (f) => f.family.toLowerCase() === opts.fontFamily.trim().toLowerCase(),
-    )
+    /*
+     * `defaultFont` 必须是**链首**，而不是"哪个加载上了就用哪个"。
+     *
+     * 链上每份产物都被后端改写成了链首的族名，所以正常情况下它们的 `family`
+     * 全都相同，这里挑谁都一样；真正要防的是链首没取到时把 defaultFont 设成
+     * 别的名字——ASS 的 `Fontname` 写的是链首，defaultFont 只在匹配不上时兜底，
+     * 设错了反而会掩盖"链首没加载上"这个真问题。
+     */
+    const head = spec.chain[0]?.trim() ?? ''
+    const wanted = fonts.find((f) => f.family.toLowerCase() === head.toLowerCase())
     const fallback = wanted ?? fonts[0]
     if (fonts.length && !wanted) {
       warnings.push({
         level: 'warn',
-        title: `工程指定的字体「${opts.fontFamily}」未加载`,
+        title: `主字体「${head}」未加载`,
         detail: `预览改用「${fallback!.family}」。字体不同会让字宽、换行位置与导出结果对不上。`,
       })
     }
@@ -694,7 +785,42 @@ export class SubtitleOverlay {
     const mount: Mount = opts.video
       ? { kind: 'video', video: opts.video }
       : { kind: 'canvas', width: opts.width, height: opts.height }
-    return new SubtitleOverlay(instance, mount, parseAss(opts.ass), warnings)
+    const overlay = new SubtitleOverlay(instance, mount, parseAss(opts.ass), warnings)
+    overlay.fontHead = head
+    for (const source of opts.fontSources ?? defaultFontSources(spec)) {
+      overlay.loadedFontUrls.add(source.url)
+    }
+    return overlay
+  }
+
+  /**
+   * 字体链变了就把缺的那几份补进 libass，**不重建实例**。
+   *
+   * 为什么补得进去：链上每份产物都自称链首的族名，所以往里加字体只会让这个族
+   * 多出几个字面——覆盖只增不减。同一个字两份都有时，先加进去的赢（字重打平后
+   * 按加入顺序），而先加的正是链序靠前的那个，优先级不会被打乱。
+   * 这也顺带覆盖了"用户新打了一个生僻字"的情形：`extra` 一变 URL 就变，
+   * 重新取回的产物多了那个字形，加进去即可，老的那份照旧管着别的字。
+   *
+   * 唯一补不了的是**主字体变了**：那时全链要改名重裁，已经灌进去的一份都不能用，
+   * 而 libass 没有"卸载字体"的接口。此时只能由调用方重建实例——各预览组件本来
+   * 就按主字体作 key，这里只是把"补不了"这件事说清楚，而不是假装成功。
+   */
+  private async syncFonts(ass: string): Promise<void> {
+    const spec = parseFontSpec(ass)
+    if (!spec) return
+    const head = spec.chain[0]?.trim() ?? ''
+    if (head && head !== this.fontHead) {
+      this.fontsNeedReload = true
+      return
+    }
+    const missing = defaultFontSources(spec).filter((s) => !this.loadedFontUrls.has(s.url))
+    if (!missing.length) return
+    // 先登记再取：取回来之前又来一次 update 的话，不该重复发起同一个请求
+    for (const source of missing) this.loadedFontUrls.add(source.url)
+    const { fonts } = await loadFonts(missing)
+    if (!fonts.length || this.destroyed) return
+    await this.instance.renderer.addFonts(fonts.map((f) => f.data))
   }
 
   /** 播放循环每帧回调进来，供暂停时重绘复用最后一帧的元数据 */
@@ -731,6 +857,8 @@ export class SubtitleOverlay {
 
     const started = performance.now()
     try {
+      // 先补字体再换字幕：反过来的话，新加的生僻字会有一帧渲成空白
+      await this.syncFonts(ass)
       await this.apply(ass)
     } catch {
       // 增量路径出任何差错都退回整轨重建：宁可慢一帧，不能显示错的字幕

@@ -64,20 +64,35 @@ export const style: Record<string, string> = {
   'style.font.scanning': '正在扫描系统字体',
   'style.font.unavailable': '本机不可用',
   'style.font.candidates': '本机没有：{list}',
-  'style.font.cjkOnly': '含日文字形的字体',
-  'style.font.all': '全部字体',
-  'style.font.showAll': '显示全部',
+  'style.font.cjkOnly': '只看含日文字形的',
   'style.font.noCjk': '不含日文字形',
   'style.font.empty': '没有匹配的字体',
-  'style.font.current': '当前：{family}（不在上面的列表里）',
   'style.font.loadFailed': '取字体信息失败：{detail}',
+
+  // 字体链。"兜底"比"回退"直白：用户要理解的是"前面那个没有这个字时用它"
+  'style.font.primary': '主字体',
+  'style.font.fallbackN': '兜底 {n}',
+  'style.font.chainHint': '主字体缺哪个字，就用下面的补上',
+  'style.font.moveUp': '上移',
+  'style.font.moveDown': '下移',
+  'style.font.remove': '移出',
+  'style.font.share': '{n} 字',
+  // 承担 0 字要说出来：那说明这一环当前没起作用，用户才好判断留不留
+  'style.font.shareNone': '当前用不到',
+  'style.font.setPrimary': '设为主字体',
+  'style.font.addFallback': '加为兜底',
+  'style.font.inChain': '已在链里',
+
+  // 搜索与筛选
+  'style.font.searchHint': '搜字体名，中英日都行',
+  'style.font.more': '还有 {n} 项，继续输入以缩小范围',
+  // 与"还没扫完"分开说：一个是再等等，一个是换个词
+  'style.font.noMatch': '没有匹配「{q}」的字体',
 
   // 字形覆盖预检。齐全时也要说一句——预检默默通过与预检没跑长得一模一样
   'style.font.covChecking': '正在检查字形',
   'style.font.covOk': '字形齐全 · 已查 {n} 字',
-  'style.font.covMissing': '缺 {n} 个字形：{chars}',
-  // 只有预览缺、成片是好的，所以说"预览缺"而不是"缺字"
-  'style.font.covPreviewGap': '预览缺 {n} 字，成片不缺：{chars}',
+  'style.font.covMissing': '整条链都缺 {n} 个字形：{chars}',
   'style.font.covFailed': '字形检查未完成：{detail}',
 
   // 配色
