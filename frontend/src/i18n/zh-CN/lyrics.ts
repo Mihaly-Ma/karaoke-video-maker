@@ -20,8 +20,10 @@ export const lyrics: Record<string, string> = {
   'lyrics.suggestQuery': '建议词',
   'lyrics.suggestQueryTitle': '用工程标题重新生成搜索词',
   'lyrics.emptyQuery': '输入搜索词',
-  'lyrics.noCandidates': '没有结果。换个写法再搜，或改用导入。',
-  'lyrics.beforeSearch': '搜索，或改用导入。',
+  // 空状态要区分"搜过了没有"与"还没搜"。两句都不带句号、不劝说，
+  // 只陈述当前是什么状态、可走哪条路。
+  'lyrics.noCandidates': '没有结果 · 换个写法重搜，或改用导入',
+  'lyrics.beforeSearch': '搜索歌词，或改用导入',
   'lyrics.providerErrors': '{n} 个源没有结果',
   'lyrics.searchFailed': '搜索失败：{msg}',
 
@@ -53,8 +55,8 @@ export const lyrics: Record<string, string> = {
   'lyrics.pasteClipboard': '粘贴',
   'lyrics.clear': '清空',
   'lyrics.loadedFile': '已加载 {name}',
-  'lyrics.fileFailed': '文件读不出来，改用粘贴',
-  'lyrics.clipboardDenied': '浏览器不允许读剪贴板，在框内按 Cmd/Ctrl+V',
+  'lyrics.fileFailed': '文件读取失败，改用粘贴',
+  'lyrics.clipboardDenied': '浏览器不允许读取剪贴板，在框内按 Cmd/Ctrl+V',
   'lyrics.modeReplace': '替换',
   'lyrics.modeAppend': '追加',
   'lyrics.import': '导入',
@@ -62,7 +64,8 @@ export const lyrics: Record<string, string> = {
   'lyrics.importFailed': '导入失败：{msg}',
   'lyrics.unrecognized': '{n} 行无法识别',
   'lyrics.kanaTrack': '含 [kana:]',
-  'lyrics.parsePending': '行数以后端解析为准',
+  // 「以后端解析为准」把内部分工说给了用户。他要知道的只是这个数还会变。
+  'lyrics.parsePending': '行数以导入结果为准',
   'lyrics.beforePaste': '粘贴或拖入歌词',
 
   // ---- 确认后：全文编辑态 ----
@@ -74,8 +77,8 @@ export const lyrics: Record<string, string> = {
   'lyrics.splitRisky': '拆在注音中间，该注音会失效',
   'lyrics.merge': '并入下一行',
   'lyrics.metadata': '制作名单',
-  'lyrics.metadataTitle': '歌词源把词/曲/编曲塞进了正文，渲染时单独成屏',
+  'lyrics.metadataTitle': '标记为制作名单行，渲染时单独成屏',
   'lyrics.editHint': '拆行 / 并行',
-  'lyrics.editFailed': '改不动：{msg}',
+  'lyrics.editFailed': '修改失败：{msg}',
   'lyrics.noLines': '还没有歌词',
 }

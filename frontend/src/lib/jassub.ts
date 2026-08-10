@@ -20,6 +20,7 @@
 
 import JASSUB from 'jassub'
 import { fontSubsetUrl } from '../api/client'
+import { t } from '../i18n'
 
 // ---------------------------------------------------------------------------
 // 常量
@@ -93,16 +94,16 @@ export function checkPreviewEnvironment(): PreviewIssue[] {
   if (typeof Worker === 'undefined') {
     issues.push({
       level: 'fatal',
-      title: '浏览器不支持 Web Worker',
-      detail: 'JASSUB 在独立 Worker 里运行 libass。请改用较新版本的 Chrome / Edge / Firefox / Safari。',
+      title: t('overlay.noWorkerTitle'),
+      detail: t('overlay.noWorkerDetail'),
     })
   }
 
   if (typeof WebAssembly === 'undefined' || typeof WebAssembly.validate !== 'function') {
     issues.push({
       level: 'fatal',
-      title: '浏览器不支持 WebAssembly',
-      detail: 'libass 以 WebAssembly 形式运行，没有它无法渲染字幕。',
+      title: t('overlay.noWasmTitle'),
+      detail: t('overlay.noWasmDetail'),
     })
   }
 
@@ -112,22 +113,25 @@ export function checkPreviewEnvironment(): PreviewIssue[] {
   ) {
     issues.push({
       level: 'fatal',
-      title: '浏览器不支持 OffscreenCanvas',
-      detail:
-        'JASSUB 把画布控制权转移给 Worker 后再绘制。Safari 16.4 以下、以及部分嵌入式 WebView 不支持。',
+      title: t('overlay.noOffscreenTitle'),
+      detail: t('overlay.noOffscreenDetail'),
     })
   }
 
+  /*
+   * 跨源隔离没生效时 JASSUB 退回单线程，功能不受影响，所以是 warn 不是 fatal。
+   *
+   * 排查线索（**刻意不写进界面**）：一、没有经 Vite dev server 访问，COOP/COEP
+   * 两个响应头由 vite.config.ts 下发；二、用 http:// 加局域网 IP 访问被判定为
+   * 非安全上下文，SharedArrayBuffer 被禁用；三、套 Tauri 壳后没配
+   * app.security.headers（需要 Tauri ≥ 2.1.0）。Firefox 不支持 Worker 多线程，
+   * 在 Firefox 上此项必然出现。
+   */
   if (typeof SharedArrayBuffer === 'undefined' || !globalThis.crossOriginIsolated) {
     issues.push({
       level: 'warn',
-      title: '跨源隔离未生效，libass 退回单线程渲染',
-      detail:
-        '字幕仍能显示，但复杂特效帧率会下降。常见原因：一、没有经 Vite dev server 访问' +
-        '（COOP/COEP 两个响应头由 vite.config.ts 下发）；二、用 http:// 加局域网 IP 访问，' +
-        '浏览器判定为非安全上下文，SharedArrayBuffer 被禁用；三、套 Tauri 壳后没配' +
-        ' app.security.headers（需要 Tauri ≥ 2.1.0）。Firefox 不支持 Worker 多线程，' +
-        '在 Firefox 上此项必然出现，可忽略。',
+      title: t('overlay.noIsolationTitle'),
+      detail: t('overlay.noIsolationDetail'),
     })
   }
 
@@ -504,7 +508,7 @@ async function fetchFontData(url: string): Promise<FontFetchResult> {
     if (resp.ok) return { kind: 'ok', data: new Uint8Array(await resp.arrayBuffer()) }
 
     if (resp.status === 503) {
-      const detail = (await readErrorDetail(resp)) ?? '字体准备中，请稍候。'
+      const detail = (await readErrorDetail(resp)) ?? t('overlay.fontPreparing')
       if (Date.now() >= deadline) return { kind: 'pending', detail }
       const retryAfter = Number(resp.headers.get('Retry-After'))
       const waitMs =
@@ -526,8 +530,8 @@ async function loadFonts(
       warnings: [
         {
           level: 'warn',
-          title: '工程未设置字体',
-          detail: '工程的字体链为空，无法确定该加载哪个字体；请在样式面板里选择字体。',
+          title: t('overlay.noFontTitle'),
+          detail: t('overlay.noFontDetail'),
         },
       ],
     }
@@ -564,28 +568,21 @@ async function loadFonts(
   if (pending.length) {
     warnings.push({
       level: 'warn',
-      title: '字体准备中',
-      detail:
-        `${pending.join('；')}。预览暂时用不到该字体，画面可能出现豆腐块或临时使用其它已加载字体代替，` +
-        '字体准备完成后重新打开工程或切换一次字体即可恢复正常。',
+      title: t('overlay.fontPendingTitle'),
+      detail: t('overlay.fontPendingDetail', { list: pending.join('；') }),
     })
   }
   if (!loaded.length && !pending.length) {
     warnings.push({
       level: 'warn',
-      title: '预览缺少字体文件，日文字形会渲染成豆腐块',
-      detail:
-        `以下字体都没取到：${missing.join('、')}。JASSUB 在 WebAssembly 里拿不到系统字体，` +
-        '必须显式提供字体文件；字体一律经后端从本机系统按需提取（GET /api/fonts/subset），' +
-        '请确认后端服务正常运行。注意导出侧的 ffmpeg 会回退到系统字体，两端字体不一致会直接摧毁「所见即所得」。',
+      title: t('overlay.fontMissingTitle'),
+      detail: t('overlay.fontMissingDetail', { list: missing.join('、') }),
     })
   } else if (missing.length) {
     warnings.push({
       level: 'warn',
-      title: '字体链缺了一环，可能与导出结果不一致',
-      detail:
-        `没取到：${missing.join('、')}。导出会把整条链的字节嵌进成片，预览这边少一个，` +
-        '主字体覆盖不到的生僻字就会两端不一致——预览空白而成片正常。',
+      title: t('overlay.fontChainGapTitle'),
+      detail: t('overlay.fontChainGapDetail', { list: missing.join('、') }),
     })
   }
 
@@ -729,8 +726,8 @@ export class SubtitleOverlay {
     if (fonts.length && !wanted) {
       warnings.push({
         level: 'warn',
-        title: `主字体「${head}」未加载`,
-        detail: `预览改用「${fallback!.family}」。字体不同会让字宽、换行位置与导出结果对不上。`,
+        title: t('overlay.primaryMissingTitle', { family: head }),
+        detail: t('overlay.primaryMissingDetail', { fallback: fallback!.family }),
       })
     }
 
@@ -751,7 +748,7 @@ export class SubtitleOverlay {
         ? new JASSUB({ ...common, video: opts.video })
         : new JASSUB({ ...common, canvas: opts.canvas })
     } catch (e) {
-      throw new Error(`JASSUB 初始化失败：${describeError(e)}`)
+      throw new Error(t('overlay.initFailed', { detail: describeError(e) }))
     }
 
     if (!opts.video) {
@@ -768,14 +765,16 @@ export class SubtitleOverlay {
       instance._videoHeight = opts.height
     }
 
+    /*
+     * 排查线索（**刻意不写进界面**）：超时最常见的原因是 public/jassub/ 下的
+     * worker / wasm 静态副本不在位——跑一次 `npm run sync:jassub` 重建
+     * （正常情况下 predev / prebuild 会自动跑）；其次才是被浏览器扩展拦截。
+     */
     try {
       await withTimeout(
         instance.ready,
         READY_TIMEOUT_MS,
-        `字幕渲染器在 ${READY_TIMEOUT_MS / 1000} 秒内没有就绪。` +
-          '最常见的原因是 public/jassub/ 下的 worker / wasm 静态副本不在位 —— ' +
-          '跑一次 `npm run sync:jassub` 重建（正常情况下 predev / prebuild 会自动跑）。' +
-          '其次才是被浏览器扩展拦截。',
+        t('overlay.timeout', { sec: READY_TIMEOUT_MS / 1000 }),
       )
     } catch (e) {
       void instance.destroy()

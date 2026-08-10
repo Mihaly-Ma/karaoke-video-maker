@@ -321,9 +321,9 @@ def _assert_family_name(font: TTFont, family: str, src: Path) -> None:
     names = _family_names(font)
     if names != {family}:
         msg = (
-            f"字体子集产物的族名与请求的对不上：请求「{family}」，"
-            f"产物里是 {sorted(names) or '（一条 nameID 1 都没有）'}；源文件 {src}。"
-            "带着这样的族名，libass 会匹配不上而每帧返回 0 张图（画面空白且不报错）。"
+            f"字体子集生成结果的族名与请求不符：请求「{family}」，"
+            f"实际为 {sorted(names) or '（无有效族名）'}；源文件 {src}。"
+            "该字体在预览中将无法正确渲染。"
         )
         raise FontFamilyMismatchError(msg)
 
@@ -357,7 +357,7 @@ def subset_font(
     except ImportError as exc:  # pragma: no cover - 取决于运行环境
         msg = (
             "缺少 fonttools，无法生成预览字体。"
-            "请安装后重试：uv run --with fonttools --with brotli ..."
+            "安装命令：uv run --with fonttools --with brotli ..."
         )
         raise RuntimeError(msg) from exc
 

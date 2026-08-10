@@ -19,6 +19,14 @@ export function candidateKey(candidate: LyricCandidate): string {
   return `${candidate.provider}::${candidate.song_id}`
 }
 
+/**
+ * 歌词源的显示名。
+ *
+ * **这些是服务的专有名词，不走 `t()`**：QQ音乐、酷狗、网易云在任何界面语言下
+ * 都是这个名字，翻译它们只会让用户认不出自己用的是哪个源。
+ * 唯一的例外是「手工粘贴」——那不是服务名而是本应用的一种来源，
+ * 与来源徽章共用 `source.manual`，免得同一个概念出现两种写法。
+ */
 const PROVIDER_LABELS: Record<string, string> = {
   qq: 'QQ音乐',
   qqmusic: 'QQ音乐',
@@ -30,7 +38,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   yt: 'YouTube 字幕',
   lrclib: 'LRCLIB',
   utaten: 'UtaTen',
-  manual: '手工',
+  manual: t('source.manual'),
 }
 
 export function providerLabel(provider: string): string {

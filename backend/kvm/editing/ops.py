@@ -1376,11 +1376,11 @@ def set_line_text(project: ProjectDTO, *, line_id: str, text: str) -> EditOutcom
     idx, old_line = _find_line(project, line_id)
 
     if "\n" in text or "\r" in text:
-        msg = "行文本不能含换行：分行请用拆行"
+        msg = "行文本不能含换行：分行需使用拆行操作"
         raise EditError(msg)
     new_text = text.strip()
     if not new_text:
-        msg = "行文本不能为空：要去掉这一行请与相邻行合并"
+        msg = "行文本不能为空：删除该行需与相邻行合并"
         raise EditError(msg)
 
     old_text = _line_text(old_line)
@@ -1591,7 +1591,7 @@ def _set_line_voice_part(
     功能坏了，而正确的做法（对这些音节指派空声部以清除覆盖）他猜不到。
     """
     if not voice_part:
-        msg = "整行声部不能为空；要清除音节级覆盖请给出 token_range"
+        msg = "整行声部不能为空；清除音节级覆盖需提供 token_range"
         raise EditError(msg)
     line.voice_part = voice_part
     line.locked = True
@@ -2445,45 +2445,45 @@ def builtin_palette_schemes() -> list[PaletteScheme]:
         # 经典白：白底 + 深声部色，开唱对调。最通用的一档，四个变体够三声部曲用
         _swap_scheme(
             "经典白 · 蓝",
-            "白字蓝边，开唱时对调成蓝字白边。声部色始终在描边上，轮到自己之前就看得见。",
+            "白字蓝边，开唱时对调为蓝字白边。声部色始终在描边上，未唱时即可分辨",
             base="#FFFFFF",
             accent="#1050B4",
         ),
         _swap_scheme(
             "经典白 · 粉",
-            "与「经典白 · 蓝」同底，声部色换成品红。对唱时与蓝配成一对。",
+            "与「经典白 · 蓝」同底，声部色为品红。对唱时与蓝成对使用",
             base="#FFFFFF",
             accent="#B41478",
         ),
         _swap_scheme(
             "经典白 · 金",
-            "与「经典白 · 蓝」同底，声部色换成暗金。三个声部时补第三席。",
+            "与「经典白 · 蓝」同底，声部色为暗金。用于第三个声部",
             base="#FFFFFF",
             accent="#8C6400",
         ),
         _swap_scheme(
             "经典白 · 红",
-            "白字红边翻成红字白边。最接近 DAM / JOY 点唱机的观感。",
+            "白字红边翻为红字白边。最接近 DAM / JOY 点唱机的观感",
             base="#FFFFFF",
             accent="#B41414",
         ),
         # 反相墨：近黑底 + 亮声部色。白字在雪景/白背景/逆光上会整片消失
         _swap_scheme(
             "反相墨 · 蓝",
-            "近黑字配亮蓝边，开唱对调。给雪景、白背景、逆光这类亮画面。",
+            "近黑字配亮蓝边，开唱时对调。用于雪景、白背景、逆光等亮画面",
             base="#1A1A1A",
             accent="#64B4FF",
         ),
         _swap_scheme(
             "反相墨 · 橙",
-            "与「反相墨 · 蓝」同底，声部色换成亮橙。对唱时与蓝配成一对。",
+            "与「反相墨 · 蓝」同底，声部色为亮橙。对唱时与蓝成对使用",
             base="#1A1A1A",
             accent="#FFB45A",
         ),
         # 暖调：奶黄底。描边两个状态都是深色，亮画面上更稳
         _shift_scheme(
             "暖调 · 橙",
-            "奶黄字配深褐边，已唱转亮橙、描边加深。夕阳、灯光、暖调实拍不发脏。",
+            "奶黄字配深褐边，已唱转亮橙并加深描边。用于夕阳、灯光等暖调画面",
             base="#FFD48C",
             accent="#8C3200",
             bright="#FF8C1E",
@@ -2491,7 +2491,7 @@ def builtin_palette_schemes() -> list[PaletteScheme]:
         ),
         _shift_scheme(
             "暖调 · 珊瑚",
-            "与「暖调 · 橙」同底，声部色换成珊瑚红。对唱时与橙配成一对。",
+            "与「暖调 · 橙」同底，声部色为珊瑚红。对唱时与橙成对使用",
             base="#FFD48C",
             accent="#96144B",
             bright="#FF5078",
@@ -2500,7 +2500,7 @@ def builtin_palette_schemes() -> list[PaletteScheme]:
         # 夜景：冷蓝白底
         _shift_scheme(
             "夜景 · 薄荷",
-            "冷蓝白字配墨绿边，已唱转薄荷绿。城市夜景、蓝调、清爽夏日曲。",
+            "冷蓝白字配墨绿边，已唱转薄荷绿。用于城市夜景、蓝调、夏日曲",
             base="#A8C8FF",
             accent="#05543C",
             bright="#14E6C8",
@@ -2508,7 +2508,7 @@ def builtin_palette_schemes() -> list[PaletteScheme]:
         ),
         _shift_scheme(
             "夜景 · 洋红",
-            "与「夜景 · 薄荷」同底，声部色换成霓虹洋红。对唱时与薄荷配成一对。",
+            "与「夜景 · 薄荷」同底，声部色为霓虹洋红。对唱时与薄荷成对使用",
             base="#A8C8FF",
             accent="#8C0A64",
             bright="#FF32C8",
@@ -2517,7 +2517,7 @@ def builtin_palette_schemes() -> list[PaletteScheme]:
         # 樱：淡樱粉底
         _shift_scheme(
             "樱 · 樱红",
-            "淡樱粉字配深梅边，已唱转樱红。粉樱、校园、少女向企划。",
+            "淡樱粉字配深梅边，已唱转樱红。用于粉樱、校园、少女向企划",
             base="#FFB8D0",
             accent="#96103C",
             bright="#FF3C78",
@@ -2525,7 +2525,7 @@ def builtin_palette_schemes() -> list[PaletteScheme]:
         ),
         _shift_scheme(
             "樱 · 紫",
-            "与「樱 · 樱红」同底，声部色换成紫。对唱时与樱红配成一对。",
+            "与「樱 · 樱红」同底，声部色为紫。对唱时与樱红成对使用",
             base="#FFB8D0",
             accent="#6414B4",
             bright="#B478FF",
@@ -2606,7 +2606,7 @@ def _clean_scheme_name(name: str) -> str:
         msg = f"方案名不能包含斜杠：{clean}"
         raise EditError(msg)
     if clean in {scheme.name for scheme in builtin_palette_schemes()}:
-        msg = f"「{clean}」是内置配色方案，不能覆盖；请换一个名字"
+        msg = f"「{clean}」是内置配色方案，不能覆盖；需使用其他名称"
         raise EditError(msg)
     return clean
 
@@ -2662,7 +2662,7 @@ def rename_palette_scheme(name: str, new_name: str, *, path: Path | None = None)
         msg = f"配色方案不存在：{name}"
         raise KeyError(msg)
     if clean != name and any(scheme.name == clean for scheme in users):
-        msg = f"已经有一套叫「{clean}」的配色方案了；请换一个名字"
+        msg = f"已存在同名配色方案「{clean}」；需使用其他名称"
         raise EditError(msg)
 
     hit.name = clean

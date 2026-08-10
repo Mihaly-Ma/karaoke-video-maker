@@ -41,7 +41,9 @@ PRESETS: tuple[FontPreset, ...] = (
     FontPreset(
         key="gothic_bold",
         label="粗ゴシック（推荐）",
-        note="卡拉OK 绝对主流。笔画粗、结构方正，压在任意画面上都清晰可读",
+        # note 是界面上的选型依据，不是推荐语：说清它长什么样、适合什么场合，
+        # 不写「绝对主流」「务必」这类口语判断
+        note="笔画粗、结构方正，压在任意画面上都清晰可读。卡拉OK 最常用",
         families=(
             # 注意：ASS `Fontname` 匹配的是 family 名，"W6"/"W8" 是字重不是
             # family 的一部分——之前把两者拼在一起写成一个字符串，永远匹配不上。
@@ -60,7 +62,7 @@ PRESETS: tuple[FontPreset, ...] = (
     FontPreset(
         key="gothic",
         label="ゴシック（标准黑体）",
-        note="通用黑体，比粗体秀气一些，适合字数多的长句",
+        note="通用黑体，字重轻于粗ゴシック，适合字数多的长行",
         families=(
             "Hiragino Sans",
             "Hiragino Kaku Gothic ProN",
@@ -73,7 +75,7 @@ PRESETS: tuple[FontPreset, ...] = (
     FontPreset(
         key="maru_gothic",
         label="丸ゴシック（圆体）",
-        note="nicokara 常见。柔和可爱，适合流行与偶像曲",
+        note="笔画圆润，适合流行与偶像曲。ニコカラ 常见",
         families=(
             "Hiragino Maru Gothic ProN",
             "Hiragino Maru Gothic Pro",
@@ -85,7 +87,7 @@ PRESETS: tuple[FontPreset, ...] = (
     FontPreset(
         key="mincho",
         label="明朝体",
-        note="演歌与抒情曲偶用。笔画细，务必把描边调粗，否则压不住画面",
+        note="笔画细，需要相应调粗描边。多用于演歌与抒情曲",
         families=(
             "Hiragino Mincho ProN",
             "YuMincho",

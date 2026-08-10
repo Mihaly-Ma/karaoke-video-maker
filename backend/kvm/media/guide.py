@@ -75,10 +75,7 @@ GUIDE_REQUIREMENTS: tuple[tuple[str, str], ...] = (
     ("torchcrepe", "torchcrepe>=0.0.23"),
 )
 
-_DEPENDENCY_HINT = (
-    "请运行 `uv sync --extra audio` 后重启后端。"
-    "引导声需要 librosa（读音频）、soundfile（写音频）与 torchcrepe（提取音高）。"
-)
+_DEPENDENCY_HINT = "安装命令：`uv sync --extra audio`，安装后需重启后端。"
 
 # 每个工程最近一次引导声任务的 job_id。与代理同理：前端刷新过页面之后手里就没有
 # job_id 了，只能按工程反查。
@@ -252,7 +249,7 @@ def run_guide(handle: JobHandle, store: ProjectStore, req: GuideRequest) -> dict
         raise RuntimeError(str(exc)) from exc
 
     if not project.vocals_path:
-        msg = "工程还没有人声轨，请先做人声分离（或手工导入一条人声轨）再合成引导声"
+        msg = "工程没有人声轨。需要先完成人声分离，或手工导入人声轨"
         raise RuntimeError(msg)
     vocals = Path(project.vocals_path)
     if not vocals.is_file():
@@ -322,7 +319,7 @@ def run_guide(handle: JobHandle, store: ProjectStore, req: GuideRequest) -> dict
     if last_error:
         raise RuntimeError(last_error)
     if not tmp.is_file():
-        msg = "引导声子进程正常退出但没有产出文件，请检查后端日志"
+        msg = "引导声子进程正常退出但没有产出文件，需要检查后端日志"
         raise RuntimeError(msg)
 
     handle.check_cancelled()

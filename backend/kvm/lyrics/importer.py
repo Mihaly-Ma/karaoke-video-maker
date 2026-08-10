@@ -265,7 +265,7 @@ def parse_lrc(content: str) -> list[LineDTO]:
         entries.extend((_lrc_ms(m.group(1), m.group(2), m.group(3)), text) for m in tags)
 
     if not entries:
-        msg = "未解析出任何 [mm:ss.xx] 时间轴行，请确认内容是 LRC 格式"
+        msg = "未解析出任何 [mm:ss.xx] 时间轴行，内容不是 LRC 格式"
         raise ValueError(msg)
 
     entries.sort(key=lambda e: e[0])
@@ -430,7 +430,7 @@ def parse_qrc(content: str) -> list[LineDTO]:
     lyric_content = extract_lyric_content(content)
     meta, raw_lines = _parse_qrc_lines(lyric_content)
     if not raw_lines:
-        msg = "QRC 内容解析出 0 行，请确认是已解密的 QRC 正文"
+        msg = "QRC 内容解析出 0 行；内容需为已解密的 QRC 正文"
         raise ValueError(msg)
     kana_entries = parse_kana_track(meta.get("kana", ""))
 

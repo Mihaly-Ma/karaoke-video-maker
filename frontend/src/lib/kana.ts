@@ -12,6 +12,8 @@
  * 所以凡是要算下标的地方，一律先 `toCodePoints()` 拆成码点数组再算。
  */
 
+import { t } from '../i18n'
+
 // ---- 码点区间常量 ----
 
 const HIRAGANA_MIN = 0x3041
@@ -164,7 +166,7 @@ const OK_VALIDATION: KanaValidation = { ok: true, message: '', offenders: [] }
  */
 export function validateKana(text: string): KanaValidation {
   const normalized = normalizeKana(text)
-  if (!normalized) return { ok: false, message: '读音不能为空', offenders: [] }
+  if (!normalized) return { ok: false, message: t('ruby.invalid.empty'), offenders: [] }
 
   const cps = toCodePoints(normalized)
   const bad = (pred: (ch: string) => boolean): string[] => [
@@ -175,7 +177,7 @@ export function validateKana(text: string): KanaValidation {
   if (kanji.length) {
     return {
       ok: false,
-      message: `读音里不能出现汉字：${kanji.join('')}——注音必须写成假名`,
+      message: t('ruby.invalid.kanji', { chars: kanji.join('') }),
       offenders: kanji,
     }
   }
@@ -187,7 +189,7 @@ export function validateKana(text: string): KanaValidation {
   if (latin.length) {
     return {
       ok: false,
-      message: `读音里不能出现字母或数字：${latin.join('')}——请先写成片假名读法`,
+      message: t('ruby.invalid.latin', { chars: latin.join('') }),
       offenders: latin,
     }
   }
@@ -196,7 +198,7 @@ export function validateKana(text: string): KanaValidation {
   if (others.length) {
     return {
       ok: false,
-      message: `含有非假名字符：${others.join('')}`,
+      message: t('ruby.invalid.other', { chars: others.join('') }),
       offenders: others,
     }
   }

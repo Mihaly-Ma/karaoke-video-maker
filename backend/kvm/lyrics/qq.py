@@ -478,7 +478,7 @@ class QqMusicProvider(LyricProvider):
 
         lyric_hex = data.get("lyric") or ""
         if not lyric_hex:
-            msg = "QQ音乐未返回歌词内容（该曲可能没有 QRC，只能手工导入）"
+            msg = "QQ音乐未返回歌词内容；可手工导入歌词"
             raise LyricProviderError(msg)
 
         try:

@@ -193,9 +193,7 @@ def start_separate(req: SeparateRequest, store: ProjectStore = Depends(get_store
     """启动分离任务。提前校验工程存在且已有音频，避免任务排上队才在后台报错。"""
     project = _project_or_404(store, req.project_id)
     if not project.audio_path:
-        raise HTTPException(
-            status_code=400, detail="工程还没有可用音频，请先下载或导入媒体后再分离"
-        )
+        raise HTTPException(status_code=400, detail="工程没有可用音频。需要先下载或导入素材")
     return _remember_job(
         req.project_id,
         job_manager.submit(
@@ -217,7 +215,7 @@ def start_proxy(req: ProxyRequest, store: ProjectStore = Depends(get_store)) -> 
     if not project.video_path:
         raise HTTPException(
             status_code=400,
-            detail="工程还没有视频文件，无法生成编辑用代理（只有音轨的工程本来就不需要代理）",
+            detail="工程没有视频文件，无法生成编辑代理",
         )
     return proxy_module.submit_proxy_job(
         store, req.project_id, max_height=req.max_height, force=req.force
@@ -236,18 +234,21 @@ def get_proxy_status(project_id: str, store: ProjectStore = Depends(get_store)) 
     path = project.proxy_video_path
     ready = bool(path) and Path(path or "").is_file()
 
+    # note 是界面上的状态说明：只讲现在是什么状态、下一步能做什么。
+    # 原先这几条把 Safari / MKV / AV1 / seek 这些内部理由摆给了用户，
+    # 而他能做的只有"生成"或"重新生成"这一个动作。
     if ready:
-        note = "编辑用代理已就绪，预览走代理（Safari 也能出画面，seek 更快）"
+        note = "编辑代理已就绪，预览使用代理"
     elif not project.video_path:
-        note = "工程还没有视频，不需要代理"
+        note = "工程没有视频，无需代理"
     elif job is not None and job.state in ("pending", "running"):
-        note = "正在生成编辑用代理…"
+        note = "正在生成编辑代理…"
     elif job is not None and job.state == "failed":
-        note = f"代理生成失败，预览暂时回退用原视频：{job.error}"
+        note = f"编辑代理生成失败，预览回退为原视频：{job.error}"
     elif path:
-        note = "代理文件不见了（可能已被清理），请重新生成"
+        note = "编辑代理文件已不存在，需要重新生成"
     else:
-        note = "还没有编辑用代理。Safari 放不了原始 MKV/AV1，生成后即可看到画面"
+        note = "尚未生成编辑代理。部分浏览器需要它才能显示画面"
 
     return ProxyStatus(project_id=project_id, ready=ready, path=path, job=job, note=note)
 
@@ -286,12 +287,10 @@ def start_guide(req: GuideRequest, store: ProjectStore = Depends(get_store)) -> 
     if not project.vocals_path:
         raise HTTPException(
             status_code=400,
-            detail="工程还没有人声轨，请先做人声分离（或手工导入一条人声轨）再合成引导声",
+            detail="工程没有人声轨。需要先完成人声分离，或手工导入人声轨",
         )
     if req.params is not None:
-        set_guide_params(
-            GuideParamsRequest(project_id=req.project_id, params=req.params), store
-        )
+        set_guide_params(GuideParamsRequest(project_id=req.project_id, params=req.params), store)
     # 不走 `_remember_job`：引导声任务由 `kvm.media.guide` 自己记着（`GET /guide/{id}`
     # 要用），两处都登记会让 `/activity` 把同一个任务列两遍。
     return guide_module.submit_guide_job(store, req)
@@ -312,19 +311,19 @@ def get_guide_status(project_id: str, store: ProjectStore = Depends(get_store)) 
     stale = ready and project.guide_signature != current
 
     if not project.vocals_path:
-        note = "需要先分离出人声轨才能合成引导声"
+        note = "需要先完成人声分离"
     elif job is not None and job.state in ("pending", "running"):
         note = "正在合成引导声…"
     elif job is not None and job.state == "failed":
         note = f"引导声合成失败：{job.error}"
     elif stale:
-        note = "参数改过了，重新生成才能听到当前设置"
+        note = "参数已变更，重新生成后生效"
     elif ready:
-        note = "引导声已就绪，预览与导出都会用这一份"
+        note = "引导声已就绪，预览与导出均使用此文件"
     elif path:
-        note = "引导声文件不见了（可能已被清理），请重新生成"
+        note = "引导声文件已不存在，需要重新生成"
     else:
-        note = "还没有引导声。生成后可以直接试听，导出时也会用这一份"
+        note = "尚未生成引导声。生成后可试听，导出时一并使用"
 
     return GuideStatus(
         project_id=project_id, ready=ready, stale=stale, path=path, job=job, note=note
@@ -403,12 +402,10 @@ def get_media_file(
         )
     path_str: str | None = getattr(project, field)
     if not path_str:
-        raise HTTPException(status_code=404, detail=f"工程 {project_id} 还没有 {kind} 媒体")
+        raise HTTPException(status_code=404, detail=f"工程 {project_id} 没有 {kind} 媒体")
     path = Path(path_str)
     if not path.is_file():
-        raise HTTPException(
-            status_code=404, detail=f"媒体文件不存在（可能已被移动/清理）：{path}"
-        )
+        raise HTTPException(status_code=404, detail=f"媒体文件已不存在（可能被移动或清理）：{path}")
 
     media_type = _EXTRA_MEDIA_TYPES.get(path.suffix.lower()) or mimetypes.guess_type(path.name)[0]
     return FileResponse(
@@ -485,7 +482,7 @@ def probe_one_media(
         )
     path_str: str | None = getattr(project, field)
     if not path_str:
-        raise HTTPException(status_code=404, detail=f"工程 {project_id} 还没有 {kind} 媒体")
+        raise HTTPException(status_code=404, detail=f"工程 {project_id} 没有 {kind} 媒体")
 
     ffmpeg_bin = find_ffmpeg_with_libass()
     ffprobe_bin = _ffprobe_bin(ffmpeg_bin)
@@ -509,12 +506,10 @@ def _resolve_waveform_source(store: ProjectStore, project_id: str, kind: str) ->
         )
     path_str: str | None = getattr(project, field)
     if not path_str:
-        raise HTTPException(status_code=404, detail=f"工程 {project_id} 还没有 {kind} 媒体")
+        raise HTTPException(status_code=404, detail=f"工程 {project_id} 没有 {kind} 媒体")
     path = Path(path_str)
     if not path.is_file():
-        raise HTTPException(
-            status_code=404, detail=f"媒体文件不存在（可能已被移动/清理）：{path}"
-        )
+        raise HTTPException(status_code=404, detail=f"媒体文件已不存在（可能被移动或清理）：{path}")
     return path
 
 

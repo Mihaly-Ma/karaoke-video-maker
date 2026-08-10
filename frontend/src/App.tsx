@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import type { JobStatus } from './api/types'
+import { t } from './i18n'
 import { useProject } from './state/projectStore'
 import { normalizeStep, stepStatus, type StepKey } from './workflow'
 
@@ -203,7 +204,7 @@ export default function App() {
         {downloadJobId && (
           <JobProgress
             jobId={downloadJobId}
-            label="下载视频"
+            label={t('job.download')}
             onSettled={handleDownloadSettled}
             onDismiss={() => setDownloadJobId(null)}
           />
@@ -211,7 +212,7 @@ export default function App() {
         {separateJobId && (
           <JobProgress
             jobId={separateJobId}
-            label="人声分离"
+            label={t('job.separate')}
             onSettled={handleSeparateSettled}
             onDismiss={() => setSeparateJobId(null)}
           />
@@ -219,7 +220,7 @@ export default function App() {
         {exportJobId && (
           <JobProgress
             jobId={exportJobId}
-            label="导出视频"
+            label={t('job.export')}
             onSettled={handleExportSettled}
             onDismiss={() => setExportJobId(null)}
           />

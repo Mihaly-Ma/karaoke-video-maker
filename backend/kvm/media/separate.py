@@ -61,20 +61,22 @@ MODEL_TIERS: tuple[SeparateModelTier, ...] = (
         id="fast",
         label="快速",
         model_filename="htdemucs.yaml",
-        hint="84MB，最快，先出个能听的伴奏立刻开始调轴；4 声部，还会顺带产出鼓声轨",
+        # hint 是悬浮详情：说清体积、声部数与产物，不写「先出个能听的伴奏立刻开始调轴」
+        # 这类使用建议——用户要的是选型依据，不是操作指导
+        hint="84 MB，最快。4 声部，另产出鼓声轨供节拍检测",
     ),
     SeparateModelTier(
         id="standard",
         label="标准",
         model_filename="mel_band_roformer_kim_ft_unwa.ckpt",
-        hint="原生 2 声部，质量接近最佳档，本机实测约比最佳档快 2.4 倍",
+        hint="原生 2 声部，质量接近最佳档，实测约快 2.4 倍",
         recommended=True,
     ),
     SeparateModelTier(
         id="best",
         label="最佳",
         model_filename="model_bs_roformer_ep_317_sdr_12.9755.ckpt",
-        hint="原生 2 声部，质量最高，最慢（639MB 权重）",
+        hint="639 MB，最慢。原生 2 声部，质量最高",
     ),
 )
 
@@ -92,8 +94,8 @@ _SEPARATE_REQUIREMENTS: tuple[tuple[str, str], ...] = (
 )
 
 _DEPENDENCY_HINT = (
-    "请运行 `uv sync --extra separate`（或 `uv add audio-separator onnxruntime`）"
-    "后重启后端。audio-separator 不会自动带上 onnxruntime，必须显式安装。"
+    "安装命令：`uv sync --extra separate`（或 `uv add audio-separator onnxruntime`），"
+    "安装后需重启后端。"
 )
 
 
@@ -257,7 +259,7 @@ def run_separate(handle: JobHandle, store: ProjectStore, req: SeparateRequest) -
         raise RuntimeError(str(exc)) from exc
 
     if not project.audio_path:
-        msg = "工程还没有可用音频，请先下载或导入媒体后再分离"
+        msg = "工程还没有可用音频，需要先下载或导入媒体"
         raise RuntimeError(msg)
     audio_path = Path(project.audio_path)
     if not audio_path.is_file():
@@ -332,7 +334,7 @@ def run_separate(handle: JobHandle, store: ProjectStore, req: SeparateRequest) -
     if last_error:
         raise RuntimeError(last_error)
     if not produced_files:
-        msg = "分离子进程正常退出但没有产出任何文件，可能是 audio-separator 的输出行为发生了变化，请检查日志"
+        msg = "分离子进程正常退出但没有产出任何文件，需要检查后端日志"
         raise RuntimeError(msg)
 
     handle.check_cancelled()
@@ -448,14 +450,14 @@ def _resolve_supported_model(requested: str, supported: list[str]) -> str:
         return candidates[0]
 
     detail = (
-        f"（前缀匹配到多个候选：{'、'.join(candidates[:5])}，请写完整文件名）"
+        f"（前缀匹配到多个候选：{'、'.join(candidates[:5])}，需写完整文件名）"
         if candidates
         else ""
     )
     msg = (
         f"无法识别的分离模型标识：{requested}{detail}。"
-        f"请改用档位名：{_tier_summary()}；"
-        f"也可以直接填 audio-separator 的完整模型文件名（当前共 {len(supported)} 个可选）。"
+        f"可用档位：{_tier_summary()}；"
+        f"也可以直接填写完整的模型文件名（当前共 {len(supported)} 个可选）。"
     )
     raise ModelResolutionError(msg)
 
@@ -468,8 +470,8 @@ def _resolve_model_for_worker(separator: Any, requested: str) -> str:
         supported = _supported_model_filenames(separator)
     except Exception as exc:  # 拉列表可能因离线/文件损坏以各种方式失败，都归成同一条中文说明
         msg = (
-            f"无法核对模型标识 {requested}：拉取 audio-separator 的受支持模型列表失败"
-            f"（{type(exc).__name__}: {exc}）。请改用档位名：{_tier_summary()}。"
+            f"无法核对模型标识 {requested}：获取受支持模型列表失败"
+            f"（{type(exc).__name__}: {exc}）。可用档位：{_tier_summary()}。"
         )
         raise ModelResolutionError(msg) from exc
     return _resolve_supported_model(requested, supported)

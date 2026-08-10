@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from 'react'
 
 import * as api from '../api/client'
 import type { Project, ProjectSummary } from '../api/types'
+import { t } from '../i18n'
 import { STEP_LABEL, STEP_ORDER, stepStatus } from '../workflow'
 
 /**
@@ -37,7 +38,7 @@ export default function HomeView({ onOpen }: HomeViewProps) {
       setList(await api.listProjects())
       setError(null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(t('home.loadFailed', { msg: e instanceof Error ? e.message : String(e) }))
     }
   }, [])
 
@@ -67,19 +68,19 @@ export default function HomeView({ onOpen }: HomeViewProps) {
       const p = await api.createProject(title.trim(), artist.trim())
       onOpen(p.id)
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(t('home.createFailed', { msg: e instanceof Error ? e.message : String(e) }))
     } finally {
       setBusy(false)
     }
   }
 
   const remove = async (s: ProjectSummary) => {
-    if (!window.confirm(`删除「${s.title || '未命名'}」？`)) return
+    if (!window.confirm(t('home.confirmDelete', { title: s.title || t('common.untitled') }))) return
     try {
       await api.deleteProject(s.id)
       await reload()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(t('home.deleteFailed', { msg: e instanceof Error ? e.message : String(e) }))
     }
   }
 
@@ -87,8 +88,8 @@ export default function HomeView({ onOpen }: HomeViewProps) {
     <div className="home">
       <div className="home__inner">
         <div className="home__head">
-          <h1 className="home__title">卡拉OK视频制作</h1>
-          <span className="home__count">{list.length} 个工程</span>
+          <h1 className="home__title">{t('home.appTitle')}</h1>
+          <span className="home__count">{t('home.count', { n: list.length })}</span>
         </div>
 
         {error && <p className="error">{error}</p>}
@@ -96,15 +97,24 @@ export default function HomeView({ onOpen }: HomeViewProps) {
         {creating ? (
           <div className="card newform" style={{ maxWidth: 420 }}>
             <div className="newform__row">
-              <input autoFocus placeholder="曲名" value={title} onChange={(e) => setTitle(e.target.value)} />
-              <input placeholder="歌手" value={artist} onChange={(e) => setArtist(e.target.value)} />
+              <input
+                autoFocus
+                placeholder={t('home.fieldTitle')}
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+              />
+              <input
+                placeholder={t('home.fieldArtist')}
+                value={artist}
+                onChange={(e) => setArtist(e.target.value)}
+              />
             </div>
             <div className="newform__row">
               <button type="button" className="primary" disabled={busy} onClick={() => void create()}>
-                创建
+                {t('home.create')}
               </button>
               <button type="button" className="ghost" onClick={() => setCreating(false)}>
-                取消
+                {t('common.cancel')}
               </button>
             </div>
           </div>
@@ -116,7 +126,7 @@ export default function HomeView({ onOpen }: HomeViewProps) {
               <span className="step__icon">
                 <PlusOutlined />
               </span>
-              新建工程
+              {t('home.newProject')}
             </button>
           )}
 
@@ -141,8 +151,8 @@ export default function HomeView({ onOpen }: HomeViewProps) {
                 <button
                   type="button"
                   className="iconbtn pcard__del"
-                  title="删除工程"
-                  aria-label="删除工程"
+                  title={t('home.delete')}
+                  aria-label={t('home.delete')}
                   onClick={(e) => {
                     e.stopPropagation()
                     void remove(s)
@@ -152,23 +162,23 @@ export default function HomeView({ onOpen }: HomeViewProps) {
                 </button>
 
                 <div>
-                  <div className="pcard__title">{s.title || '未命名'}</div>
+                  <div className="pcard__title">{s.title || t('common.untitled')}</div>
                   <div className="pcard__artist">{s.artist || '—'}</div>
                 </div>
 
-                <div className="pcard__steps" aria-label="进度">
+                <div className="pcard__steps" aria-label={t('home.progress')}>
                   {STEP_ORDER.map((k) => (
                     <span
                       key={k}
                       className={`pcard__seg${status[k].done ? ' pcard__seg--done' : ''}`}
-                      title={`${STEP_LABEL[k]}${status[k].done ? ' 已完成' : ''}`}
+                      title={`${STEP_LABEL[k]}${status[k].done ? ` ${t('common.done')}` : ''}`}
                     />
                   ))}
                 </div>
 
                 <div className="pcard__meta">
                   <span>{formatDuration(s.duration_ms)}</span>
-                  <span>{s.line_count} 行</span>
+                  <span>{t('topbar.lineCount', { n: s.line_count })}</span>
                   <span>{formatWhen(s.updated_at)}</span>
                 </div>
               </div>
@@ -191,9 +201,9 @@ function formatWhen(sec: number): string {
   if (!sec) return '—'
   const d = new Date(sec * 1000)
   const diffMin = Math.floor((Date.now() - d.getTime()) / 60000)
-  if (diffMin < 1) return '刚刚'
-  if (diffMin < 60) return `${diffMin} 分钟前`
-  if (diffMin < 60 * 24) return `${Math.floor(diffMin / 60)} 小时前`
-  if (diffMin < 60 * 24 * 7) return `${Math.floor(diffMin / (60 * 24))} 天前`
+  if (diffMin < 1) return t('home.justNow')
+  if (diffMin < 60) return t('home.minutesAgo', { n: diffMin })
+  if (diffMin < 60 * 24) return t('home.hoursAgo', { n: Math.floor(diffMin / 60) })
+  if (diffMin < 60 * 24 * 7) return t('home.daysAgo', { n: Math.floor(diffMin / (60 * 24)) })
   return `${d.getMonth() + 1}-${String(d.getDate()).padStart(2, '0')}`
 }

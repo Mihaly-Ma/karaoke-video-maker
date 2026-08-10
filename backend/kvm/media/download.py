@@ -149,7 +149,7 @@ def _reconcile_start_offset(
         return "容器 start_time ≈ 0，未观测到起始 PTS 偏移问题。", 0
 
     if extracted_audio_duration_s <= 0:
-        return "抽音频时长探测失败，无法核算起始偏移，请人工核查。", 0
+        return "抽音频时长探测失败，无法核算起始偏移，需要人工核查。", 0
 
     expected_if_eaten = container_duration_s - container_start_s
     expected_if_kept = container_duration_s
@@ -161,15 +161,15 @@ def _reconcile_start_offset(
         note = (
             f"容器 start_time={container_start_s:.3f}s 非零，且抽出音频时长"
             f"（{extracted_audio_duration_s:.3f}s）更接近『整体时长-start_time』，"
-            "判断 ffmpeg 抽音频时默认吃掉了起始偏移。已将 global_offset_ms 预设为 "
-            f"{offset_ms}ms 作为起点——这是启发式估计，请在编辑器里核对首句是否对轴。"
+            "判断 ffmpeg 抽音频时默认吃掉了起始偏移。已将整体偏移预设为 "
+            f"{offset_ms}ms 作为起点，这是启发式估计，需要在编辑器里核对首句是否对轴。"
         )
         return note, offset_ms
 
     note = (
         f"容器 start_time={container_start_s:.3f}s 非零，但抽出音频时长"
         f"（{extracted_audio_duration_s:.3f}s）更接近整体时长，判断起始偏移未被"
-        "吃掉；未自动调整 global_offset_ms，但后续基于音频的时间轴分析可能与"
+        "吃掉；未自动调整整体偏移，但后续基于音频的时间轴分析可能与"
         f"视频轨错开约 {container_start_s * 1000:.0f}ms，建议人工核查。"
     )
     return note, 0
@@ -195,7 +195,7 @@ def run_download(handle: JobHandle, store: ProjectStore, req: DownloadRequest) -
     except RuntimeError as exc:
         msg = (
             f"yt-dlp 不可用：{status.message}。"
-            "请运行 `uv sync --extra download`（或 `uv add yt-dlp`）后重试。"
+            "安装命令：`uv sync --extra download`（或 `uv add yt-dlp`）。"
         )
         raise RuntimeError(msg) from exc
 
@@ -213,7 +213,7 @@ def run_download(handle: JobHandle, store: ProjectStore, req: DownloadRequest) -
         msg = f"无法解析该链接：{target.hint or '未知原因'}"
         raise RuntimeError(msg)
     if target.kind is TargetKind.COLLECTION:
-        msg = f"该链接是一个播放列表/合集，请打开具体某一集后再粘贴单集链接。{target.hint}"
+        msg = f"该链接是一个播放列表/合集，需要具体某一集的链接。{target.hint}"
         raise RuntimeError(msg)
 
     handle.check_cancelled()
@@ -233,7 +233,7 @@ def run_download(handle: JobHandle, store: ProjectStore, req: DownloadRequest) -
         if entries:
             listing = "；".join(f"{e['id']}: {(e['title'] or '')[:24]}" for e in entries[:10])
             msg = (
-                f"{exc}\n这是多P 稿件，请在链接末尾加上 `?p=N` 选择具体一集后重试。"
+                f"{exc}\n这是多P 稿件，需要在链接末尾加上 `?p=N` 选择具体一集。"
                 f"可选分P（前 {len(entries[:10])} 个）：{listing}"
             )
         else:
@@ -248,7 +248,7 @@ def run_download(handle: JobHandle, store: ProjectStore, req: DownloadRequest) -
     selector = StreamSelector(policy)
     selection = selector.select(probe)
     if selection.audio is None:
-        msg = "未找到可用的音频流，无法继续（分离与对齐都依赖音频）"
+        msg = "未找到可用的音频流"
         raise RuntimeError(msg)
 
     handle.report(
@@ -290,7 +290,7 @@ def run_download(handle: JobHandle, store: ProjectStore, req: DownloadRequest) -
     if not result.ok or result.path is None:
         if handle.is_cancelled():
             raise JobCancelled(handle.job_id)
-        msg = f"下载失败：{result.error or '未知错误（yt-dlp 未报告具体原因）'}"
+        msg = f"下载失败：{result.error or '未报告具体原因'}"
         raise RuntimeError(msg)
 
     created_paths.append(result.path)
@@ -374,9 +374,9 @@ def run_download(handle: JobHandle, store: ProjectStore, req: DownloadRequest) -
         from kvm.media.proxy import submit_proxy_job
 
         proxy_job_id = submit_proxy_job(store, project.id).job_id
-        proxy_note = "已自动开始生成编辑用代理视频（Safari 需要它才能出画面）。"
+        proxy_note = "已自动开始生成编辑代理。"
     except Exception as exc:  # noqa: BLE001 —— 代理是可选增强，任何失败都只降级不阻断
-        proxy_note = f"编辑用代理未能自动排队（{exc}），可在素材面板手动生成。"
+        proxy_note = f"编辑代理排队失败（{exc}），可在素材面板手动生成。"
 
     handle.report(1.0, "完成")
     return {

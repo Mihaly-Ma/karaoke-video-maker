@@ -23,7 +23,7 @@ export const ruby: Record<string, string> = {
 
   // 辅助栏
   'ruby.inspect.title': '选中词',
-  'ruby.inspect.hint': '点歌词或逐字轴里的字',
+  'ruby.inspect.hint': '选中歌词或逐字轴里的字',
   'ruby.reading': '读音',
   'ruby.field.display': '表记读法',
   'ruby.field.phonetic': '发音形',
@@ -31,7 +31,9 @@ export const ruby: Record<string, string> = {
   'ruby.field.kanaOnly': '假名不注音',
   'ruby.field.derived': '推导值',
   'ruby.field.local': '本地',
-  'ruby.field.localHint': '发音形暂存在本机，工程文件里还没有这个字段',
+  // 原文写的是"工程文件里还没有这个字段"——那是实现进度，不是用户能理解或
+  // 能处理的信息。他需要知道的只有一件事：这份改动不会跟着工程走。
+  'ruby.field.localHint': '仅存于本机，不随工程保存',
   'ruby.mora': '{n} 拍',
   'ruby.candidates': '候选',
   // 底栏并排着两把锁（时间 / 读音），只写「锁定」的那把等于没说锁的是什么
@@ -51,16 +53,22 @@ export const ruby: Record<string, string> = {
 
   // 改写行文本（§2.5 的手工旁路：歌词本身也得能改）
   'ruby.lineText.edit': '改文字',
-  'ruby.lineText.label': '这一行的歌词',
-  'ruby.lineText.placeholder': '这一行的歌词',
+  'ruby.lineText.label': '本行歌词',
+  'ruby.lineText.placeholder': '本行歌词',
   'ruby.lineText.save': '保存',
   // 回执说的是后果，不是"已保存"：推算出来的时间要复核，逐字轴上是插值色
   'ruby.lineText.done': '已改写：{kept} 字保留原时间，{guessed} 字待复核',
   'ruby.lineText.orphaned': '，{n} 项进了失效修正',
 
+  // 读音输入校验。说清**哪几个字符不合法**，而不是笼统地说格式不对
+  'ruby.invalid.empty': '读音不能为空',
+  'ruby.invalid.kanji': '读音不能含汉字：{chars}',
+  'ruby.invalid.latin': '读音不能含字母或数字：{chars}，请改写成片假名',
+  'ruby.invalid.other': '含有非假名字符：{chars}',
+
   // 提示与报错
-  'ruby.msg.splitFailed': '读音与这个词对不上，无法拆分',
+  'ruby.msg.splitFailed': '读音与该词不匹配，无法拆分',
   'ruby.msg.splitDone': '已拆成 {n} 段',
-  'ruby.msg.noKanji': '这个词是纯假名，不需要注音',
+  'ruby.msg.noKanji': '纯假名，无需注音',
   'ruby.msg.saved': '已保存',
 }

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import * as api from '../api/client'
 import type { JobStatus } from '../api/types'
+import { t } from '../i18n'
 
 /**
  * 长任务进度条：下载 / 分离 / 导出都可能跑几十秒到几分钟。
@@ -24,11 +25,11 @@ interface JobProgressProps {
 }
 
 const STATE_LABEL: Record<JobStatus['state'], string> = {
-  pending: '排队中',
-  running: '进行中',
-  done: '已完成',
-  failed: '失败',
-  cancelled: '已取消',
+  pending: t('job.pending'),
+  running: t('job.running'),
+  done: t('job.done'),
+  failed: t('job.failed'),
+  cancelled: t('job.cancelled'),
 }
 
 function toPercent(progress: number): number {
@@ -108,7 +109,7 @@ export default function JobProgress({ jobId, label, intervalMs = 800, onSettled,
         <span className="job-progress__label">{label}</span>
         <span className="job-progress__state">{STATE_LABEL[state]}</span>
         {onDismiss && (
-          <button type="button" className="job-progress__dismiss" title="关闭（不影响后台任务）" onClick={onDismiss}>
+          <button type="button" className="job-progress__dismiss" title={t('job.dismiss')} onClick={onDismiss}>
             ×
           </button>
         )}
@@ -120,7 +121,7 @@ export default function JobProgress({ jobId, label, intervalMs = 800, onSettled,
         <span className="job-progress__message">{status?.message || `${pct}%`}</span>
         {canCancel && (
           <button type="button" className="ghost small" onClick={() => void handleCancel()} disabled={cancelling}>
-            取消
+            {t('common.cancel')}
           </button>
         )}
       </div>

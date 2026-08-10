@@ -65,7 +65,7 @@ def install_hint() -> str:
         return INSTALL_HINT_MACOS
     if sys.platform.startswith("win"):
         return INSTALL_HINT_WINDOWS
-    return "请安装带 --enable-libass 的 ffmpeg（发行版仓库里的 ffmpeg 通常已带）"
+    return "需要带 --enable-libass 编译的 ffmpeg（发行版仓库提供的 ffmpeg 通常已带）"
 
 
 def has_libass(binary: str) -> bool:
@@ -171,8 +171,8 @@ def probe_ffmpeg() -> FfmpegProbe:
             tried=tried,
             override_rejected=(
                 f"{ENV_FFMPEG} 指向 {override}——该文件{reason}。"
-                f"显式指定的 ffmpeg 不合格时不会自动换用别的——"
-                f"请修正或清除 {ENV_FFMPEG}。"
+                f"显式指定的 ffmpeg 不合格时不会自动切换到其他候选，"
+                f"需要修正或清除 {ENV_FFMPEG}。"
             ),
         )
 
@@ -194,8 +194,8 @@ def find_ffmpeg_with_libass() -> str:
     if result.override_rejected:
         raise RuntimeError(result.override_rejected)
     msg = (
-        "找不到带 libass 的 ffmpeg。macOS 上 Homebrew 主线 ffmpeg 不含 libass，"
-        f"请运行 `{install_hint()}`，或把已有的可用 ffmpeg 路径写进环境变量 {ENV_FFMPEG}。"
+        "找不到带 libass 的 ffmpeg。macOS 上 Homebrew 主线 ffmpeg 不含 libass；"
+        f"安装命令：`{install_hint()}`，或将可用的 ffmpeg 路径写入环境变量 {ENV_FFMPEG}。"
     )
     raise RuntimeError(msg)
 

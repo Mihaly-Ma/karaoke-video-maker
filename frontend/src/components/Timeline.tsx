@@ -1850,7 +1850,13 @@ export function Timeline() {
                         data-line={line.id}
                         data-token-index={i}
                         data-selected={isSel || undefined}
-                        title={`${tk.text}｜${t(meta.labelKey)}：${t(meta.hintKey)}\n${formatMs(tm.start, true)} + ${Math.round(tm.dur)}ms${
+                        /*
+                         * 只用 hint，不再拼「label：hint」。两者说的是同一件事，
+                         * 拼起来会读成「歌词源：歌词源自带」「手工：手工，重算不覆盖」——
+                         * 同一个概念在一行里占两遍，却没多给任何信息。
+                         * label 仍用在下方图例上，那里需要的是短名。
+                         */
+                        title={`${tk.text}｜${t(meta.hintKey)}\n${formatMs(tm.start, true)} + ${Math.round(tm.dur)}ms${
                           tk.locked_timing ? `\n${t('align.locked')}` : ''
                         }`}
                         onPointerDown={(e) => onTokenPointerDown(e, line, i, 'token-move')}

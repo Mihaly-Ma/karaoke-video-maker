@@ -377,12 +377,12 @@ def export_video(body: RenderRequest, request: Request) -> JobStatus:
     if body.use_instrumental and not dto.instrumental_path:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="工程未关联伴奏音轨（instrumental_path），无法生成 OFF VOCAL",
+            detail="工程未关联伴奏音轨，无法生成 OFF VOCAL",
         )
     if body.with_guide and not dto.vocals_path:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="工程未关联人声轨（vocals_path），无法合成引导声",
+            detail="工程未关联人声轨，无法合成引导声",
         )
 
     job_id = uuid.uuid4().hex[:12]
@@ -533,10 +533,10 @@ def _run_export(job_id: str, store: ProjectStore, dto: ProjectDTO, req: RenderRe
         # 成片画质砍掉一大截，而且是"导完才发现"的那种错误。
         video_path = Path(dto.video_path)
 
-        _set_job(job_id, state="running", message="探测 ffmpeg…", progress=0.02)
+        _set_job(job_id, state="running", message="正在探测 ffmpeg…", progress=0.02)
         ffmpeg = _get_ffmpeg()
 
-        _set_job(job_id, message="生成 ASS…", progress=0.1)
+        _set_job(job_id, message="正在生成 ASS…", progress=0.1)
         ass_text = _build_ass_text(dto, embed_fonts=True)
 
         out_dir = default_root().parent / "exports"
@@ -547,16 +547,16 @@ def _run_export(job_id: str, store: ProjectStore, dto: ProjectDTO, req: RenderRe
         audio_track: Path | None = None
         if req.use_instrumental:
             if not dto.instrumental_path:
-                msg = "工程未关联伴奏音轨（instrumental_path），无法生成 OFF VOCAL"
+                msg = "工程未关联伴奏音轨，无法生成 OFF VOCAL"
                 raise RuntimeError(msg)
             audio_track = Path(dto.instrumental_path)
 
         if req.with_guide:
             if not dto.vocals_path:
-                msg = "工程未关联人声轨（vocals_path），无法合成引导声"
+                msg = "工程未关联人声轨，无法合成引导声"
                 raise RuntimeError(msg)
 
-            _set_job(job_id, message="准备引导声…", progress=0.25)
+            _set_job(job_id, message="正在准备引导声…", progress=0.25)
             if audio_track is None:
                 # 引导声要叠加在某条音轨上；未选伴奏时先从视频里抽出原始音轨作为底
                 audio_track = _extract_audio(
@@ -587,7 +587,7 @@ def _run_export(job_id: str, store: ProjectStore, dto: ProjectDTO, req: RenderRe
             duration_s=req.duration_s,
         )
 
-        _set_job(job_id, message="登记成片…", progress=0.98)
+        _set_job(job_id, message="正在登记成片…", progress=0.98)
         artifact = ExportArtifactDTO(
             id=job_id,
             path=str(out_path),

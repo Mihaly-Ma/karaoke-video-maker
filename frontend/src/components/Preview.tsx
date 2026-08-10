@@ -351,23 +351,30 @@ class AudioEngine {
      * 那正好等于原曲混音。绝不能按当前增益加权——切档时增益在变，参考跟着变，
      * 两条 stem 的对齐会在切换瞬间一起跳。
      */
-    try {
-      const stretch = await TimeStretchPlayer.create(ctx, { layerIds: layers })
-      if (this.disposed) {
-        stretch.dispose()
-        return warnings
+    // 一条轨都没有时不建拉伸器，也**不报"慢速会降调"**：那条警告说的是
+    // 浏览器能力不足，而此刻真实情况只是工程还没有素材。原先无条件走这里，
+    // TimeStretchPlayer 以"至少要有一条音轨"抛错，于是空工程上会弹出一条
+    // 黄色警告，正文还拼着那句内部异常——用户看到的是一个不存在的浏览器问题。
+    if (layers.length > 0) {
+      try {
+        const stretch = await TimeStretchPlayer.create(ctx, { layerIds: layers })
+        if (this.disposed) {
+          stretch.dispose()
+          return warnings
+        }
+        this.stretch = stretch
+        for (const id of layers) {
+          const gain = this.gains.get(id)
+          if (gain) stretch.connectLayer(id, gain)
+        }
+      } catch {
+        // 内部异常文本不进界面：用户既读不懂也处理不了，诊断留给控制台
+        warnings.push({
+          level: 'warn',
+          title: t('media.player.warn.pitchFallbackTitle'),
+          detail: t('media.player.warn.pitchFallbackDetail'),
+        })
       }
-      this.stretch = stretch
-      for (const id of layers) {
-        const gain = this.gains.get(id)
-        if (gain) stretch.connectLayer(id, gain)
-      }
-    } catch (e) {
-      warnings.push({
-        level: 'warn',
-        title: t('media.player.warn.pitchFallbackTitle'),
-        detail: `${t('media.player.warn.pitchFallbackDetail')}（${describeError(e)}）`,
-      })
     }
 
     for (const id of layers) {
@@ -923,7 +930,7 @@ export function Preview({ className }: PreviewProps) {
         setOverlayError(null)
       } while (assDirtyRef.current)
     } catch (e) {
-      setOverlayError(`重新生成字幕失败：${describeError(e)}`)
+      setOverlayError(t('media.player.err.overlayRebuild', { detail: describeError(e) }))
     } finally {
       assInFlightRef.current = false
       assDirtyRef.current = false
@@ -1065,7 +1072,7 @@ export function Preview({ className }: PreviewProps) {
         setPlaybackError(null)
       } catch (e) {
         setPlaying(false)
-        setPlaybackError(`无法开始播放：${describeError(e)}`)
+        setPlaybackError(t('media.player.err.playFailed', { detail: describeError(e) }))
         return
       }
 
@@ -1153,6 +1160,9 @@ export function Preview({ className }: PreviewProps) {
   /** 某个预设为什么不能选。返回 null 表示可选 */
   const presetBlockReason = (preset: MonitorPreset): string | null => {
     if (audioState === 'loading') return t('media.player.mix.loading')
+    // 一条轨都没有时，原因是"工程还没有音轨"，不是"音频引擎不可用"——
+    // 后者会把"你还没导入素材"说成"你的浏览器有毛病"。
+    if (layers.length === 0) return t('media.player.mix.noAudio')
     if (audioState !== 'webaudio') return t('media.player.mix.unavailable')
     const need = presetLayers(preset, layers)
     if (need.length === 0) return t('media.player.mix.needSeparate')
@@ -1181,7 +1191,7 @@ export function Preview({ className }: PreviewProps) {
   if (!project) {
     return (
       <div className={className} style={styles.placeholder}>
-        还没有打开工程。
+        {t('align.noProject')}
       </div>
     )
   }
@@ -1220,8 +1230,8 @@ export function Preview({ className }: PreviewProps) {
       ? [
           {
             level: 'warn' as const,
-            title: '浏览器不支持 requestVideoFrameCallback',
-            detail: '已退回逐动画帧采样，逐字高亮可能与画面差半帧到一帧。',
+            title: t('media.player.warn.noFrameSyncTitle'),
+            detail: t('media.player.warn.noFrameSyncDetail'),
           },
         ]
       : []),
@@ -1455,10 +1465,10 @@ export function Preview({ className }: PreviewProps) {
         <IssueList
           issues={[
             ...(overlayError
-              ? [{ level: 'fatal' as const, title: '字幕预览不可用', detail: overlayError }]
+              ? [{ level: 'fatal' as const, title: t('media.player.err.overlayTitle'), detail: overlayError }]
               : []),
             ...(playbackError
-              ? [{ level: 'fatal' as const, title: '播放出错', detail: playbackError }]
+              ? [{ level: 'fatal' as const, title: t('media.player.err.playTitle'), detail: playbackError }]
               : []),
           ]}
         />

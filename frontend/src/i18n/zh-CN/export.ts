@@ -6,14 +6,14 @@ export const exportStage: Record<string, string> = {
   'export.track': '音轨',
   'export.trackOn': 'ON VOCAL',
   'export.trackOff': 'OFF VOCAL',
-  'export.instrumentalMissing': '工程还没有伴奏轨，先做人声分离',
+  'export.instrumentalMissing': '还没有伴奏轨，需要先完成人声分离',
   'export.withGuide': '混入引导声',
-  'export.withGuideMissing': '工程还没有人声轨，先做人声分离',
+  'export.withGuideMissing': '还没有人声轨，需要先完成人声分离',
   'export.start': '导出',
   'export.running': '导出中',
   // 字形预检：只警告不阻断，所以第二句要给出可操作的下一步
   'export.glyphMissing': '字体缺 {n} 个字形：{chars}',
-  'export.glyphHint': '到「样式」换一个字体',
+  'export.glyphHint': '在「样式」步骤更换字体',
   'export.empty': '还没有导出过',
   'export.excerpt': '片段',
   'export.download': '下载',
@@ -28,15 +28,17 @@ export const exportStage: Record<string, string> = {
   // 那句笼统的「预览不含引导声」已经不成立，撤掉了。
   'export.previewGuideOn': '含引导声',
   'export.previewGuideMissing': '预览无引导声',
-  'export.previewGuideMissingHint': '到「素材」步骤生成引导声，之后预览就能听到；导出会自动现场合成一份',
+  'export.previewGuideMissingHint': '在「素材」步骤生成引导声后可试听；导出时会自动合成',
   // 预览字体是子集化产物，字符集比系统原字体小：这些字只有预览缺，成片是好的
   'export.previewGlyphGap': '预览缺 {n} 字',
   'export.cues': '关键位置',
   'export.cuesEmpty': '还没有歌词',
   'export.cueCredits': '制作名单',
-  'export.cueFirst': '第一句',
+  // 同一张清单里曾经「第一句」「最长行」「末句」三种叫法混排，
+  // 全部统一到「行」（见 align.ts 文件头）
+  'export.cueFirst': '首行',
   'export.cueParagraph': '间奏后',
   'export.cueWidest': '最长行',
   'export.cueRuby': '注音最密',
-  'export.cueEnd': '末句',
+  'export.cueEnd': '末行',
 }

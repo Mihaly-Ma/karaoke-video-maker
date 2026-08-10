@@ -35,7 +35,11 @@ language which major features do not exist yet.
   centred credits card; and "get ready" dots placed on detected beats.
 - Guide melody synthesis — CREPE pitch extraction, median filter, note segmentation, semitone
   quantization, band-limited harmonic synthesis, mixed into the instrumental. Beat detection runs
-  off the separated drum stem.
+  off the separated drum stem. It is a Material-stage artifact, not an export-time switch: it runs
+  as a cancellable subprocess job cached on `(vocals hash, params, version)`, five parameters are
+  exposed (volume, timbre, brightness, sensitivity, legato), the result is playable at
+  `/api/media/file/{id}/guide`, and export reuses that same file when the fingerprint still
+  matches. CREPE weights ship inside the wheel — nothing is downloaded at runtime.
 - ffmpeg detection by capability (is the `ass` filter registered), not by version number, across
   the known install locations, plus a `KVM_FFMPEG` override that fails loudly rather than
   silently substituting a different build.
@@ -46,7 +50,7 @@ language which major features do not exist yet.
   availability on both loopback families. Copy-pasteable report, JSON mode, downloads nothing.
 - One-key scripts on top of it: `scripts/setup.py` (check and install) and `scripts/dev.py`
   (check, then run both servers, with clean group shutdown on Ctrl-C).
-- `uv run pytest -q` was last measured at 421 passing, 1 skipped.
+- `uv run pytest -q` was last measured at 506 passing, 1 skipped.
 
 ### Editor
 
@@ -65,9 +69,17 @@ language which major features do not exist yet.
 - Real libass preview (JASSUB) fed the *same* ASS the exporter burns, on the Edit, Style and
   Export stages. System fonts are subsetted server-side so the preview can use the family the
   export will use.
-- Font glyph coverage is checked before you render: the Style step reports whether the chosen
-  font covers every character in the song (lyrics, furigana, credits card), and the Export step
-  repeats the check right above the button. Missing glyphs warn, they do not block.
+- Fonts are an ordered **chain**, not one family: whatever the primary font lacks, the next one
+  supplies. Both ends are fed the same subset bytes — the preview gets them via `GET
+  /api/fonts/subset`, the exporter embeds them in the ASS `[Fonts]` section — and every font in
+  the chain is rewritten to share the primary's family name, which is what actually makes libass
+  honour the chain (`experiments/ass_embedded_fonts.py`).
+- Font glyph coverage is checked before you render: the Style step reports whether the whole
+  chain covers every character in the song (lyrics, furigana, credits card) and which font ends
+  up drawing each one, and the Export step repeats the check right above the button. Missing
+  glyphs warn, they do not block.
+- The system font list is searchable by any of a font's names, so `Hiragino Sans` is reachable
+  by typing `ヒラギノ`, `ひらぎの` or `hiragino`.
 
 | | |
 |---|---|
@@ -110,10 +122,9 @@ running pipeline.
   exceptions, and only because they are Python packages: both install and update themselves into
   an app-private environment on demand.
 - **Bundled fonts.** The Style step picks from fonts already installed on your machine; the
-  project ships and fetches none. One caveat the coverage check reports separately: the in-app
-  preview feeds libass a *subset* of the font (ASCII, kana, JIS X 0208 kanji), so characters
-  outside that set — `鷗`, `α`, `①` — are blank in the preview while the burned-in video renders
-  them correctly.
+  project ships and fetches none. The subset served to the preview is now cut per song, so
+  characters outside the default set — `鷗`, `𠮷`, `①` — render in the preview too; they used to
+  be blank there while the burned-in video rendered them correctly.
 - **A persisted phonetic reading layer.** The project model and API do carry a separate "how it
   is actually sung" reading alongside the displayed furigana (particle は → ワ, and so on), with
   a rule-based derivation endpoint. The editor still keeps the phonetic field in browser local

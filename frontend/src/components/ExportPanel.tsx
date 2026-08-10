@@ -11,7 +11,7 @@ import { useEffect, useMemo, useState } from 'react'
 
 import * as api from '../api/client'
 import type { ExportArtifact } from '../api/types'
-import { t } from '../i18n'
+import { getLocale, t } from '../i18n'
 import { formatMissing, renderedCharset, useFontCoverage } from '../lib/fontCoverage'
 import { formatMs } from '../lib/timeScale'
 import { useProject } from '../state/projectStore'
@@ -88,9 +88,13 @@ function formatSize(bytes: number): string {
  *
  * 不显示秒：这个时间是用来分辨"同一变体导过的哪一次"的，精确到分钟绰绰有余，
  * 而完整的 `toLocaleString()` 在 360px 的窄栏里会把这一行挤到省略号。
+ *
+ * **按界面语言排版，不跟浏览器语言。** 传 `undefined` 会用浏览器 locale，
+ * 于是中文界面里出现 `8/9/26, 9:26 PM` 这种美式写法，和同一行的
+ * 「164.3 MB · 4:43」完全不是一套读法。
  */
 function formatTime(createdAt: number): string {
-  return new Date(createdAt * 1000).toLocaleString(undefined, {
+  return new Date(createdAt * 1000).toLocaleString(getLocale(), {
     dateStyle: 'short',
     timeStyle: 'short',
   })

@@ -39,6 +39,8 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef } from 'react'
 import WaveSurfer from 'wavesurfer.js'
 
+import { t } from '../i18n'
+
 export type WaveformStatus =
   | { kind: 'idle' }
   | { kind: 'loading'; percent: number }
@@ -127,7 +129,9 @@ export const Waveform = forwardRef<WaveformHandle, WaveformProps>(function Wavef
       const message = err instanceof Error && err.message ? err.message : ''
       cbRef.current.onStatus({
         kind: 'error',
-        message: message ? `音频加载失败：${message}` : '音频加载失败',
+        message: message
+          ? t('align.waveLoadFailedDetail', { detail: message })
+          : t('align.waveLoadFailed'),
       })
     })
   }, [])

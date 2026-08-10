@@ -27,6 +27,7 @@ from kvm.api.schemas import (
 )
 from kvm.api.store import ProjectStore
 from kvm.editing import ops
+from kvm.models.karaoke import normalize_font_chain
 from pydantic import BaseModel
 
 projects_router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -51,7 +52,17 @@ class StylePatchDTO(BaseModel):
     否则会分不清"用户传了默认值"与"用户压根没传这个字段"。
     """
 
+    font_names: list[str] | None = None
+    """有序字体候选链，首项即主字体。"""
+
     font_name: str | None = None
+    """**兼容入口**：只给主字体、不动链尾。
+
+    留着它不是为了对称：`StyleDTO.font_name` 是派生量（`computed_field`），
+    直接 `setattr` 会抛异常，所以这条路径必须在 `update_style` 里翻译成对
+    `font_names` 的改动。老前端与诊断脚本发的都是这个键。
+    """
+
     font_size: int | None = None
     bold: bool | None = None
     outline: float | None = None
@@ -148,12 +159,25 @@ def update_style(project_id: str, patch: StylePatchDTO, request: Request) -> Pro
 
     只覆盖请求体里显式出现的字段（`exclude_unset=True`），未提供的字段
     保留工程原值，不会被 `StylePatchDTO` 的默认值（None）误覆盖。
+
+    字体两个键的裁决：给了 `font_names` 就整条链照单换掉；只给 `font_name`
+    则**只换链首、保留链尾**——老前端与诊断脚本发的是后者，把它当成"链只剩
+    一个字体"会静默清掉用户配好的兜底字体。
     """
     updates = patch.model_dump(exclude_unset=True)
+    legacy_font = updates.pop("font_name", None)
+    new_chain = updates.pop("font_names", None)
 
     def _apply(draft: ProjectDTO) -> None:
+        chain = new_chain
+        if chain is None and legacy_font:
+            chain = [legacy_font, *draft.style.font_names]
         for key, value in updates.items():
             setattr(draft.style, key, value)
+        if chain is not None:
+            # 直接 setattr 会绕过 StyleDTO 的校验器（pydantic 默认不校验赋值），
+            # 空链 / 重复项就这么进了工程文件。规则只有一份实现，见 models.karaoke。
+            draft.style.font_names = normalize_font_chain(chain)
 
     try:
         return _store(request).mutate(project_id, _apply, label="更新样式")

@@ -52,9 +52,9 @@ export default function TopBar({ step, status, onStep, onHome }: TopBarProps) {
   return (
     <header className="topbar">
       <div className="topbar__side">
-        <button type="button" className="topbar__project" onClick={onHome} title="返回工程列表">
+        <button type="button" className="topbar__project" onClick={onHome} title={t('topbar.home')}>
           <AppstoreOutlined />
-          <span className="topbar__project-name">{project?.title || '未命名'}</span>
+          <span className="topbar__project-name">{project?.title || t('common.untitled')}</span>
         </button>
 
         {/*
@@ -76,7 +76,7 @@ export default function TopBar({ step, status, onStep, onHome }: TopBarProps) {
           className="ghost small"
           disabled={!canUndo}
           onClick={() => void undo()}
-          title="撤销 (Ctrl/Cmd+Z)"
+          title={t('topbar.undo')}
           aria-label={t('common.undo')}
         >
           <RollbackOutlined /> {t('common.undo')}
@@ -86,14 +86,14 @@ export default function TopBar({ step, status, onStep, onHome }: TopBarProps) {
           className="ghost small"
           disabled={!canRedo}
           onClick={() => void redo()}
-          title="重做 (Shift+Ctrl/Cmd+Z)"
+          title={t('topbar.redo')}
           aria-label={t('common.redo')}
         >
           <RollbackOutlined style={{ transform: 'scaleX(-1)' }} /> {t('common.redo')}
         </button>
       </div>
 
-      <nav className="stepbar" aria-label="工作流步骤">
+      <nav className="stepbar" aria-label={t('topbar.steps')}>
         {STEP_ORDER.map((key) => {
           const Icon = STEP_ICON[key]
           const st = status[key]
@@ -120,7 +120,7 @@ export default function TopBar({ step, status, onStep, onHome }: TopBarProps) {
               </span>
               {STEP_LABEL[key]}
               {st.done && (
-                <span className="step__check" aria-label="已完成">
+                <span className="step__check" aria-label={t('common.done')}>
                   <CheckOutlined />
                 </span>
               )}

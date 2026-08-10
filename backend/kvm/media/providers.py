@@ -127,7 +127,7 @@ class YtDlpManager:
                     age_days=None,
                     stale=True,
                     updatable=True,
-                    message="yt-dlp 不可用，需要先自动获取（见 upgrade()）",
+                    message="yt-dlp 不可用，需要先自动获取",
                 )
             out = subprocess.run(
                 [binary, "--version"],
@@ -806,7 +806,7 @@ class YouTubeProvider(VideoProvider):
                 canonical_url=url,
                 media_id=(query.get("list") or [""])[0],
                 raw_url=url,
-                hint="播放列表，需要上层选集",
+                hint="播放列表，需要选择具体一集",
             )
         return ResolvedTarget(
             site=self.site, kind=TargetKind.UNSUPPORTED, canonical_url=url,
@@ -819,7 +819,7 @@ class YouTubeProvider(VideoProvider):
                 stream.requires_login = True
             probe.warnings.append("年龄限制内容，需要登录 cookie")
         if "ja" in probe.subtitle_langs:
-            probe.warnings.append("存在官方 ja 人工字幕，可作为歌词兜底源（§5.2）")
+            probe.warnings.append("存在官方 ja 人工字幕，可作为歌词兜底源")
 
 
 class BilibiliProvider(VideoProvider):
@@ -891,14 +891,14 @@ class BilibiliProvider(VideoProvider):
             return ResolvedTarget(
                 site=self.site, kind=TargetKind.COLLECTION, canonical_url=url,
                 media_id=(query.get("sid") or [parsed.path.rsplit("/", 1)[-1]])[0],
-                raw_url=url, hint="UP 主合集，需要上层选集",
+                raw_url=url, hint="UP 主合集，需要选择具体一集",
             )
         ss_match = self._SS_RE.search(url)
         if ss_match:
             return ResolvedTarget(
                 site=self.site, kind=TargetKind.COLLECTION,
                 canonical_url=f"https://www.bilibili.com/bangumi/play/{ss_match.group(1)}",
-                media_id=ss_match.group(1), raw_url=url, hint="番剧整季，需要上层选集",
+                media_id=ss_match.group(1), raw_url=url, hint="番剧整季，需要选择具体一集",
             )
         ep_match = self._EP_RE.search(url)
         if ep_match:
@@ -928,7 +928,7 @@ class BilibiliProvider(VideoProvider):
                 site=self.site, kind=TargetKind.SINGLE,
                 canonical_url=f"https://www.bilibili.com/video/{bvid}",
                 media_id=bvid, raw_url=url,
-                hint="裸 BV 号：若为多P 稿件会展开成列表，须先 list_entries 再选 ?p=N",
+                hint="裸 BV 号：若为多P 稿件会展开成列表，需先选择分P 再用 ?p=N",
             )
         return ResolvedTarget(
             site=self.site, kind=TargetKind.UNSUPPORTED, canonical_url=url,
@@ -954,8 +954,8 @@ class BilibiliProvider(VideoProvider):
         info = self._with_retry(_extract, f"探测 {target.canonical_url}")
         if info.get("_type") == "playlist":
             msg = (
-                f"{target.canonical_url} 是多P 稿件（{len(info.get('entries') or [])} 个分P）。"
-                "请先 list_entries() 让用户选集，再用 ?p=N 探测单集。"
+                f"{target.canonical_url} 是多P 稿件，共 {len(info.get('entries') or [])} 个分P。"
+                "需要先选择具体分P，再用 ?p=N 探测单集。"
             )
             raise RuntimeError(msg)
         return super().probe(target)

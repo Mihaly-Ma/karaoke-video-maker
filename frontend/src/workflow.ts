@@ -1,4 +1,5 @@
 import type { Project } from './api/types'
+import { t } from './i18n'
 
 /**
  * 五个工作流步骤的定义与"走到哪一步"的判据。
@@ -20,12 +21,16 @@ export type StepKey = 'media' | 'lyrics' | 'edit' | 'style' | 'export'
 
 export const STEP_ORDER: StepKey[] = ['media', 'lyrics', 'edit', 'style', 'export']
 
+/**
+ * 步骤名。取值走 `t()`，与 `common.ts` 的 `step.*` 是同一份文案——
+ * 步骤名在顶栏、首页卡片、跳步提示里各出现一次，散着写迟早对不上。
+ */
 export const STEP_LABEL: Record<StepKey, string> = {
-  media: '素材',
-  lyrics: '歌词',
-  edit: '编辑',
-  style: '样式',
-  export: '导出',
+  media: t('step.media'),
+  lyrics: t('step.lyrics'),
+  edit: t('step.edit'),
+  style: t('step.style'),
+  export: t('step.export'),
 }
 
 /**
@@ -112,8 +117,8 @@ export function stepStatus(project: Project | null, exported = false): Record<St
     media: gate('media', true, ''),
     lyrics: gate('lyrics', true, ''),
     // 没有歌词就没有 token，轴、注音、样式预览全都无从谈起
-    edit: gate('edit', done.lyrics, '需要先导入歌词'),
-    style: gate('style', done.lyrics, '需要先导入歌词'),
-    export: gate('export', done.media && done.lyrics, '需要素材和歌词'),
+    edit: gate('edit', done.lyrics, t('step.needLyrics')),
+    style: gate('style', done.lyrics, t('step.needLyrics')),
+    export: gate('export', done.media && done.lyrics, t('step.needMediaAndLyrics')),
   }
 }

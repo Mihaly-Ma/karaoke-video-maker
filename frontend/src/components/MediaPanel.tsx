@@ -39,18 +39,21 @@ interface SeparateTier {
  * `Model file ... not found` 的根因：换模型/调档位现在只改后端一处。
  */
 const FALLBACK_TIERS: SeparateTier[] = [
-  { id: 'fast', label: '快速', model_filename: '', hint: '', recommended: true, warning: '' },
-  { id: 'standard', label: '标准', model_filename: '', hint: '', recommended: false, warning: '' },
-  { id: 'best', label: '最佳', model_filename: '', hint: '', recommended: false, warning: '' },
+  { id: 'fast', label: t('media.tierName.fast'), model_filename: '', hint: '', recommended: true, warning: '' },
+  { id: 'standard', label: t('media.tierName.standard'), model_filename: '', hint: '', recommended: false, warning: '' },
+  { id: 'best', label: t('media.tierName.best'), model_filename: '', hint: '', recommended: false, warning: '' },
 ]
 
 /**
  * 已知档位 id → 短选型依据（速度/质量取舍，用户真正要的决策依据）。
  *
- * 后端 `hint` 字段是完整说明句（例如"84MB，最快，先出个能听的伴奏立刻开始调轴；
- * 4 声部，还会顺带产出鼓声轨"），适合当 `title` 悬浮详情，但界面主文案要短
+ * 后端 `hint` 字段是完整说明，适合当 `title` 悬浮详情，但界面主文案要短
  * （docs/ui-redesign.md §六"文案：短，且准确"），所以可见文字用这张短表，
  * 完整说明仍通过 title 属性保留，不丢信息。
+ *
+ * **这张表与档位名并排显示，所以绝不能是档位名的同义词。** 它写的是体积与
+ * 速度倍率这类可比的数字；曾经写成"最快/均衡/最高质量"，于是界面上出现
+ * 「快速 最快」「标准 均衡」，占了两个词却没给出任何新信息。
  */
 const TIER_SHORT_HINT: Record<string, string> = {
   fast: 'media.tier.fast',

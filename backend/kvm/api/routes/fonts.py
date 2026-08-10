@@ -446,18 +446,18 @@ def _status_snapshot() -> FontScanStatus:
         )
         from_cache, error = _scan_from_cache, _scan_error
 
+    # 状态句用「正在 + 动词」或结果名词，不带句号、不安慰。
+    # 首次扫描约 40 秒，所以扫描态**必须带上已解析的数量**——只说"正在扫描"
+    # 用户分不出是在走还是卡住了；有量的状态比任何"请稍候"都管用。
     if state == "scanning":
-        message = (
-            f"正在扫描系统字体…（已解析 {done}/{total} 个字体文件，"
-            f"已发现 {count} 个字体族）。首次扫描约需 40 秒，之后走磁盘缓存只要几毫秒。"
-        )
+        message = f"正在扫描系统字体 · 已解析 {done}/{total} 个文件，发现 {count} 个字体族"
     elif state == "ready":
-        source = "磁盘缓存" if from_cache else f"实际扫描，耗时 {elapsed:.1f} 秒"
-        message = f"系统字体已就绪，共 {count} 个字体族（{source}）。"
+        source = "磁盘缓存" if from_cache else f"扫描耗时 {elapsed:.1f} 秒"
+        message = f"系统字体已就绪 · {count} 个字体族（{source}）"
     elif state == "failed":
         message = f"系统字体扫描失败：{error}"
     else:
-        message = "尚未开始扫描系统字体。"
+        message = "尚未扫描系统字体"
 
     return FontScanStatus(
         state=state,
@@ -494,7 +494,7 @@ def _require_font(family: str) -> FontInfo:
         raise HTTPException(status_code=404, detail=f"系统中找不到字体：{family}")
     raise HTTPException(
         status_code=503,
-        detail=f"{status.message}尚未扫描到字体「{family}」，请稍候重试。",
+        detail=f"{status.message}。尚未扫描到字体「{family}」",
         headers={"Retry-After": "2"},
     )
 
@@ -602,9 +602,7 @@ def _subset_target(family: str, as_family: str, extra: str) -> tuple[FontInfo, P
         st = src.stat()
     except OSError as exc:
         raise HTTPException(status_code=404, detail=f"字体文件不可读：{src}") from exc
-    key = _subset_cache_key(
-        match.family, match.index, st.st_mtime_ns, st.st_size, as_family, extra
-    )
+    key = _subset_cache_key(match.family, match.index, st.st_mtime_ns, st.st_size, as_family, extra)
     return match, src, _cache_dir() / font_cache.artifact_name(key)
 
 
@@ -676,7 +674,7 @@ def get_subset(
             raise HTTPException(status_code=500, detail=f"字体子集化失败：{failure}")
         raise HTTPException(
             status_code=503,
-            detail=f"正在为「{family}」裁剪预览字体（首次约 10 秒），请稍候。",
+            detail=f"正在为「{family}」裁剪预览字体，首次约需 10 秒",
             headers={"Retry-After": "2"},
         )
 
@@ -713,7 +711,9 @@ def preheat_chain(chain: list[str], extra: str) -> None:
             _ensure_subset_job(match, src, dest, head, clean_extra)
 
 
-def chain_font_bytes(chain: list[str], extra: str, *, timeout_s: float = 180.0) -> list[tuple[str, bytes]]:
+def chain_font_bytes(
+    chain: list[str], extra: str, *, timeout_s: float = 180.0
+) -> list[tuple[str, bytes]]:
     """取整条链的子集字节，供导出时嵌进 ASS 的 `[Fonts]` 段。
 
     与预览侧 `GET /subset` 走**同一套缓存键、同一份产物文件**，所以两端拿到的

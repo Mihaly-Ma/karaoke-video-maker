@@ -11,6 +11,10 @@
  * 文案按 docs/ui-redesign.md「文案：短，且准确」收紧过一轮：原先界面上
  * 「自动轴精度约 50–150ms」「整体偏移只改这一个数，随时可以归零重来」这类
  * 讲原理的句子全部移出 —— 它们属于文档，不属于工具条。
+ *
+ * **歌词的基本单位在全应用统一叫「行」，不叫「句」。** 数据模型是 `Line`，
+ * 主要动作是「拆行」「合并行」，行数统计也是「{n} 行」；本文件曾在句柄条与
+ * 声部面板里改口叫「句」，于是同一个东西在同屏的两个控件上有两个名字。
  */
 export const align: Record<string, string> = {
   // ---- 工具条 ----
@@ -20,7 +24,7 @@ export const align: Record<string, string> = {
   'align.tapExit': '退出并提交（Esc）',
   'align.untimed': '未打轴 {n}/{total} 字',
   'align.rate': '速率',
-  'align.rateHint': '变速由预览层执行，会同时改变音高',
+  'align.rateHint': '变速会同时改变音高',
   'align.follow': '跟随',
   // 一个开关同时管波形与歌词正文，所以文案要把两处都说出来
   'align.followHint': '播放时波形与歌词跟着播放头滚',
@@ -52,11 +56,11 @@ export const align: Record<string, string> = {
   // ---- 逐字轴（这一步真正要编辑的东西，所以它是主角）----
   'align.tokenRail': '逐字轴',
   'align.tokenRailHint': '块宽 = 该字时长，拖块平移、拖两侧改边界',
-  'align.railEmpty': '点歌词里的字，或按播放键',
+  'align.railEmpty': '选中歌词或逐字轴里的字',
   'align.gap': '空隙 {ms}ms',
-  // 句柄条与概览条上**只出现行号**，不出现句子文本：句子在右侧正文里已经整屏摆着
-  'align.lineHandleHint': '第 {no} 句・拖动整句平移',
-  'align.overviewLine': '第 {no} 句・{start}',
+  // 句柄条与概览条上**只出现行号**，不出现歌词文本：文本在右侧正文里已经整屏摆着
+  'align.lineHandleHint': '第 {no} 行・拖动整行平移',
+  'align.overviewLine': '第 {no} 行・{start}',
 
   // ---- 检查器的时间栏 ----
   'align.time': '时间',
@@ -64,22 +68,22 @@ export const align: Record<string, string> = {
   'align.dur': '时长',
   'align.shift': '平移',
   'align.lockTiming': '锁定时间',
-  'align.selectHint': '点歌词或逐字轴里的字',
+  'align.selectHint': '选中歌词或逐字轴里的字',
 
   // ---- 声部指派（§2.5 表格里声部那一行的自动栏写的是"暂无可靠自动方案"，
   //      手工旁路"选中词句指派声部"因此不是锦上添花，是这一环唯一的入口）----
   'align.voice': '声部',
   'align.voiceScope': '作用范围',
-  'align.voiceScope.line': '本句',
-  'align.voiceScope.after': '本句起',
+  'align.voiceScope.line': '本行',
+  'align.voiceScope.after': '本行起',
   'align.voiceScope.tokens': '本字起',
-  'align.voiceSpan': '句数',
+  'align.voiceSpan': '行数',
   'align.voiceSpanTokens': '字数',
-  'align.voiceUnitLines': '句',
+  'align.voiceUnitLines': '行',
   'align.voiceUnitTokens': '字',
   'align.voiceToEnd': '到曲末',
-  'align.voiceToLineEnd': '到句末',
-  'align.voiceAffectLines': '将改 {n} 句',
+  'align.voiceToLineEnd': '到行末',
+  'align.voiceAffectLines': '将改 {n} 行',
   'align.voiceAffectTokens': '将改 {n} 字',
   'align.voiceNew': '新声部',
   'align.voiceNewPlaceholder': '新声部名，回车指派',
@@ -90,8 +94,8 @@ export const align: Record<string, string> = {
   // 删除 = 归并：一行总得有个声部，所以要说清并到哪儿去
   'align.voiceDelete': '删除声部',
   'align.voiceDeleteHint': '删除「{part}」，它的行并入「{to}」',
-  'align.voiceDeleteLast': '只剩这一个声部，删不得',
-  'align.voiceDone': '已把 {n} 处改为 {part}',
+  'align.voiceDeleteLast': '仅剩一个声部，无法删除',
+  'align.voiceDone': '已将 {n} 处改为 {part}',
 
   // ---- 整曲偏移（三级调轴的「整体」级）----
   // 叫「整曲」而不是「整体」：底栏检查器上有一组作用于**单个字**的「平移」，
@@ -101,13 +105,13 @@ export const align: Record<string, string> = {
   'align.reset': '归零',
 
   // ---- 打轴面板 ----
-  'align.tapKeys': '空格 打点 ・ Shift+空格 结束句 ・ 退格 回退',
+  'align.tapKeys': '空格 打点 ・ Shift+空格 结束本行 ・ 退格 回退',
   'align.tapCount': '已打 {n} 字',
   'align.tapProgress': '{pos}/{total}',
   'align.tapBack': '回退',
   'align.tapCommit': '提交',
   'align.tapEnd': '已到最后一个字，Esc 退出并提交',
-  'align.tapNextLine': '下一句：{text}',
+  'align.tapNextLine': '下一行：{text}',
   'align.tapNoAudio': '音频未就绪，打点时间不准',
   'align.committing': '提交中 {done}/{total}',
 
@@ -115,6 +119,8 @@ export const align: Record<string, string> = {
   'align.waveLoading': '波形加载中 {percent}%',
   'align.waveError': '{message}，仍可调轴',
   'align.waveNone': '尚未导入音频',
+  'align.waveLoadFailed': '音频加载失败',
+  'align.waveLoadFailedDetail': '音频加载失败：{detail}',
 
   // ---- 图例与状态 ----
   'align.sources': '时间来源',
@@ -127,9 +133,10 @@ export const align: Record<string, string> = {
   'align.locked': '已锁定',
   'align.keys': '方向键 ±{step}ms ・ Shift 1 帧 ・ Alt ±{fine}ms ・ Ctrl/Cmd+滚轮 缩放',
   'align.noProject': '尚未打开工程',
-  'align.backendError': '后端出错：{message}',
+  // 「后端出错」是内部分工，用户既看不见后端也管不着它
+  'align.backendError': '操作失败：{message}',
 
   // ---- 拖动时的数值气泡 ----
-  'align.dragLine': '整句平移 {delta} ・ 起点 {start}',
+  'align.dragLine': '整行平移 {delta} ・ 起点 {start}',
   'align.dragToken': '{text} {delta} ・ 起点 {start} ・ 时长 {dur}ms',
 }

@@ -196,7 +196,7 @@ def probe_source(ffprobe_bin: str, path: Path) -> SourceInfo:
     streams = meta.get("streams", [])
     video = next((s for s in streams if s.get("codec_type") == "video"), None)
     if video is None:
-        msg = f"这个文件里没有视频流，无法生成编辑用代理：{path}"
+        msg = f"这个文件里没有视频流，无法生成编辑代理：{path}"
         raise RuntimeError(msg)
 
     fps = _parse_fraction(video.get("avg_frame_rate")) or _parse_fraction(video.get("r_frame_rate"))
@@ -265,8 +265,8 @@ def detect_h264_encoder(ffmpeg_bin: str) -> str:
         if _encoder_works(ffmpeg_bin, encoder):
             return encoder
     msg = (
-        "这个 ffmpeg 没有任何可用的 H.264 编码器（已试："
-        f"{'、'.join(encoder_candidates())}），无法生成编辑用代理视频。"
+        "这个 ffmpeg 没有可用的 H.264 编码器（已试："
+        f"{'、'.join(encoder_candidates())}），无法生成编辑代理。"
     )
     raise RuntimeError(msg)
 
@@ -332,8 +332,8 @@ def plan_proxy(src: SourceInfo, max_height: int, encoder: str) -> ProxyPlan:
             gop=0,
             bitrate_kbps=0,
             reason=(
-                f"源已经是 H.264 {src.width}×{src.height}、关键帧间隔约 "
-                f"{src.keyframe_interval_s:.1f}s，直接换成 MP4 容器即可，不重新编码"
+                f"源已是 H.264 {src.width}×{src.height}，关键帧间隔约 "
+                f"{src.keyframe_interval_s:.1f}s，转换为 MP4 容器，不重新编码"
             ),
         )
 
@@ -350,7 +350,7 @@ def plan_proxy(src: SourceInfo, max_height: int, encoder: str) -> ProxyPlan:
                     if src.keyframe_interval_s is not None
                     else "探测不到关键帧"
                 )
-                + "），直接复制视频流的话 seek 依然会卡"
+                + "），复制视频流无法提升跳转速度"
             )
             if not keyframe_ok
             else "",
@@ -511,7 +511,7 @@ def run_proxy(handle: JobHandle, store: ProjectStore, req: ProxyRequest) -> dict
         raise RuntimeError(str(exc)) from exc
 
     if not project.video_path:
-        msg = "工程还没有视频文件，无法生成编辑用代理（只有音轨的工程本来就不需要代理）"
+        msg = "工程还没有视频文件，无法生成编辑代理（只有音轨的工程不需要代理）"
         raise RuntimeError(msg)
     source = Path(project.video_path)
     if not source.is_file():
@@ -535,7 +535,7 @@ def run_proxy(handle: JobHandle, store: ProjectStore, req: ProxyRequest) -> dict
     media_dir.mkdir(parents=True, exist_ok=True)
     dest = media_dir / PROXY_FILENAME
 
-    handle.report(0.08, f"正在核对代理缓存（{plan.reason}）…")
+    handle.report(0.08, f"正在核对编辑代理缓存（{plan.reason}）…")
     key = cache_key(_sha256_file(source), plan)
     if not req.force:
         cached = _load_cache_entry(media_dir, key)
@@ -572,7 +572,7 @@ def run_proxy(handle: JobHandle, store: ProjectStore, req: ProxyRequest) -> dict
     run_cancelable(handle, build_proxy_command(ffmpeg_bin, source, tmp, plan), on_line=_on_line)
 
     handle.check_cancelled()
-    handle.report(0.96, "正在校验代理产物…")
+    handle.report(0.96, "正在校验编辑代理…")
     out_info = probe_source(ffprobe_bin, tmp)
     tmp.replace(dest)
 

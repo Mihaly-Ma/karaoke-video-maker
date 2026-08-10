@@ -140,7 +140,7 @@ def check_platform() -> CheckResult:
             "platform",
             "平台",
             "fail",
-            f"{desc}——不支持 Intel Mac：PyTorch 2.2 之后停止支持 Intel macOS，人声分离无解",
+            f"{desc}——不支持 Intel Mac：PyTorch 2.2 之后停止支持 Intel macOS，人声分离不可用",
             fix="换用 Apple Silicon 机器，或 Windows x64",
             blocking=True,
         )
@@ -150,7 +150,7 @@ def check_platform() -> CheckResult:
                 "platform",
                 "平台",
                 "warn",
-                f"{desc}（在支持矩阵内，但本项目至今没有在 Windows 上实跑过，遇到问题请如实反馈）",
+                f"{desc}（在支持矩阵内，但尚未在 Windows 上实测）",
             )
         return CheckResult(
             "platform", "平台", "warn", f"{desc}——Windows 仅设计支持 x64", blocking=False
@@ -172,7 +172,8 @@ def check_python() -> CheckResult:
     v = sys.version_info
     where = sys.executable
     in_venv = sys.prefix != sys.base_prefix
-    venv_note = "虚拟环境" if in_venv else "**非**虚拟环境"
+    # 报告是纯文本，`**非**` 会原样打出来。要强调就用词本身强调，不要用 Markdown 标记
+    venv_note = "虚拟环境" if in_venv else "非虚拟环境"
     detail = f"Python {v.major}.{v.minor}.{v.micro}（{venv_note}）：{where}"
     if (v.major, v.minor) == (3, 12):
         return CheckResult("python", "Python", "ok", detail)
@@ -226,7 +227,7 @@ def check_node() -> CheckResult:
             "node",
             "Node.js",
             "fail",
-            "未找到 node——前端（Vite）跑不起来",
+            "未找到 node——前端无法启动",
             fix=(
                 "brew install node"
                 if sys.platform == "darwin"
@@ -377,8 +378,8 @@ def check_ffmpeg() -> list[CheckResult]:
             "libass",
             "libass",
             "warn",
-            f"{probe.libass or 'unknown'}——与 JASSUB 打包的 libass 是否同源（§5.12）尚无自动校验",
-            affects="预览与导出可能在 \\blur、描边等细节上有差异；像素回归方案待实现",
+            f"{probe.libass or 'unknown'}——与预览端打包的 libass 是否同源尚无自动校验",
+            affects="预览与导出可能在描边、模糊等细节上存在差异",
         )
     )
     return results
@@ -588,7 +589,7 @@ def check_models() -> CheckResult:
             "models",
             "分离模型权重",
             "warn",
-            f"{model_dir} 内已有：{listing}（档位表读不到，未逐档核对）",
+            f"{model_dir} 内已有：{listing}（档位表不可用，未逐档核对）",
         )
     have = [tid for tid, fn in tiers if fn in present]
     miss = [tid for tid, fn in tiers if fn not in present]
@@ -627,7 +628,7 @@ def check_fonts() -> CheckResult:
             "fonts",
             "字体",
             "warn",
-            f"找不到任何系统字体目录（查过 {', '.join(str(d) for d in dirs)}）",
+            f"找不到任何系统字体目录（已探测 {', '.join(str(d) for d in dirs)}）",
             affects="样式步骤没有可选字体",
         )
     total = sum(1 for d in existing for _ in d.rglob("*") if _.suffix.lower() in _FONT_SUFFIXES)
@@ -636,7 +637,7 @@ def check_fonts() -> CheckResult:
         "字体",
         "ok" if total else "warn",
         f"系统字体目录 {len(existing)} 个，共 {total} 个字体文件"
-        "（是否覆盖本曲用字要到样式步骤按 cmap 判定，自检不做全量扫描）",
+        "（缺字检查在样式步骤按本曲用字进行，自检不做全量扫描）",
     )
 
 
@@ -681,7 +682,7 @@ def check_workspace() -> list[CheckResult]:
                 "应用数据目录",
                 "fail",
                 f"不可写：{root}（{exc}）",
-                fix=f"检查该目录权限，或用环境变量 {paths.ENV_DATA_DIR} 指到别处",
+                fix=f"检查该目录权限，或用环境变量 {paths.ENV_DATA_DIR} 指向其他位置",
                 blocking=True,
             )
         )
@@ -725,12 +726,12 @@ def _check_font_cache() -> CheckResult:
     try:
         count, total, stale = font_cache.cache_stats()
     except OSError as exc:  # pragma: no cover
-        return CheckResult("font_cache", "字体缓存", "warn", f"读不到：{exc}")
+        return CheckResult("font_cache", "字体缓存", "warn", f"读取失败：{exc}")
 
     mb = total / 1024**2
     detail = f"{count} 份 / {mb:.0f} MB（{paths.font_cache_dir()}）"
     if stale:
-        detail += f"，其中 {stale} 份属于旧版本，下次启动会自动清掉"
+        detail += f"，其中 {stale} 份属于旧版本，下次启动自动清理"
     if mb >= _FONT_CACHE_WARN_MB:
         return CheckResult(
             "font_cache",
@@ -738,7 +739,7 @@ def _check_font_cache() -> CheckResult:
             "warn",
             detail,
             fix="uv run python -m kvm.doctor --prune-font-cache",
-            affects="只占磁盘，不影响功能；产物可再生，删掉后下次预览会重裁几秒",
+            affects="只占磁盘，不影响功能；产物可再生，清理后下次预览重裁约几秒",
         )
     return CheckResult("font_cache", "字体缓存", "ok", detail)
 
@@ -788,7 +789,7 @@ def check_port(port: int, *, label: str) -> CheckResult:
             f"{label} 端口 {port}",
             "fail",
             f"已被占用：{where}{_port_holder(port)}",
-            fix=f"换端口：--{label.lower()}-port <其他端口>；或先停掉占用进程",
+            fix=f"换端口：--{label.lower()}-port <其他端口>；或结束占用进程",
             blocking=True,
         )
     return CheckResult(key, f"{label} 端口 {port}", "ok", "可用（IPv4/IPv6 回环均空闲）")
@@ -893,13 +894,11 @@ def render_report(report: Report) -> str:
     lines.append(summary)
     if report.blocking_failures:
         lines.append("")
-        lines.append("以下是**启动的硬前提**，未解决前不会启动服务：")
+        lines.append("以下是启动的硬前提，未解决前不会启动服务：")
         lines.extend(f"  - {c.title}：{c.detail.splitlines()[0]}" for c in report.blocking_failures)
         lines.extend(f"    → {c.fix}" for c in report.blocking_failures if c.fix)
     elif report.warnings:
-        lines.append(
-            "可以启动。警告项不阻断启动，但请看它们各自的『影响』一行——那是你正在放弃的功能。"
-        )
+        lines.append("可以启动。警告项不阻断启动，各项『影响』一行列出了会失去的功能。")
     else:
         lines.append("全部通过。")
     return "\n".join(lines)
