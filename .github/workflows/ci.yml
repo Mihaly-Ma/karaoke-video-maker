@@ -5,13 +5,16 @@
 # **不要用 continue-on-error 把它糊过去**，那只会把"没验证过"伪装成"验证通过"。
 # 真跑不起来就让它红着，并把原因记进契约。
 #
-# 仓库是私有的，这里**只产 artifact，不做任何公开发布**。
+# 仓库是私有的，这里**只产 artifact 与 draft release，不做任何自动公开**。
+# 发布的最后一步（publish）永远是人手动按的。
 
 name: CI
 
 on:
   push:
     branches: [main]
+    # 打 v* tag 触发发布链路：check → package → 建 draft release。
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
     inputs:
@@ -23,6 +26,10 @@ on:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+# 默认只读；只有建 release 的那个 job 单独提权到 contents: write。
+permissions:
+  contents: read
 
 env:
   # 语言无关的稳定输出，便于比对日志
@@ -101,23 +108,38 @@ jobs:
         # runner 上必然缺模型权重、缺字体，那是环境差异不是缺陷。
         env:
           PYTHONPATH: backend
+        shell: bash
         run: uv run python -m kvm.doctor || echo "doctor 报告了不满足项（见上方报告）"
+
+      # 外壳的 Rust 依赖有几百个 crate，不缓存的话每次都要从头编译十几分钟。
+      # 显式钉 stable 工具链而不是用 runner 自带的那份，免得两端版本各飘各的。
+      - name: Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
 
       - name: 外壳 Rust 检查
         working-directory: src-tauri
         run: cargo check --locked
 
   package:
-    name: 打包 (${{ matrix.os }})
-    # 只在手动触发且勾了 package、或打了 tag 时才跑：PyInstaller + Tauri
-    # 一次十几分钟，不该挂在每个 PR 上。
-    if: github.event_name == 'workflow_dispatch' && inputs.package
+    name: 打包 (${{ matrix.plat }})
+    # 两条触发路径：手动勾 package，或打了 v* tag。
+    # PyInstaller + Tauri 一次十几分钟，不该挂在每个 PR 上。
+    if: >-
+      startsWith(github.ref, 'refs/tags/v')
+      || (github.event_name == 'workflow_dispatch' && inputs.package)
     needs: check
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, windows-latest]
+        include:
+          - os: macos-14
+            plat: macos-arm64
+          - os: windows-latest
+            plat: windows-x64
 
     steps:
       - uses: actions/checkout@v4
@@ -150,13 +172,75 @@ jobs:
         # 跨平台一条命令：脚本内部处理 npm.cmd / 路径分隔符等差异。
         run: uv run python scripts/package.py
 
+      # 产物名要能一眼看出**平台与版本**。Tauri 出来的文件名只带 productName +
+      # Cargo 版本号，认不出是哪台机器、哪个 tag 出的，所以在这里重命名一次。
+      # 非 tag 触发（手动出包）标成 dev-<短 sha>，免得和真发布混淆。
+      - name: 收拢并重命名产物
+        id: collect
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            ver="${GITHUB_REF#refs/tags/}"
+          else
+            ver="dev-${GITHUB_SHA:0:7}"
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
+          mkdir -p artifacts
+          shopt -s nullglob
+          n=0
+          for f in src-tauri/target/release/bundle/dmg/*.dmg \
+                   src-tauri/target/release/bundle/nsis/*.exe \
+                   src-tauri/target/release/bundle/msi/*.msi; do
+            cp "$f" "artifacts/kvm-${ver}-${{ matrix.plat }}.${f##*.}"
+            n=$((n + 1))
+          done
+          if [[ $n -eq 0 ]]; then
+            echo "::error::没有找到任何安装包，package.py 可能没走到出包这一步"
+            ls -R src-tauri/target/release/bundle || true
+            exit 1
+          fi
+          ls -lh artifacts
+
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: kvm-${{ matrix.os }}
           # 只收安装包，不收 onedir 目录（几 GB，artifact 存储扛不住）
-          path: |
-            src-tauri/target/release/bundle/dmg/*.dmg
-            src-tauri/target/release/bundle/nsis/*.exe
+          name: kvm-${{ steps.collect.outputs.version }}-${{ matrix.plat }}
+          path: artifacts/*
           if-no-files-found: error
           retention-days: 14
+
+  release:
+    name: 建 draft release
+    # 只有 tag 才走这一步。**两端都成功才建**：缺一个平台的 release 正是
+    # 这套流程要避免的半真半假，Windows 挂了就先修 Windows，
+    # 需要只发一端时手动下 artifact 自己建。
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: kvm-*
+          merge-multiple: true
+
+      - name: 建 draft release（**不 publish**）
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ls -lh dist
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            dist/*
+          echo "draft 已建好，去 Releases 页面确认后手动 publish。"
