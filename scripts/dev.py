@@ -248,7 +248,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--backend-port", type=int, default=DEFAULT_BACKEND_PORT)
     p.add_argument("--frontend-port", type=int, default=DEFAULT_FRONTEND_PORT)
-    p.add_argument("--skip-setup", action="store_true", help="跳过安装与自检，直接启动（自负风险）")
+    p.add_argument("--skip-setup", action="store_true", help="跳过安装与自检，直接启动")
     p.add_argument("--check-only", action="store_true", help="只自检，不安装也不启动")
     p.add_argument("--backend-only", action="store_true", help="只起后端")
     p.add_argument("--frontend-only", action="store_true", help="只起前端")
@@ -270,8 +270,8 @@ def main(argv: list[str] | None = None) -> int:
         if code != 0:
             if not args.force:
                 print(
-                    "\n环境自检未通过，已停止启动。修好上面标出的问题后重跑，"
-                    "或用 --force 强行启动（大概率会在用到该功能时失败）。",
+                    "\n环境自检未通过，已停止启动。解决上面标出的问题后重新执行，"
+                    "或用 --force 强制启动（用到相关功能时仍会失败）。",
                     file=sys.stderr,
                 )
                 return code
@@ -291,7 +291,7 @@ def main(argv: list[str] | None = None) -> int:
     python = venv_python()
     if not python.is_file() and not args.frontend_only:
         print(
-            f"找不到项目虚拟环境的解释器：{python}\n请先跑 `python3 scripts/setup.py`。",
+            f"找不到项目虚拟环境的解释器：{python}\n请先执行 `python3 scripts/setup.py`。",
             file=sys.stderr,
         )
         return 1
@@ -351,7 +351,7 @@ def main(argv: list[str] | None = None) -> int:
             if wait_until_listening(args.backend_port):
                 log(f"后端就绪：http://127.0.0.1:{args.backend_port}")
             else:
-                log("后端在 60s 内没有开始监听，请看上面的 [后端] 日志")
+                log("后端在 60s 内没有开始监听，原因见上方 [后端] 日志")
         if frontend_service is not None:
             frontend_service.start()
             services.append(frontend_service)

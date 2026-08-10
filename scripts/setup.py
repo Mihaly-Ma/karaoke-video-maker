@@ -167,7 +167,7 @@ def install_frontend_deps() -> None:
     """
     if shutil.which("npm") is None:
         raise SetupError(
-            "找不到 npm（随 Node.js 一起安装）——没有它跑不了前端。",
+            "找不到 npm（随 Node.js 一起安装）——前端无法启动。",
             fix=(
                 "brew install node"
                 if sys.platform == "darwin"
@@ -218,7 +218,7 @@ def doctor_json(extra_args: list[str]) -> dict:
         return {
             "ok": False,
             "checks": [],
-            "error": (out.stderr or out.stdout or "自检没有输出").strip()[-800:],
+            "error": (out.stderr or out.stdout or "自检无输出").strip()[-800:],
         }
 
 
@@ -273,7 +273,7 @@ def main(argv: list[str] | None = None) -> int:
                     json.dumps({"ok": False, "error": str(exc), "fix": exc.fix}, ensure_ascii=False)
                 )
                 return 1
-            print("仍然跑一遍自检，好让你一次看清全部问题：\n", file=sys.stderr)
+            print("继续执行自检，以便一次列出全部问题：\n", file=sys.stderr)
             run_doctor(doctor_args)
             return 1
 

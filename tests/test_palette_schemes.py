@@ -524,7 +524,7 @@ def test_rename_rejects_collision_without_losing_either(tmp_path: Path) -> None:
     ops.save_palette_scheme("甲", _colors(), path=path)
     ops.save_palette_scheme("乙", _colors("&H00123456&"), path=path)
 
-    with pytest.raises(ops.EditError, match="已经有一套"):
+    with pytest.raises(ops.EditError, match="已存在同名"):
         ops.rename_palette_scheme("甲", "乙", path=path)
 
     names = {s.name for s in ops.load_palette_schemes(path)}

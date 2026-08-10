@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from itertools import pairwise
@@ -42,6 +43,7 @@ from kvm.models.karaoke import (  # noqa: E402
 )
 from kvm.pipeline.beat_detect import BeatGrid  # noqa: E402
 from kvm.render.ass_builder import (  # noqa: E402
+    PREVIEW_FONTS_TAG,
     AssBuilder,
     _find_credit_window,
     _voice_segments,
@@ -780,3 +782,77 @@ def test_find_credit_window_uses_the_union_of_line_windows() -> None:
     # 第 2 行整个包在第 1 行里：朴素的逐对比较会在 (3000, 20000) 处误报一个大空隙
     assert _find_credit_window([(0, 3000), (1000, 25000), (20000, 30000)]) is None
     assert _find_credit_window([(0, 3000), (1000, 12000), (20000, 30000)]) == (12600, 19400)
+
+
+# ---- 字体链 ----
+
+
+def test_header_names_the_primary_font_only() -> None:
+    """`Fontname` 只写主字体。
+
+    整条链在子集化时都被改写成主字体的族名（`render.font_subset`），
+    libass 于是在同名的几个字面里挑一个带该字形的。ASS 本身没有"字体候选列表"
+    这种语法，试图把链写进 `Fontname` 只会得到一个匹配不上的字符串。
+    """
+    project = _song([3000], countdown_dots=0)
+    project.style.font_names = ["Hiragino Sans", "Noto Sans CJK JP"]
+
+    header = _build(project).split("[Events]")[0]
+    for line in header.splitlines():
+        if line.startswith("Style: "):
+            assert line.split(",")[1] == "Hiragino Sans"
+    assert "Noto Sans CJK JP" not in header.split("[V4+ Styles]")[1]
+
+
+def test_preview_font_declaration_carries_chain_and_rare_chars() -> None:
+    """预览侧靠 ASS 头部这一行知道该取哪几个字体、还要补哪些字。
+
+    没有它，预览只能取到主字体，链尾形同虚设；而生僻字不进 `extra`，
+    子集里就没有那几个字形——症状是"预览空白、成片正常"，看成片发现不了。
+    """
+    project = _song([3000], countdown_dots=0)
+    project.style.font_names = ["Hiragino Sans", "Noto Sans CJK JP"]
+    project.title = "鷗の唄"
+
+    decl = next(
+        ln for ln in _build(project).splitlines() if ln.startswith(PREVIEW_FONTS_TAG)
+    )
+    payload = json.loads(decl[len(PREVIEW_FONTS_TAG) :])
+    assert payload["chain"] == ["Hiragino Sans", "Noto Sans CJK JP"]
+    # 「鷗」不可编码为 shift_jis，落在默认子集之外，必须被点名
+    assert "鷗" in payload["extra"]
+    # 假名与常用汉字在默认子集里，不该进 extra —— 否则每首歌都要各裁一份字体
+    assert "の" not in payload["extra"]
+
+
+def test_fonts_section_only_appears_when_bytes_are_supplied() -> None:
+    """`[Fonts]` 只在导出时出现。
+
+    一份子集字体 UUEncode 后约 6.8 MB，预览每编辑一下就要重传一次——
+    默认必须是关的，不能靠调用方记得关。
+    """
+    project = _song([3000], countdown_dots=0)
+    assert "[Fonts]" not in _build(project)
+
+    metrics = _FakeMetrics()
+    with_fonts = AssBuilder(project, metrics, embedded_fonts=[("F", b"abcdef")]).build()
+    assert "[Fonts]" in with_fonts
+    # 段的位置必须在 [Events] 之前，且 Dialogue 一条不少
+    assert with_fonts.index("[Fonts]") < with_fonts.index("[Events]")
+    assert with_fonts.count("Dialogue:") == _build(project).count("Dialogue:")
+
+
+def test_rendered_charset_includes_credits_and_ruby() -> None:
+    """字形预检查的是**成片上会出现的全部字符**，不只是歌词正文。
+
+    制作名单同样会被烧进画面，漏掉它就会出现"歌词都好、片头曲名是豆腐块"。
+    """
+    project = _song([3000], countdown_dots=0)
+    project.title = "曲名"
+    project.artist = "歌手"
+    project.lines[0].ruby = [RubySpan(start=0, end=1, text="ルビ")]
+
+    charset = AssBuilder(project, _FakeMetrics()).rendered_charset()
+    for ch in "曲名歌手ルビ":
+        assert ch in charset
+    assert " " not in charset  # 空白不计
