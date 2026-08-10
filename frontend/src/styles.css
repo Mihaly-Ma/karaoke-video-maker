@@ -903,6 +903,12 @@ label.checkbox-row {
   gap: var(--sp-3);
   margin-bottom: var(--sp-5);
 }
+/* 容器是 align-items: baseline（标题与计数按基线对齐）。图片没有可用的基线，
+   会把下边缘贴到基线上而显得偏高，所以只给它单独改成居中，不动另外两个元素。 */
+.home__logo {
+  align-self: center;
+  flex: none;
+}
 .home__title {
   font-size: var(--fs-2xl);
   font-weight: 600;

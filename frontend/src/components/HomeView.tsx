@@ -88,6 +88,8 @@ export default function HomeView({ onOpen }: HomeViewProps) {
     <div className="home">
       <div className="home__inner">
         <div className="home__head">
+          {/* 紧邻的标题已经写着应用名，图标在这里是装饰性的，alt 留空才不会被读屏重复播报 */}
+          <img className="home__logo" src="/icon.png" width={36} height={36} alt="" />
           <h1 className="home__title">{t('home.appTitle')}</h1>
           <span className="home__count">{t('home.count', { n: list.length })}</span>
         </div>

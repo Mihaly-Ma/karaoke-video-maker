@@ -1,3 +1,5 @@
+<img align="right" width="112" src="docs/images/logo.png" alt="">
+
 # Karaoke Video Maker (ニコカラ Maker)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)

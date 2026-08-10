@@ -30,6 +30,12 @@
       main {
         width: min(640px, 88vw);
       }
+      .logo {
+        display: block;
+        width: 56px;
+        height: 56px;
+        margin: 0 0 14px;
+      }
       h1 {
         font-size: 17px;
         font-weight: 600;
@@ -139,6 +145,9 @@
   </head>
   <body>
     <main>
+      <!-- 启动页的标题是「正在启动」，不含应用名——图标是这一屏唯一的身份标识，
+           所以 alt 要写实，不能按装饰性图片留空。 -->
+      <img class="logo" src="icon.png" width="56" height="56" alt="卡拉OK视频制作工具" />
       <h1 id="title">正在启动</h1>
       <p class="sub" id="sub">准备运行环境…</p>
       <div class="bar indet" id="bar"><i></i></div>

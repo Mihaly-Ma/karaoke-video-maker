@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """从 `src-tauri/icons/source.png` 生成整套应用图标。
 
-    python3 scripts/make_icons.py            # 清洗 + 调 `npx tauri icon` 生成全套
-    python3 scripts/make_icons.py --clean-only   # 只产出清洗后的方形 PNG，不生成图标集
+    python3 scripts/make_icons.py            # 清洗 + 派生副本 + 调 `npx tauri icon` 生成全套
+    python3 scripts/make_icons.py --clean-only   # 只做清洗与派生副本，不调 node 工具链
 
 ## 为什么需要这一步，而不是直接把原图喂给 `tauri icon`
 
@@ -53,6 +53,19 @@ CLEANED = ICONS_DIR / "source-cleaned.png"
 BODY_RATIO = 0.86
 CANVAS = 1024
 
+# 同一张图标要出现在应用图标集之外的三个地方，而它们的**交付机制互不相同**，
+# 没法共用一份文件：README 走仓库相对路径（GitHub 上按路径取图）、前端走 Vite 的
+# `public/`（构建时原样拷进 dist）、启动页走 Tauri 的 app 协议（`frontendDist` 指向
+# `src-tauri/boot/`）。所以只能各放一份，但**生成器只有一个**——换图标时重跑本脚本
+# 即可，不必记得手工同步三处。
+#
+# 尺寸按各自的显示尺寸给两倍余量即可，不必都用 1024：这几份是要进仓库和安装包的。
+DERIVED = (
+    (REPO_ROOT / "docs" / "images" / "logo.png", 256),
+    (REPO_ROOT / "frontend" / "public" / "icon.png", 256),
+    (REPO_ROOT / "src-tauri" / "boot" / "icon.png", 128),
+)
+
 
 def build_silhouette(rgb: np.ndarray) -> np.ndarray:
     """返回图标本体的布尔轮廓。"""
@@ -99,6 +112,17 @@ def clean(source: Path, out: Path) -> tuple[int, int, int]:
     return body_w, body_h, side
 
 
+def write_derived(cleaned: Path) -> list[tuple[Path, int]]:
+    """把清洗后的图标缩到各投放点需要的尺寸并写出。"""
+    src = Image.open(cleaned)
+    written: list[tuple[Path, int]] = []
+    for dest, size in DERIVED:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        src.resize((size, size), Image.LANCZOS).save(dest)
+        written.append((dest, size))
+    return written
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="从设计稿生成整套应用图标")
     p.add_argument("--clean-only", action="store_true", help="只产出清洗后的 PNG")
@@ -110,6 +134,12 @@ def main(argv: list[str] | None = None) -> int:
 
     body_w, body_h, side = clean(SOURCE, CLEANED)
     print(f"本体 {body_w}×{body_h}，方形画布 {side}，已写出 {CLEANED.relative_to(REPO_ROOT)}")
+
+    # 派生副本不依赖 `npx tauri icon`，所以放在提前返回之前：
+    # 只想刷新 README/界面用图时不必装 node 工具链。
+    for dest, size in write_derived(CLEANED):
+        print(f"  派生 {dest.relative_to(REPO_ROOT)}  {size}×{size}")
+
     if args.clean_only:
         return 0
 

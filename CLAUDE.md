@@ -901,7 +901,10 @@ libass 扩展可以放心用（链路两端都是 libass）：`BorderStyle=4`（
 - **CUDA 版 torch 不进包（已定）**。PyPI 的 Windows `torch` wheel 本来就是 CPU-only；CUDA 版单个 wheel 就 2.58 GB，装进去必然撞穿 2 GB 上限。需要 CUDA 的用户自行替换，属高级用法
 - **`--lean`（排除 torch 等重依赖）目前不是可交付形态**：冻结后的解释器没有 pip，`kvm.media.deps` 那套"缺依赖就自动装"走不通（`sys.executable` 是打好的可执行文件）。它只用来量体积做对照。要让它可交付，得先验证"往 `private_deps_dir` 装 wheel 再加进 sys.path"这条路
 - 字体：`Noto Sans JP` / `源真ゴシック`（均 SIL OFL 1.1，允许随应用捆绑，需保留版权与许可证文本，不能单卖字体）
-- 应用图标由 `python3 scripts/make_icons.py` 从 `src-tauri/icons/source.png` 生成（设计稿带水印且无 alpha，必须先清洗，理由见该脚本文档字符串）
+- 应用图标由 `python3 scripts/make_icons.py` 从 `src-tauri/icons/source.png` 生成（设计稿带水印且无 alpha，必须先清洗，理由见该脚本文档字符串）。
+  同一张图标还要出现在 README、前端 favicon、启动页，而这三处的交付机制互不相同
+  （仓库相对路径 / Vite `public/` / Tauri app 协议），只能各放一份 —— 所以**它们由同一个脚本一起产出**，
+  换图标时重跑一次即可。**不要手工复制**：四个落点里漏掉一个不会有任何报错，只会在某一处继续显示旧图标
 
 ### 5.16 外壳形态：界面由本地 HTTP 下发（已实测，不要改回内嵌）
 
