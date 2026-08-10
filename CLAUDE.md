@@ -179,24 +179,62 @@ Windows 仍用 `GyanD/codexffmpeg` 的**版本 tag**——GitHub release 资产�
 
 ## 3. 分发模式（已定 D0）
 
-**D0：私有自用，顶多作为开源项目公开源码；不单独分发编译好的二进制。**
+**D0：公开仓库 + MIT 许可证，经 GitHub Release 分发 macOS `.dmg` 与 Windows NSIS `.exe`。**
 
-由此解除的许可证约束：
+### 为什么是 MIT 而不是 GPL
+
+运行时依赖里**没有一条 GPL**：yt-dlp 是 Unlicense、pycryptodome BSD、
+audio-separator / torchcrepe / fontTools 是 MIT、librosa 是 ISC。QRC 解密是照公开常量
+自己写的，没有抄 LDDC 那类 GPL 实现。没有传染源，就没有被迫按 GPL 发布的理由。
+
+**本节曾写着"若将来开源本项目，按 GPL-3.0 发布即可"——那是当初打算直接依赖
+LDDC / pykakasi / qqmusic-api-python 时的推论，而这些依赖最终一条都没进来，结论作废。**
+由此得到一条仍然有效的纪律：**再引入一个 GPL 依赖 = 要改掉整个项目的许可证**。
+这类库只能读它的端点与常量（事实不受版权保护）后自己重写，不要直接 import——§12 的
+参考实现表已经逐条标了许可证，就是为了让这条判断在动手前就能做出来。
 
 | 决策点 | 结论 |
 |---|---|
-| ffmpeg | **GPL 构建即可**，直接用 Homebrew `ffmpeg-full` / Windows 的 gyan.dev full 构建。不需要自建 LGPL-only |
-| LDDC / pykakasi / qqmusic-api-python（GPL-3.0） | **可直接依赖**。若将来开源本项目，按 GPL-3.0 发布即可 |
+| ffmpeg | **GPL 构建即可**，直接用 Homebrew `ffmpeg-full` / Windows 的 gyan.dev full 构建。它是运行时下载、以独立进程调用的外部程序（§2.6「获取」阶段），不进安装包、不与本项目代码链接，因此不给本项目带来许可证义务 |
 | UVR / Roformer 权重（社区惯例授权，多数无 LICENSE） | **可用**。仍按 D11 运行时下载，理由是体积而非许可证 |
-| 代码签名 / notarization | **不做**。macOS $99/年、Windows 签名全部免除 |
-| Tauri `externalBin` + notarization 冲突（issue #11992） | **不再是阻断项**，因为不走公证流程 |
+| 代码签名 / notarization | **仍然不做**，但理由变了，见下 |
+| Tauri `externalBin` + notarization 冲突（issue #11992） | 仍不是阻断项。且 §5.15 另有一条独立理由（`--onedir` 产物是目录，`externalBin` 只收单文件），所以将来真去公证也不会被这条卡住 |
 
-**唯一残留的许可证注意点**：`MMS_FA` / `ctc-forced-aligner` 的权重是 **CC-BY-NC 4.0（禁止商业使用）**。
-自用与非商业开源没问题，但这意味着**本项目及其产出不得用于商业用途**。
-若哪天需要商用，必须换掉对齐模型——所以对齐后端仍应保持可替换，不要把它的输出类型渗进核心数据模型。
+### 不签名不公证是有意的选择，代价必须写在 README 里
 
-**仍然保留的架构纪律**（与 D0 无关，是好设计）：GPL 依赖与模型后端集中在可替换的 adapter 层，
-核心数据模型（§4.2）只依赖自己定义的类型。这样换库、换模型、换分发模式都不用重写。
+macOS 开发者账号 $99/年、Windows 证书同量级，而这是个人项目；不做签名是权衡后的结论，
+不是遗漏。但**分发二进制之后 Gatekeeper 与 SmartScreen 的拦截就回来了**，
+用户会撞上而不是读到——所以绕过方式（右键打开 / `xattr -dr com.apple.quarantine`；
+SmartScreen 的「更多信息 → 仍要运行」）必须在三份 README 里写清楚。改签名策略时三份要一起改。
+
+### CC-BY-NC 是**模型**的限制，不是代码的
+
+这条在"公开仓库 + MIT"之下最容易被误读，所以说明白：
+`MMS_FA` / `ctc-forced-aligner` 的权重是 **CC-BY-NC 4.0（禁止商业使用）**。
+强制对齐目前尚未接入（§5.5 待实现），一旦接上，**限制落在"用了这份权重的那个构建及其产出"上**——
+代码本身依旧是 MIT，而用它做出来的视频不得用于商业用途，除非先换掉对齐模型。
+因此对齐后端必须保持可替换，不要把它的输出类型渗进核心数据模型（§4.2）。
+
+### 随包分发的第三方资产另有一份清单
+
+`THIRD-PARTY-NOTICES.md` 记录安装包里所有非本项目的字节（jassub 的 wasm 与它编进去的
+libass / FreeType / HarfBuzz / FriBidi、随 jassub 附带的 Liberation Sans、前端与 Python
+依赖图、Tauri 外壳），以及**运行时才下载、并不由本项目再分发**的那几类（ffmpeg、模型权重、
+用户自己的系统字体）。它与 `LICENSE` 一起由 `scripts/package.py` 以 `--add-data` 塞进
+安装包（落在 onedir 的 `_internal/`）。**增删随包分发的资产时要同步这份清单**——
+"资产进了包、声明没进"是这类文件最典型的失效方式。
+
+### 已被验证是错的做法：把字体丢进 `frontend/public/`
+
+Vite 把 `public/` 整个目录**原样**拷进 `dist`，`dist` 又被 PyInstaller 整个塞进安装包。
+所以在本机出包时，**`frontend/public/fonts/` 里躺着什么就发布什么**。
+该目录已按 `.gitignore` 排除（本机那份 Noto 副本因此不在仓库里，CI 出的包也不含它），
+但**正因为它不入库，本地留下的东西不会在 review 里被任何人看见**——而这个目录的用途
+恰恰是放"从系统里提取出来的字体"，ヒラギノ / 游ゴシック 都是不得再分发的专有字体。
+要随应用分发字体，只有一条路：显式加进仓库，并在 `THIRD-PARTY-NOTICES.md` 里登记。
+
+**仍然保留的架构纪律**（与 D0 无关，是好设计）：模型后端与外部数据源集中在可替换的
+adapter 层，核心数据模型（§4.2）只依赖自己定义的类型。这样换库、换模型、换分发模式都不用重写。
 
 ---
 
@@ -1444,9 +1482,11 @@ torch 推理重复跑不 bit-exact（CPU 单线程亦然）。实测原始 f0 �
 
 ### README
 
-按 D0（私有自用，顶多开源公开源码），README 要能让一个陌生人
+按 D0（公开仓库 + MIT + 发布安装包），README 要能让一个陌生人
 在不读 `CLAUDE.md` 的前提下明白：这是什么、能做出什么、怎么装、怎么跑通第一个视频、
 有哪些硬性前提（ffmpeg 必须带 libass、模型要下载、Intel Mac 不支持）。
+既然装的是没签名的安装包，**Gatekeeper / SmartScreen 的绕过方式也属于"怎么装"的一部分**——
+用户是先撞上拦截、再去找说明的，写在这里才来得及。
 
 三份互相链接：`README.md`（英文，开源仓库的默认预期）、`README.zh-CN.md`、`README.ja.md`。
 日语版不是可有可无——本工具做的就是日语卡拉OK，术语（ガイドメロディ / オフボーカル /

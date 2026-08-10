@@ -132,6 +132,16 @@ def build_backend(lean: bool) -> Path:
         "--add-data",
         f"{dist_index}{sep}webui",
     ]
+    # 许可证与第三方声明必须随安装包一起走：MIT 要求"副本及实质性部分"都带上声明，
+    # 而安装包正是一份副本；jassub（MIT）与 Liberation Sans（OFL）同理。
+    # 目标写 `.` 即 onedir 的 `_internal/` 根（`--add-data dist:webui` 落在
+    # `_internal/webui` 可以互证）。缺文件直接失败——静默出一个没有许可证的包，
+    # 要等别人来提 issue 才发现。
+    for doc in ("LICENSE", "THIRD-PARTY-NOTICES.md"):
+        src = REPO_ROOT / doc
+        if not src.is_file():
+            raise SystemExit(f"许可证文件缺失，安装包不能这样出：{src}")
+        cmd += ["--add-data", f"{src}{sep}."]
     for mod in COLLECT_ALL:
         cmd += ["--collect-all", mod]
     for mod in ALWAYS_EXCLUDE + (HEAVY_MODULES if lean else []):

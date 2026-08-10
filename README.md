@@ -1,5 +1,7 @@
 # Karaoke Video Maker (ニコカラ Maker)
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 **Language:** English | [简体中文](README.zh-CN.md) | [日本語](README.ja.md)
 
 Give it a YouTube link, get back a finished karaoke video: word-by-word colour-sweep lyrics,
@@ -160,14 +162,17 @@ Verified against the code. Full breakdown, including what *does* work: [`docs/st
 
 ## License and legal
 
-There is **no `LICENSE` file yet**. The stated posture (`CLAUDE.md` §3) is private/self-use, at
-most source-visible open source, no compiled binaries distributed. Treat the code accordingly.
+**MIT** — see [`LICENSE`](LICENSE). Everything third-party that ships inside the installers is
+listed in [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md): JASSUB and the
+libass / FreeType / HarfBuzz / FriBidi build compiled into its wasm, the Liberation Sans fallback
+font that comes with it (SIL OFL 1.1), and the Python and npm dependency graphs.
 
 - The forced-alignment model this design targets (`MMS_FA` weights) is **CC-BY-NC 4.0,
-  noncommercial only**. It is not wired in yet, but once it is, **this project and anything made
-  with it must not be used commercially** unless that model is swapped out first.
+  noncommercial only**. That restriction belongs to the model, not to this code. It is not wired
+  in yet, but once it is, **a build that uses those weights — and the videos it makes — must not
+  be used commercially** unless that model is swapped out first.
 - The QRC decryption here was written from publicly documented constants, not copied from any GPL
-  codebase.
+  codebase, so no copyleft obligation reaches this project.
 - Downloading video and fetching lyrics is subject to the platforms' terms and copyright, and
   grants you no rights you did not already have. Not legal advice.
 

@@ -1,5 +1,7 @@
 # Karaoke Video Maker（ニコカラ 卡拉OK 视频制作工具）
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 **语言：** [English](README.md) | 简体中文 | [日本語](README.ja.md)
 
 给一个 YouTube 链接，出一个成品卡拉OK 视频：逐字扫色歌词、日语振り仮名、可选的去人声音轨。
@@ -155,12 +157,16 @@ flowchart TD
 
 ## 许可证与合规
 
-**仓库目前没有 `LICENSE` 文件。** 当前定位（见 `CLAUDE.md` §3）是私有自用，顶多以可见源码
-形式开源，不分发编译好的二进制。在有明确许可证之前请按这个定位对待这份代码。
+**MIT**，见 [`LICENSE`](LICENSE)。安装包里所有非本项目的东西都列在
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)：JASSUB 及其 wasm 里编进去的
+libass / FreeType / HarfBuzz / FriBidi、随它附带的兜底字体 Liberation Sans（SIL OFL 1.1），
+以及 Python 与 npm 两侧的依赖图。
 
-- 设计上要用的强制对齐模型（`MMS_FA` 权重）是 **CC-BY-NC 4.0，禁止商用**。它现在还没接入，
-  但一旦接入，**除非先换掉这个模型，否则本项目及其产出都不得用于商业用途**。
-- 本项目的 QRC 解密是基于公开可查的常量独立写的，不是从任何 GPL 代码库抄的。
+- 设计上要用的强制对齐模型（`MMS_FA` 权重）是 **CC-BY-NC 4.0，禁止商用**。这条限制属于
+  **模型**而不是本项目的代码：它现在还没接入，但一旦接入，**用了这份权重的构建、以及用它
+  做出来的视频，除非先换掉模型，否则都不得用于商业用途**。
+- 本项目的 QRC 解密是基于公开可查的常量独立写的，不是从任何 GPL 代码库抄的，因此没有
+  copyleft 义务传到本项目。
 - 下载视频、抓取歌词受相关平台的服务条款与版权约束，也不会给你任何原本没有的权利。
   这不是法律意见。
 
