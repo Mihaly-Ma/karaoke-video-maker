@@ -103,6 +103,25 @@ def ffprobe_for(ffmpeg_bin: str) -> str:
     return str(candidate) if candidate.is_file() else "ffprobe"
 
 
+def escape_filter_path(path: str | Path) -> str:
+    """把路径转成能安全塞进 ffmpeg 滤镜图的形式（CLAUDE.md §6.3）。
+
+    滤镜串要过**两层**解析：filtergraph 层拆 `,` 与 `[]`，filter option 层按
+    `:` 拆键值对。Windows 绝对路径的 `C:` 正好撞上后者，症状不是"找不到文件"
+    而是**下一个选项收到了路径的后半截**——实测报的是
+    `Unable to parse "original_size" option value "/Users/..." as image size`，
+    看起来与路径毫无关系。
+
+    **只有单引号包裹才成立，这是实测结论**：`C\\:/x` 与 `C\\\\:/x` 两种转义
+    都失败（前者正是本函数抽出来之前散在两处的写法），`'C\\:/x'` 才渲染成功。
+
+    路径里的单引号不处理：ffmpeg 单引号内没有转义，要拼 `'\\''` 才行，而工程
+    路径都在应用私有目录下，不值得为此引入一段没被实测覆盖的分支。
+    """
+    text = str(path).replace("\\", "/").replace(":", r"\:")
+    return f"'{text}'"
+
+
 def _resolve_candidate(cand: str) -> str | None:
     """把候选项（绝对路径或命令名）解析成实际存在的可执行文件路径。"""
     if Path(cand).is_file():

@@ -26,6 +26,8 @@ from pathlib import Path
 
 import numpy as np
 
+from kvm.media.ffmpeg import escape_filter_path
+
 MARKER = "█"
 _ROW_H = 110
 _MARGIN = 10
@@ -184,7 +186,7 @@ class LibassMetrics:
 
 
 def _run_ffmpeg_gray(ffmpeg: str, ass_path: Path, w: int, h: int) -> bytes:
-    escaped = str(ass_path).replace("\\", "/").replace(":", r"\:")
+    escaped = escape_filter_path(ass_path)
     cmd = [
         ffmpeg,
         "-hide_banner",

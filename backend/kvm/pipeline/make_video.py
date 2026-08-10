@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent))
 
-from kvm.media.ffmpeg import find_ffmpeg_with_libass
+from kvm.media.ffmpeg import escape_filter_path, find_ffmpeg_with_libass
 from kvm.models.karaoke import VoicePalette
 from kvm.pipeline.guide_melody import TIMBRES, GuideConfig  # 只取配置与常量，不触发 torch
 from kvm.pipeline.qrc_import import load_project
@@ -76,7 +76,7 @@ def burn(
     字幕滤镜路径需转义（Windows 盘符的冒号、以及滤镜图的分隔符）。
     音轨可替换为分离出的伴奏以产出 OFF VOCAL 版本。
     """
-    esc = str(ass).replace("\\", "/").replace(":", r"\:")
+    esc = escape_filter_path(ass)
     cmd = [ffmpeg, "-hide_banner", "-y", "-i", str(video)]
     if audio is not None:
         cmd += ["-i", str(audio)]
