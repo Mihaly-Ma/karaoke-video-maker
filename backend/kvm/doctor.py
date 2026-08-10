@@ -194,7 +194,14 @@ def _tool_version(cmd: str, *args: str) -> tuple[str | None, str | None]:
         return None, None
     try:
         out = subprocess.run(
-            [binary, *args], capture_output=True, text=True, timeout=60, check=False
+            [binary, *args],
+            capture_output=True,
+            text=True,
+            # 编码显式给：中文 Windows 的 locale 是 cp936，解不了这些工具的输出。
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+            check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return binary, None
@@ -504,6 +511,9 @@ def check_torch(timeout: float = 120.0) -> CheckResult:
             [sys.executable, "-c", _TORCH_PROBE],
             capture_output=True,
             text=True,
+            # 编码显式给：探测脚本按 UTF-8 打印，中文 Windows 的 cp936 解不了。
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             check=False,
         )
@@ -802,7 +812,12 @@ def _port_holder(port: int) -> str:
     else:
         cmd = ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"]
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=15, check=False).stdout
+        # 这里**刻意不指定 encoding**：netstat / lsof 是系统命令，按 locale 输出
+        # （中文 Windows 上表头就是 GBK 中文），强按 UTF-8 解只会得到乱码。
+        # 只加 errors="replace" 兜底——占用者信息读不出来不该让自检崩掉。
+        out = subprocess.run(
+            cmd, capture_output=True, text=True, errors="replace", timeout=15, check=False
+        ).stdout
     except (OSError, subprocess.SubprocessError):
         return ""
     lines = [ln for ln in out.splitlines() if str(port) in ln]
@@ -917,7 +932,9 @@ def copy_to_clipboard(text: str) -> bool:
     else:
         return False
     try:
-        subprocess.run(cmd, input=text, text=True, timeout=15, check=True)
+        # 同样不指定 encoding：clip.exe / pbcopy 按 locale 收字节，改成 UTF-8
+        # 会让粘贴出来的中文变乱码。
+        subprocess.run(cmd, input=text, text=True, errors="replace", timeout=15, check=True)
     except (OSError, subprocess.SubprocessError):
         return False
     return True

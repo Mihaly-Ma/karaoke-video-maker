@@ -264,6 +264,13 @@ def run_cancelable(
         "stdout": subprocess.PIPE,
         "stderr": subprocess.STDOUT,
         "text": True,
+        # 编码必须显式给，不能吃系统 locale：中文 Windows 默认 cp936，而这条管道里
+        # 流过的是 worker 的 JSON-lines 进度、ffmpeg 的日志、第三方库的进度条——
+        # 非 GBK 字节是常态。读取线程一抛 UnicodeDecodeError 就死掉，输出随之中断，
+        # 整个作业被判失败，而错误信息与作业本身毫无关系。
+        # errors="replace"：日志里一个坏字节不该有能力打掉一次几分钟的分离。
+        "encoding": "utf-8",
+        "errors": "replace",
         "bufsize": 1,
         **_new_process_group_kwargs(),
         **popen_kwargs,

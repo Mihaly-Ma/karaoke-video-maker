@@ -511,6 +511,9 @@ def import_local_media(
             ],
             capture_output=True,
             text=True,
+            # 见本文件 _ffprobe_json 同处注释：中文 Windows 的 cp936 解不了 ffmpeg 的输出。
+            encoding="utf-8",
+            errors="replace",
             timeout=1800,
         )
         if proc.returncode != 0:

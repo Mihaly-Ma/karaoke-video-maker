@@ -208,6 +208,10 @@ def smoke_test_backend(bundle: Path) -> None:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        # 编码显式给：中文 Windows 的 locale 是 cp936，解不了后端日志里的非 GBK
+        # 字节；冒烟测试因为一个字节而失败，会被误读成"打出来的包起不来"。
+        encoding="utf-8",
+        errors="replace",
     )
     try:
         deadline = time.monotonic() + 60
@@ -271,6 +275,8 @@ def smoke_test_workers(bundle: Path) -> None:
             [str(exe), "--worker-module", module, "--worker"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=180,
         )
         if required_arg not in proc.stderr:
@@ -288,6 +294,8 @@ def smoke_test_workers(bundle: Path) -> None:
         [str(exe), "--worker-module", "kvm.does.not.exist"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=180,
     )
     if bogus.returncode == 0:

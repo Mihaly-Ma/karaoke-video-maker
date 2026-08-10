@@ -135,6 +135,9 @@ class YtDlpManager:
                 [binary, "--version"],
                 capture_output=True,
                 text=True,
+                # 编码显式给：中文 Windows 的 locale 是 cp936，解不了 yt-dlp 的输出。
+                encoding="utf-8",
+                errors="replace",
                 timeout=60,
                 check=False,
             )
@@ -193,7 +196,14 @@ class YtDlpManager:
         cmd = self.upgrade_command()
         try:
             out = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout_s, check=False
+                cmd,
+                capture_output=True,
+                text=True,
+                # 编码显式给：uv/pip 的输出不是 GBK，中文 Windows 上会解码失败。
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout_s,
+                check=False,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             return False, f"{type(exc).__name__}: {exc}"

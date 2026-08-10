@@ -78,6 +78,9 @@ def has_libass(binary: str) -> bool:
             [binary, "-hide_banner", "-filters"],
             capture_output=True,
             text=True,
+            # 编码显式给：中文 Windows 的 locale 是 cp936，解不了 ffmpeg 的输出。
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
         ).stdout
     except (OSError, subprocess.SubprocessError):
@@ -210,7 +213,12 @@ def find_ffmpeg_with_libass() -> str:
 def _version_line(binary: str) -> str | None:
     try:
         out = subprocess.run(
-            [binary, "-hide_banner", "-version"], capture_output=True, text=True, timeout=30
+            [binary, "-hide_banner", "-version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return None
@@ -228,7 +236,12 @@ def libass_version(binary: str) -> str:
         return "unknown（本平台无法从 ffmpeg 读出 libass 版本）"
     try:
         out = subprocess.run(
-            ["otool", "-L", binary], capture_output=True, text=True, timeout=30
+            ["otool", "-L", binary],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return "unknown"

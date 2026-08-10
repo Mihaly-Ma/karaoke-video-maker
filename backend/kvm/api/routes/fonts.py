@@ -948,7 +948,13 @@ def _probe_fontconfig() -> list[str]:  # pragma: no cover - 仅 Linux 路径
     """Linux 上用 fc-list 兜底，避免漏掉非标准目录里的字体。"""
     try:
         out = subprocess.run(
-            ["fc-list", ":", "family"], capture_output=True, text=True, timeout=30
+            ["fc-list", ":", "family"],
+            capture_output=True,
+            text=True,
+            # 字体族名里有大量非 ASCII，编码必须显式给，不能吃 locale。
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return []

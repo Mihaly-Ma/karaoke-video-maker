@@ -41,7 +41,10 @@ def probe_video(ffmpeg: str, path: Path) -> dict:
         "json",
         str(path),
     ]
-    out = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    # 编码显式给：中文 Windows 的 locale 是 cp936，解不了 ffprobe 的 JSON 输出。
+    out = subprocess.run(
+        cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120
+    )
     if out.returncode != 0:
         msg = f"ffprobe 失败：{out.stderr[:400]}"
         raise RuntimeError(msg)

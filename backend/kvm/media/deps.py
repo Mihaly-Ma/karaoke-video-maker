@@ -176,7 +176,14 @@ def run_installer(specs: list[str], hint: str, *, progress: float = 0.04) -> Non
     cmd = installer_command(specs, hint)
     # 命令由 `installer_command` 的白名单分支构造，不含用户输入
     proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        # 编码显式给：uv 的输出不是 GBK，中文 Windows 上读取线程会解码失败。
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
     )
     tail: list[str] = []
     if proc.stdout is not None:
