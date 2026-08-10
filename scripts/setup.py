@@ -181,6 +181,15 @@ def install_cuda_torch(uv: str) -> None:
         "--python",
         str(venv_python()),
         "--reinstall",
+        # **必须 --no-deps。** `--index-url` 换掉的是**整个索引**，于是 torch 的
+        # 依赖也从 PyTorch 那个镜像解析，而它上面的版本更旧：实测会把 numpy
+        # 2.4.6→2.4.4、setuptools 83→78、filelock/fsspec/pillow/typing-extensions
+        # 一并降级——六个与 CUDA 毫无关系的包，绕过了 uv.lock。
+        # 本机看不出来，因为随后那次 `uv sync` 又把它们修回去了；CI 里
+        # 这一步在 sync 之后，没人修，降级就直接进了安装包。
+        # 依赖本身不用管：CUDA 版与 CPU 版的依赖列表相同（CUDA 运行时打在
+        # wheel 内部），uv sync 已经按 lock 装好了。
+        "--no-deps",
         *_TORCH_PACKAGES,
         "--index-url",
         _TORCH_CUDA_INDEX,
