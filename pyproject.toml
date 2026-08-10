@@ -1,6 +1,6 @@
 [project]
 name = "karaoke-video-maker"
-version = "0.1.0"
+version = "0.2.0"
 description = "一站式日式卡拉OK（ニコカラ）视频制作工具"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"

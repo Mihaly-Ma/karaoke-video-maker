@@ -1,6 +1,6 @@
 [package]
 name = "kvm-shell"
-version = "0.1.0"
+version = "0.2.0"
 description = "一站式日式卡拉OK视频制作工具的桌面外壳"
 edition = "2021"
 rust-version = "1.77.2"
