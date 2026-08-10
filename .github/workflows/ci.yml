@@ -61,6 +61,24 @@ jobs:
       - name: 安装 Python 3.12
         run: uv python install 3.12
 
+      # 版本号散在 12 处（6 份声明 + 6 处锁文件里的自身条目），漏改一处的症状是
+      # **安装包文件名写着新版本、内部版本还是旧的**——要到用户装完打开才暴露。
+      # 放在这里是为了快速失败：它只读文件、几十毫秒，没必要等 npm/cargo 那十几分钟。
+      # `--no-project` 让它不必先 sync 整个 venv（脚本是 stdlib-only 的）。
+      - name: 版本号一致性
+        run: uv run --no-project --python 3.12 python scripts/version.py --check
+
+      # 打了 v* tag 才跑：tag 与仓库里的版本号必须一致。
+      # 下面的 package job `needs: check`，所以这一步红了就根本不会开始出包。
+      # **这一条是"文件名与内部版本对得上"的唯一保证**——CI 的产物重命名用的是 tag，
+      # 而安装包的内部版本来自 tauri.conf.json，两者之间没有别的东西把它们钉在一起。
+      - name: tag 与版本号一致
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          uv run --no-project --python 3.12 python scripts/version.py \
+            --check --expect "${GITHUB_REF_NAME#v}"
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -190,6 +208,11 @@ jobs:
       # 产物名要能一眼看出**平台与版本**。Tauri 出来的文件名只带 productName +
       # Cargo 版本号，认不出是哪台机器、哪个 tag 出的，所以在这里重命名一次。
       # 非 tag 触发（手动出包）标成 dev-<短 sha>，免得和真发布混淆。
+      #
+      # **这里用的是 tag，而安装包内部的版本来自 tauri.conf.json——两者对得上，
+      # 靠的是 check job 里那步「tag 与版本号一致」。** 别把它删了，也别在这里
+      # 反过来"按 tag 注入版本"：注入会让产物和它对应的那个 commit 说法不一致，
+      # 从产物追回源码就断了线。正确的顺序永远是先改版本号提交、再打 tag。
       - name: 收拢并重命名产物
         id: collect
         shell: bash
