@@ -343,7 +343,7 @@ def run_separate(handle: JobHandle, store: ProjectStore, req: SeparateRequest) -
             produced_files.update(event.get("files", {}))
 
     try:
-        run_cancelable(handle, cmd, on_line=_on_line, cwd=deps.worker_cwd())
+        run_cancelable(handle, cmd, on_line=_on_line, cwd=deps.worker_cwd(), env=deps.worker_env())
     except JobCancelled:
         raise
     except RuntimeError as exc:

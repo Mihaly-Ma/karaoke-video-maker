@@ -319,7 +319,7 @@ def run_guide(handle: JobHandle, store: ProjectStore, req: GuideRequest) -> dict
 
     cmd = _worker_command(vocals, tmp, duration_s, params)
     try:
-        run_cancelable(handle, cmd, on_line=_on_line, cwd=deps.worker_cwd())
+        run_cancelable(handle, cmd, on_line=_on_line, cwd=deps.worker_cwd(), env=deps.worker_env())
     except JobCancelled:
         raise
     except RuntimeError as exc:

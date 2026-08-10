@@ -22,6 +22,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -96,6 +97,36 @@ def worker_cwd() -> str:
         return str(root)
     # backend/ = kvm 包的父目录
     return str(Path(__file__).resolve().parent.parent.parent)
+
+
+def worker_env() -> dict[str, str]:
+    """worker 子进程的环境：把选中的 ffmpeg 所在目录**前置**到 PATH。
+
+    ## 为什么必须有这一层
+
+    §2.6 要求 ffmpeg 装进应用私有目录、不污染系统 PATH，而**有些第三方库只认
+    PATH，且不给传路径的口子**：audio-separator 在 `Separator.__init__` 里直接
+    `subprocess.check_output(["ffmpeg", "-version"])`，找不到就以
+    `FileNotFoundError: [WinError 2]` 中止——用户看到的是"分离失败：系统找不到
+    指定的文件"，既不说是哪个文件，也与人声分离毫无关系。
+    yt-dlp 那种传 `ffmpeg_location` 参数的修法在这里用不了。
+
+    只改子进程的环境，父进程与用户系统的 PATH 都不动。**前置而非追加**：
+    系统里可能另有一个不带 libass 的 ffmpeg，那正是本项目反复要避免的"静默
+    换人"（§2.6），选中的那份必须优先。
+
+    探测不到就原样返回，让第三方库走它自己的报错路径——这里不该抛，
+    §2.5 要求失败降级而不是终止。
+    """
+    from kvm.media.ffmpeg import probe_ffmpeg
+
+    env = dict(os.environ)
+    probe = probe_ffmpeg()
+    if probe.path is not None:
+        bin_dir = str(Path(probe.path).parent)
+        existing = env.get("PATH", "")
+        env["PATH"] = os.pathsep.join([bin_dir, existing]) if existing else bin_dir
+    return env
 
 
 def run_worker_module(argv: list[str]) -> int | None:
