@@ -116,12 +116,21 @@ def _ffprobe_audio_info(ffprobe_bin: str, path: Path) -> tuple[int, float]:
     try:
         proc = subprocess.run(
             [
-                ffprobe_bin, "-v", "error",
-                "-select_streams", "a:0",
-                "-show_entries", "stream=sample_rate:format=duration",
-                "-of", "json", str(path),
+                ffprobe_bin,
+                "-v",
+                "error",
+                "-select_streams",
+                "a:0",
+                "-show_entries",
+                "stream=sample_rate:format=duration",
+                "-of",
+                "json",
+                str(path),
             ],
-            capture_output=True, text=True, timeout=120, check=True,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=True,
         )
         meta = json.loads(proc.stdout or "{}")
     except (subprocess.SubprocessError, OSError, json.JSONDecodeError) as exc:
@@ -147,9 +156,20 @@ def _decode_mono_pcm16(ffmpeg_bin: str, path: Path) -> np.ndarray:
     采样率对应，避免"头里写的采样率"和"实际解码出来的采样率"对不上。
     """
     cmd = [
-        ffmpeg_bin, "-v", "error", "-i", str(path),
-        "-map", "0:a:0", "-ac", "1",
-        "-f", "s16le", "-acodec", "pcm_s16le", "pipe:1",
+        ffmpeg_bin,
+        "-v",
+        "error",
+        "-i",
+        str(path),
+        "-map",
+        "0:a:0",
+        "-ac",
+        "1",
+        "-f",
+        "s16le",
+        "-acodec",
+        "pcm_s16le",
+        "pipe:1",
     ]
     try:
         proc = subprocess.run(cmd, capture_output=True, timeout=600, check=True)

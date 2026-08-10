@@ -91,12 +91,23 @@ def build_ass(prefixes: list[str], height: int, font: str) -> str:
 def render_gray(ffmpeg: str, ass_path: Path, height: int) -> bytes:
     escaped = str(ass_path).replace("\\", "/").replace(":", r"\:")
     cmd = [
-        ffmpeg, "-hide_banner", "-loglevel", "error",
-        "-f", "lavfi",
-        "-i", f"color=c=black:s={WIDTH}x{height}:d=1:r=1",
-        "-vf", f"ass={escaped}",
-        "-frames:v", "1",
-        "-f", "rawvideo", "-pix_fmt", "gray", "-",
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        f"color=c=black:s={WIDTH}x{height}:d=1:r=1",
+        "-vf",
+        f"ass={escaped}",
+        "-frames:v",
+        "1",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "gray",
+        "-",
     ]
     proc = subprocess.run(cmd, capture_output=True, timeout=180)
     if proc.returncode != 0:
@@ -185,9 +196,7 @@ def main() -> int:
             monotonic = all(b >= a for a, b in zip(widths, widths[1:]))
             fingerprints[case_name][font] = tuple(widths)
 
-            detail = "  ".join(
-                f"{ch}[{a},{b})" for ch, a, b in spans if ch != " "
-            )
+            detail = "  ".join(f"{ch}[{a},{b})" for ch, a, b in spans if ch != " ")
             print(f"\n[{font}] 总宽 {widths[-1]}px  单调={monotonic}")
             print(f"  {detail}")
 

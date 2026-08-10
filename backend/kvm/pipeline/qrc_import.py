@@ -39,11 +39,7 @@ def _is_kanji(ch: str) -> bool:
     包含 CJK 统一表意文字与扩展 A，以及叠字符号「々」。
     平假名/片假名/ASCII 不需要注音，标注了反而是冗余。
     """
-    return (
-        "一" <= ch <= "鿿"
-        or "㐀" <= ch <= "䶿"
-        or ch == "々"
-    )
+    return "一" <= ch <= "鿿" or "㐀" <= ch <= "䶿" or ch == "々"
 
 
 def _is_metadata_line(text: str, start_ms: int, first_vocal_ms: int) -> bool:

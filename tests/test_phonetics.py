@@ -73,7 +73,12 @@ def _project() -> ProjectDTO:
     )
     line_b = LineDTO(
         id="L2",
-        tokens=[_tok("夢", 4000, 400), _tok("を", 4400, 200), _tok("見", 4600, 300), _tok("て", 4900, 300)],
+        tokens=[
+            _tok("夢", 4000, 400),
+            _tok("を", 4400, 200),
+            _tok("見", 4600, 300),
+            _tok("て", 4900, 300),
+        ],
     )
     return ProjectDTO(id="P1", lines=[line_a, line_b])
 

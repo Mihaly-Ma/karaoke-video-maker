@@ -44,6 +44,13 @@ QRC_KEY = b"!@#)(*$%123ZXC!@!@#)(NHL"  # 24 字节 = 三重 DES 的三段子密�
 ENCRYPT = 1
 DECRYPT = 0
 
+# fmt: off
+# 下面这一整块 DES 常量表**关掉自动格式化**：它们按每行 16 项的网格手工排布，
+# 与参考实现（WXRIW/QQMusicDecoder 等）逐行对齐，笔误位置也是靠"第几行第几列"
+# 数出来的。ruff format 会把它们摊成每行一个数字（S-box 一张就 512 行），
+# 网格一散，上面那两条笔误注释就再也对不上位置、也没法与上游校对了。
+# 到 `# fmt: on` 为止。
+
 # 标准 DES 的 8 张 S-box，但其中两处是腾讯沿用的笔误值：
 #   SBOX2[23] = 15（标准是 14）
 #   SBOX4[53] = 10（标准是 1）
@@ -137,6 +144,7 @@ P_PERM = (
 # InvIP：输出字节写入顺序——注意这里是 32 位字内字节逆序（DES 本身没有这一步，
 # 是这份 C 实现的 BITNUM 宏带来的固有字节序特性，必须原样复刻）
 _INVIP_BYTE_ORDER = (3, 2, 1, 0, 7, 6, 5, 4)
+# fmt: on
 
 
 def _bitnum(buf: bytes, b: int, c: int) -> int:
@@ -208,16 +216,32 @@ def _inv_ip(s0: int, s1: int) -> bytes:
 def _f(state: int, key6: list[int]) -> int:
     """DES 轮函数：扩展置换 E → 与子密钥异或 → 8 张 S-box → P 置换。"""
     t1 = (
-        _bit_l(state, 31, 0) | ((state & 0xF0000000) >> 1) | _bit_l(state, 4, 5)
-        | _bit_l(state, 3, 6) | ((state & 0x0F000000) >> 3) | _bit_l(state, 8, 11)
-        | _bit_l(state, 7, 12) | ((state & 0x00F00000) >> 5) | _bit_l(state, 12, 17)
-        | _bit_l(state, 11, 18) | ((state & 0x000F0000) >> 7) | _bit_l(state, 16, 23)
+        _bit_l(state, 31, 0)
+        | ((state & 0xF0000000) >> 1)
+        | _bit_l(state, 4, 5)
+        | _bit_l(state, 3, 6)
+        | ((state & 0x0F000000) >> 3)
+        | _bit_l(state, 8, 11)
+        | _bit_l(state, 7, 12)
+        | ((state & 0x00F00000) >> 5)
+        | _bit_l(state, 12, 17)
+        | _bit_l(state, 11, 18)
+        | ((state & 0x000F0000) >> 7)
+        | _bit_l(state, 16, 23)
     )
     t2 = (
-        _bit_l(state, 15, 0) | ((state & 0x0000F000) << 15) | _bit_l(state, 20, 5)
-        | _bit_l(state, 19, 6) | ((state & 0x00000F00) << 13) | _bit_l(state, 24, 11)
-        | _bit_l(state, 23, 12) | ((state & 0x000000F0) << 11) | _bit_l(state, 28, 17)
-        | _bit_l(state, 27, 18) | ((state & 0x0000000F) << 9) | _bit_l(state, 0, 23)
+        _bit_l(state, 15, 0)
+        | ((state & 0x0000F000) << 15)
+        | _bit_l(state, 20, 5)
+        | _bit_l(state, 19, 6)
+        | ((state & 0x00000F00) << 13)
+        | _bit_l(state, 24, 11)
+        | _bit_l(state, 23, 12)
+        | ((state & 0x000000F0) << 11)
+        | _bit_l(state, 28, 17)
+        | _bit_l(state, 27, 18)
+        | ((state & 0x0000000F) << 9)
+        | _bit_l(state, 0, 23)
     )
     t1 &= 0xFFFFFFFF
     t2 &= 0xFFFFFFFF
@@ -314,9 +338,15 @@ def search_smartbox(session: requests.Session, query: str) -> list[dict]:
     r = session.get(
         "https://c.y.qq.com/splcloud/fcgi-bin/smartbox_new.fcg",
         params={
-            "key": query, "format": "json", "g_tk": 5381, "utf8": 1,
-            "loginUin": 0, "hostUin": 0, "inCharset": "utf8",
-            "outCharset": "utf-8", "platform": "yqq",
+            "key": query,
+            "format": "json",
+            "g_tk": 5381,
+            "utf8": 1,
+            "loginUin": 0,
+            "hostUin": 0,
+            "inCharset": "utf8",
+            "outCharset": "utf-8",
+            "platform": "yqq",
         },
         headers={"Referer": _PLAYER_REFERER},
         timeout=_TIMEOUT,
@@ -325,8 +355,11 @@ def search_smartbox(session: requests.Session, query: str) -> list[dict]:
     items = r.json()["data"]["song"]["itemlist"]
     return [
         {
-            "songmid": it["mid"], "name": it["name"],
-            "singer": it.get("singer", ""), "interval": None, "album": "",
+            "songmid": it["mid"],
+            "name": it["name"],
+            "singer": it.get("singer", ""),
+            "interval": None,
+            "album": "",
         }
         for it in items
     ]
@@ -336,10 +369,21 @@ def search_soso(session: requests.Session, query: str) -> list[dict]:
     r = session.get(
         "https://c.y.qq.com/soso/fcgi-bin/search_for_qq_cp",
         params={
-            "g_tk": 5381, "format": "json", "inCharset": "utf-8",
-            "outCharset": "utf-8", "notice": 0, "platform": "yqq.json",
-            "needNewCode": 0, "w": query, "p": 1, "n": 20, "t": 0,
-            "aggr": 1, "cr": 1, "lossless": 0, "flag_qc": 0,
+            "g_tk": 5381,
+            "format": "json",
+            "inCharset": "utf-8",
+            "outCharset": "utf-8",
+            "notice": 0,
+            "platform": "yqq.json",
+            "needNewCode": 0,
+            "w": query,
+            "p": 1,
+            "n": 20,
+            "t": 0,
+            "aggr": 1,
+            "cr": 1,
+            "lossless": 0,
+            "flag_qc": 0,
         },
         headers={"Referer": _PLAYER_REFERER},
         timeout=_TIMEOUT,
@@ -371,11 +415,21 @@ def fetch_play_lyric(session: requests.Session, songmid: str) -> dict:
             "module": "music.musichallSong.PlayLyricInfo",
             "method": "GetPlayLyricInfo",
             "param": {
-                "songMID": songmid, "songID": 0,
-                "crypt": 1, "qrc": 1, "roma": 1, "trans": 1,
-                "lrc_t": 0, "qrc_t": 0, "roma_t": 0, "trans_t": 0,
-                "interval": 0, "type": 0, "format": "json",
-                "ct": 19, "cv": 1859,
+                "songMID": songmid,
+                "songID": 0,
+                "crypt": 1,
+                "qrc": 1,
+                "roma": 1,
+                "trans": 1,
+                "lrc_t": 0,
+                "qrc_t": 0,
+                "roma_t": 0,
+                "trans_t": 0,
+                "interval": 0,
+                "type": 0,
+                "format": "json",
+                "ct": 19,
+                "cv": 1859,
             },
         },
     }
@@ -437,9 +491,7 @@ def _decrypt_has_translation(session_data: dict) -> bool:
         trans_lines = parse_lrc(trans_text)
     except (ValueError, zlib.error):
         return False
-    return any(
-        (t := line_text(ln)) not in ("", "//") and "著作权" not in t for ln in trans_lines
-    )
+    return any((t := line_text(ln)) not in ("", "//") and "著作权" not in t for ln in trans_lines)
 
 
 class QqMusicProvider(LyricProvider):

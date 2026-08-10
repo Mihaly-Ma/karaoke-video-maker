@@ -59,16 +59,19 @@ RESULT_PATH = WORKSPACE / "lyrics_sources_result.json"
 # 曲目清单
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class Track:
     key: str
-    title: str                 # 用于检索的曲名（不带括号后缀）
-    title_full: str            # 完整曲名（含 feat. 等）
-    artist: str                # 主检索用歌手名
+    title: str  # 用于检索的曲名（不带括号后缀）
+    title_full: str  # 完整曲名（含 feat. 等）
+    artist: str  # 主检索用歌手名
     artist_full: str
-    category: str              # verification / mainstream / indie / new_no_release
+    category: str  # verification / mainstream / indie / new_no_release
     note: str = ""
-    known_duration_sec: float | None = None  # 来自权威元数据源（如 VocaDB）的已知时长，无则留空靠多源互相印证
+    known_duration_sec: float | None = (
+        None  # 来自权威元数据源（如 VocaDB）的已知时长，无则留空靠多源互相印证
+    )
 
 
 TRACKS: list[Track] = [
@@ -80,7 +83,7 @@ TRACKS: list[Track] = [
         artist_full="sumika / 幾田りら",
         category="verification",
         note="主验证曲。2026-01-29 数字先行配信 / 2026-02-25 实体发售，MV 2026-07-23 才公开，"
-             "所以歌词库入库早于 MV，不是真正的冷启动样本（见 CLAUDE.md §5.2）。",
+        "所以歌词库入库早于 MV，不是真正的冷启动样本（见 CLAUDE.md §5.2）。",
     ),
     Track(
         key="lemon",
@@ -126,8 +129,8 @@ TRACKS: list[Track] = [
         artist_full="リク@MUSIC CUBE feat. 知声",
         category="new_no_release",
         note="2026-07-31 投稿于 niconico(sm46609952) + YouTube 的 VOCALOID(VoiSona)同人原创曲，"
-             "无任何商业单曲/数字配信发行，仅见于 niconico「水中ソング投稿祭」参加作。"
-             "元数据来自 vocadb.net（歌曲 id=1014466），非本脚本编造。",
+        "无任何商业单曲/数字配信发行，仅见于 niconico「水中ソング投稿祭」参加作。"
+        "元数据来自 vocadb.net（歌曲 id=1014466），非本脚本编造。",
         known_duration_sec=207.0,
     ),
 ]
@@ -136,6 +139,7 @@ TRACKS: list[Track] = [
 # ---------------------------------------------------------------------------
 # 工具函数
 # ---------------------------------------------------------------------------
+
 
 def _get(url: str, **kwargs) -> requests.Response:
     kwargs.setdefault("timeout", TIMEOUT)
@@ -155,6 +159,7 @@ def _safe(fn, *args, **kwargs) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # QQ 音乐
 # ---------------------------------------------------------------------------
+
 
 def qq_search(track: Track) -> dict[str, Any]:
     # smartbox_new.fcg 是"输入联想"接口，每类结果只返回极少数条（实测 count<=4），
@@ -179,7 +184,7 @@ def qq_search(track: Track) -> dict[str, Any]:
         "singer": top.get("singer"),
         "raw_count": len(items),
         "note": "smartbox_new.fcg 为联想框接口，返回条数很少；未匹配到歌手名时"
-                "不代表该曲真的不在 QQ 音乐库中，只能说明没进入联想框前几条",
+        "不代表该曲真的不在 QQ 音乐库中，只能说明没进入联想框前几条",
     }
 
 
@@ -233,6 +238,7 @@ def probe_qq(track: Track) -> dict[str, Any]:
 # 酷狗 KRC
 # ---------------------------------------------------------------------------
 
+
 def kugou_search(track: Track) -> dict[str, Any]:
     # 盲选第一条会踩坑：对冷门曲，酷狗搜索接口经常把不相关的同名/近似关键词歌曲排第一
     # （实测"憂鬱なるマーメイド"排到了完全无关的"親愛なるあの日々へ"）。
@@ -252,7 +258,9 @@ def kugou_search(track: Track) -> dict[str, Any]:
     exact_title = [i for i in matched if (i.get("songname") or "") == track.title]
     pool = exact_title or matched or info
     if track.known_duration_sec is not None:
-        pool = sorted(pool, key=lambda i: abs((i.get("duration") or 1e9) - track.known_duration_sec))
+        pool = sorted(
+            pool, key=lambda i: abs((i.get("duration") or 1e9) - track.known_duration_sec)
+        )
     top = pool[0]
     return {
         "found": bool(matched),
@@ -315,7 +323,7 @@ def kugou_fetch_krc(track: Track, hash_: str, duration_sec: float | None) -> dic
         "decoded_len_bytes": decoded_len,
         "magic_header_krc1": magic_ok,
         "note": "只验证密文是否取到 + krc1 magic header 是否正确，不做 XOR+zlib 解密"
-                "（解密算法已在 CLAUDE.md §5.2 写明，但按任务指示交由另一 agent 实现，本脚本不重复造轮子）",
+        "（解密算法已在 CLAUDE.md §5.2 写明，但按任务指示交由另一 agent 实现，本脚本不重复造轮子）",
     }
 
 
@@ -332,6 +340,7 @@ def probe_kugou(track: Track) -> dict[str, Any]:
 # 网易云
 # ---------------------------------------------------------------------------
 
+
 def netease_search(track: Track) -> dict[str, Any]:
     # 同 kugou：不要盲选第一条，按歌手名过滤，避免"同名曲但完全不同歌手"的误配
     # （实测"憂鬱なるマーメイド"曾误配到"森英治"的完全无关曲目）。
@@ -346,8 +355,7 @@ def netease_search(track: Track) -> dict[str, Any]:
     if not songs:
         return {"found": False, "raw_count": 0}
     matched = [
-        s for s in songs
-        if any(track.artist in (a.get("name") or "") for a in s.get("artists", []))
+        s for s in songs if any(track.artist in (a.get("name") or "") for a in s.get("artists", []))
     ]
     pool = matched if matched else songs
     if track.known_duration_sec is not None:
@@ -402,6 +410,7 @@ def probe_netease(track: Track) -> dict[str, Any]:
 # LRCLIB
 # ---------------------------------------------------------------------------
 
+
 def probe_lrclib(track: Track) -> dict[str, Any]:
     resp = _get(
         "https://lrclib.net/api/search",
@@ -435,6 +444,7 @@ def probe_lrclib(track: Track) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # YouTube 官方 ja 字幕（用 yt-dlp 搜索 MV 并列出字幕轨）
 # ---------------------------------------------------------------------------
+
 
 def _yt_search_once(query: str) -> list[str] | None:
     proc = subprocess.run(
@@ -505,6 +515,7 @@ def probe_youtube_ja(track: Track) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # UtaTen（权威 furigana ruby）
 # ---------------------------------------------------------------------------
+
 
 def utaten_search(track: Track) -> dict[str, Any]:
     resp = _get(
@@ -577,7 +588,10 @@ SOURCES: dict[str, Any] = {
 def run_all() -> dict[str, Any]:
     results: dict[str, Any] = {"tracks": {}}
     for track in TRACKS:
-        print(f"\n=== {track.title_full} — {track.artist_full} [{track.category}] ===", file=sys.stderr)
+        print(
+            f"\n=== {track.title_full} — {track.artist_full} [{track.category}] ===",
+            file=sys.stderr,
+        )
         track_result: dict[str, Any] = {"meta": track.__dict__, "sources": {}}
         for source_name, fn in SOURCES.items():
             print(f"  -> {source_name} ...", file=sys.stderr, end=" ", flush=True)

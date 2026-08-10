@@ -551,8 +551,4 @@ class KaraokeProject:
 
     def palette_for(self, voice_part: str) -> VoicePalette:
         """按声部取配色，缺失时回退到 main —— 声部可能被删但仍被行引用。"""
-        return (
-            self.palettes.get(voice_part)
-            or self.palettes.get("main")
-            or VoicePalette()
-        )
+        return self.palettes.get(voice_part) or self.palettes.get("main") or VoicePalette()

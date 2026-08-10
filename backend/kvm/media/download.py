@@ -103,7 +103,9 @@ def _probe_container_timing(ffprobe_bin: str, path: Path) -> dict[str, Any]:
     video = next((s for s in streams if s.get("codec_type") == "video"), {})
     audio = next((s for s in streams if s.get("codec_type") == "audio"), {})
     return {
-        "container_start_time_s": float(fmt["start_time"]) if fmt.get("start_time") is not None else 0.0,
+        "container_start_time_s": float(fmt["start_time"])
+        if fmt.get("start_time") is not None
+        else 0.0,
         "video_stream_start_time_s": (
             float(video["start_time"]) if video.get("start_time") is not None else None
         ),
@@ -305,15 +307,29 @@ def run_download(handle: JobHandle, store: ProjectStore, req: DownloadRequest) -
         run_cancelable(
             handle,
             [
-                ffmpeg_bin, "-y", "-i", str(result.path),
-                "-vn", "-acodec", "pcm_s16le", "-ac", "2", str(audio_path),
+                ffmpeg_bin,
+                "-y",
+                "-i",
+                str(result.path),
+                "-vn",
+                "-acodec",
+                "pcm_s16le",
+                "-ac",
+                "2",
+                str(audio_path),
             ],
         )
         handle.check_cancelled()
         audio_duration_s = _probe_duration(ffprobe_bin, audio_path)
     except JobCancelled:
         raise
-    except (subprocess.CalledProcessError, OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
+    except (
+        subprocess.CalledProcessError,
+        OSError,
+        json.JSONDecodeError,
+        KeyError,
+        ValueError,
+    ) as exc:
         msg = f"抽取音频或核算时间基准失败：{exc}"
         raise RuntimeError(msg) from exc
 
@@ -341,7 +357,9 @@ def run_download(handle: JobHandle, store: ProjectStore, req: DownloadRequest) -
             p.title = result.title
         if not p.artist and result.uploader:
             p.artist = result.uploader
-        p.duration_ms = round((audio_duration_s or probe.duration_s or result.duration_s or 0.0) * 1000)
+        p.duration_ms = round(
+            (audio_duration_s or probe.duration_s or result.duration_s or 0.0) * 1000
+        )
         if global_offset_ms:
             p.global_offset_ms = global_offset_ms
 
@@ -460,7 +478,13 @@ def import_local_media(
         try:
             timing = _probe_container_timing(ffprobe_bin, raw_path)
             container_duration_s = _probe_duration(ffprobe_bin, raw_path)
-        except (subprocess.CalledProcessError, OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
+        except (
+            subprocess.CalledProcessError,
+            OSError,
+            json.JSONDecodeError,
+            KeyError,
+            ValueError,
+        ) as exc:
             raw_path.unlink(missing_ok=True)
             msg = f"探测导入文件信息失败（可能不是有效的媒体文件）：{exc}"
             raise RuntimeError(msg) from exc
@@ -471,10 +495,20 @@ def import_local_media(
         canonical_audio = media_dir / f"import_audio_{tag}.wav"
         proc = subprocess.run(
             [
-                ffmpeg_bin, "-y", "-i", str(raw_path),
-                "-vn", "-acodec", "pcm_s16le", "-ac", "2", str(canonical_audio),
+                ffmpeg_bin,
+                "-y",
+                "-i",
+                str(raw_path),
+                "-vn",
+                "-acodec",
+                "pcm_s16le",
+                "-ac",
+                "2",
+                str(canonical_audio),
             ],
-            capture_output=True, text=True, timeout=1800,
+            capture_output=True,
+            text=True,
+            timeout=1800,
         )
         if proc.returncode != 0:
             raw_path.unlink(missing_ok=True)
@@ -482,7 +516,13 @@ def import_local_media(
             raise RuntimeError(msg)
         try:
             audio_duration_s = _probe_duration(ffprobe_bin, canonical_audio)
-        except (subprocess.CalledProcessError, OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
+        except (
+            subprocess.CalledProcessError,
+            OSError,
+            json.JSONDecodeError,
+            KeyError,
+            ValueError,
+        ) as exc:
             raw_path.unlink(missing_ok=True)
             canonical_audio.unlink(missing_ok=True)
             msg = f"核算导入音频时长失败：{exc}"
@@ -536,7 +576,13 @@ def import_local_media(
         # 不涉及 start_time 核算或额外转码。
         try:
             _probe_duration(ffprobe_bin, raw_path)
-        except (subprocess.CalledProcessError, OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
+        except (
+            subprocess.CalledProcessError,
+            OSError,
+            json.JSONDecodeError,
+            KeyError,
+            ValueError,
+        ) as exc:
             raw_path.unlink(missing_ok=True)
             msg = f"导入文件不是有效的音频文件（ffprobe 无法读取）：{exc}"
             raise RuntimeError(msg) from exc

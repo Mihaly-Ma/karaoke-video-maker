@@ -146,10 +146,7 @@ SAMPLES: list[BiliSample] = [
         key="bangumi_ep",
         role="番剧单集（PGC 专业内容，转码流水线与 UGC 不同）",
         url="https://www.bilibili.com/bangumi/play/ep826497",
-        note=(
-            "49 分钟，超过 AUDIO_DOWNLOAD_MAX_DURATION_S，只用 Range 请求量"
-            "远端体积，不整段下载"
-        ),
+        note=("49 分钟，超过 AUDIO_DOWNLOAD_MAX_DURATION_S，只用 Range 请求量远端体积，不整段下载"),
     ),
 ]
 
@@ -252,9 +249,7 @@ def probe_formats(sample: BiliSample) -> SampleProbe:
     但**不作为结论**——bilibili 的 UGC 转码是 VBR，声明值与实际 ES 码率可以差很多，
     真实值由 `remote_stream_size` / `measure_es_bitrate` 给出。
     """
-    probe = SampleProbe(
-        key=sample.key, role=sample.role, url=sample.url, note=sample.note
-    )
+    probe = SampleProbe(key=sample.key, role=sample.role, url=sample.url, note=sample.note)
     opts = {"quiet": True, "no_warnings": True, "skip_download": True}
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
@@ -289,9 +284,7 @@ def probe_formats(sample: BiliSample) -> SampleProbe:
             ext=fmt.get("ext") or "",
             codec=vcodec if vcodec != "none" else acodec,
             resolution=(
-                f"{fmt.get('width')}x{fmt.get('height')}"
-                if fmt.get("height")
-                else "audio-only"
+                f"{fmt.get('width')}x{fmt.get('height')}" if fmt.get("height") else "audio-only"
             ),
             fps=fmt.get("fps"),
             declared_kbps=fmt.get("abr") if vcodec == "none" else fmt.get("tbr"),
@@ -299,16 +292,12 @@ def probe_formats(sample: BiliSample) -> SampleProbe:
         if vcodec == "none":
             summary.remote_bytes = remote_stream_size(fmt)
             if summary.remote_bytes and probe.duration_s:
-                summary.measured_kbps = (
-                    summary.remote_bytes * 8 / probe.duration_s / 1000
-                )
+                summary.measured_kbps = summary.remote_bytes * 8 / probe.duration_s / 1000
             probe.audios.append(summary)
         else:
             probe.videos.append(summary)
 
-    best_v = max(
-        probe.videos, key=lambda s: _res_area(s.resolution), default=None
-    )
+    best_v = max(probe.videos, key=lambda s: _res_area(s.resolution), default=None)
     probe.source_resolution = best_v.resolution if best_v else None
     return probe
 
@@ -333,9 +322,7 @@ def remote_stream_size(fmt: dict[str, Any]) -> int | None:
     url = fmt.get("url")
     if not url:
         return None
-    req = urllib.request.Request(
-        url, headers={**_http_headers(fmt), "Range": "bytes=0-1"}
-    )
+    req = urllib.request.Request(url, headers={**_http_headers(fmt), "Range": "bytes=0-1"})
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             content_range = resp.headers.get("Content-Range")
@@ -391,17 +378,23 @@ def measure_es_bitrate(ffprobe: str, path: Path) -> dict[str, Any]:
     duration = float(meta["format"]["duration"])
     packets = subprocess.run(
         [
-            ffprobe, "-v", "error", "-select_streams", "a:0",
-            "-show_entries", "packet=size", "-of", "csv=p=0", str(path),
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "packet=size",
+            "-of",
+            "csv=p=0",
+            str(path),
         ],
         capture_output=True,
         text=True,
         timeout=600,
         check=False,
     ).stdout
-    total = sum(
-        int(line.strip().rstrip(",")) for line in packets.splitlines() if line.strip()
-    )
+    total = sum(int(line.strip().rstrip(",")) for line in packets.splitlines() if line.strip())
     return {
         "codec": stream.get("codec_name"),
         "profile": stream.get("profile"),
@@ -428,8 +421,21 @@ def measure_spectrum(ffmpeg: str, path: Path) -> dict[str, Any] | None:
 
     wav = path.with_name(path.stem + "_mono48k.wav")
     subprocess.run(
-        [ffmpeg, "-v", "error", "-y", "-i", str(path), "-ac", "1", "-ar", "48000",
-         "-f", "wav", str(wav)],
+        [
+            ffmpeg,
+            "-v",
+            "error",
+            "-y",
+            "-i",
+            str(path),
+            "-ac",
+            "1",
+            "-ar",
+            "48000",
+            "-f",
+            "wav",
+            str(wav),
+        ],
         check=True,
         timeout=600,
     )
@@ -466,8 +472,14 @@ def measure_spectrum(ffmpeg: str, path: Path) -> dict[str, Any] | None:
 
     bands: dict[str, float] = {}
     for low, high in [
-        (0, 4000), (4000, 8000), (8000, 12000), (12000, 14000),
-        (14000, 16000), (16000, 18000), (18000, 20000), (20000, 24000),
+        (0, 4000),
+        (4000, 8000),
+        (8000, 12000),
+        (12000, 14000),
+        (14000, 16000),
+        (16000, 18000),
+        (18000, 20000),
+        (20000, 24000),
     ]:
         mask = (freqs >= low) & (freqs < high)
         value = 10 * np.log10(float(np.mean(10 ** (db[mask] / 10))) + 1e-20)
@@ -489,8 +501,7 @@ def probe_login_gate(bvid: str, cid: int) -> dict[str, Any]:
       - 报告 `accept_quality` 声称支持的档位与实际返回档位的差集 = 需要登录/会员的部分
     """
     base = (
-        "https://api.bilibili.com/x/player/playurl"
-        f"?bvid={bvid}&cid={cid}&qn=127&fnval=4048&fourk=1"
+        f"https://api.bilibili.com/x/player/playurl?bvid={bvid}&cid={cid}&qn=127&fnval=4048&fourk=1"
     )
     result: dict[str, Any] = {"bvid": bvid, "cid": cid, "variants": {}}
     for name, url in [("匿名", base), ("匿名+try_look=1", base + "&try_look=1")]:
@@ -515,9 +526,7 @@ def probe_login_gate(bvid: str, cid: int) -> dict[str, Any]:
             "accept_description": data.get("accept_description"),
             "accept_quality": data.get("accept_quality"),
             "returned_video_heights": heights,
-            "returned_audio_ids": sorted(
-                {str(a.get("id")) for a in dash.get("audio") or []}
-            ),
+            "returned_audio_ids": sorted({str(a.get("id")) for a in dash.get("audio") or []}),
             "has_flac_hires": bool((dash.get("flac") or {}).get("audio")),
             "has_dolby": bool((dash.get("dolby") or {}).get("audio")),
         }
@@ -560,17 +569,13 @@ def probe_url_forms() -> list[dict[str, Any]]:
             returns="playlist（多条目）" if is_playlist else "single（单条目）",
             title=(info.get("title") or "")[:60],
             entry_count=len(info.get("entries") or []) if is_playlist else 1,
-            first_entries=[
-                str(e.get("id")) for e in (info.get("entries") or [])[:3]
-            ]
+            first_entries=[str(e.get("id")) for e in (info.get("entries") or [])[:3]]
             if is_playlist
             else [str(info.get("id"))],
             n_formats=0 if is_playlist else len(info.get("formats") or []),
             max_height=0
             if is_playlist
-            else max(
-                (f.get("height") or 0 for f in info.get("formats") or []), default=0
-            ),
+            else max((f.get("height") or 0 for f in info.get("formats") or []), default=0),
         )
         rows.append(row)
     return rows
@@ -581,9 +586,7 @@ def probe_url_forms() -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def download_and_check_timing(
-    ffmpeg: str, ffprobe: str, url: str, stem: str
-) -> dict[str, Any]:
+def download_and_check_timing(ffmpeg: str, ffprobe: str, url: str, stem: str) -> dict[str, Any]:
     """实际下载一个样本并验证时间基准。
 
     CLAUDE.md §6.2 把「容器 `start_time != 0` 会让 ASS 绝对时间整体偏移」列为
@@ -639,8 +642,18 @@ def download_and_check_timing(
     # 真正会咬人的是逐帧间隔抖动，必须实测。
     pts_out = subprocess.run(
         [
-            ffprobe, "-v", "error", "-select_streams", "v:0", "-read_intervals", "%+60",
-            "-show_entries", "frame=pts_time", "-of", "csv=p=0", str(merged),
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-read_intervals",
+            "%+60",
+            "-show_entries",
+            "frame=pts_time",
+            "-of",
+            "csv=p=0",
+            str(merged),
         ],
         capture_output=True,
         text=True,
@@ -653,9 +666,7 @@ def download_and_check_timing(
         if line.strip().rstrip(",").replace(".", "", 1).isdigit()
     ]
     if len(times) > 10:
-        deltas = [
-            (times[i + 1] - times[i]) * 1000 for i in range(min(len(times) - 1, 200))
-        ]
+        deltas = [(times[i + 1] - times[i]) * 1000 for i in range(min(len(times) - 1, 200))]
         mean = sum(deltas) / len(deltas)
         var = sum((d - mean) ** 2 for d in deltas) / len(deltas)
         result["timing"].update(
@@ -669,14 +680,38 @@ def download_and_check_timing(
     audio_44k = OUT_DIR / f"{stem}_audio_44k.wav"
     audio_16k = OUT_DIR / f"{stem}_audio_16k_mono.wav"
     subprocess.run(
-        [ffmpeg, "-v", "error", "-y", "-i", str(merged), "-vn", "-ar", "44100",
-         "-ac", "2", str(audio_44k)],
+        [
+            ffmpeg,
+            "-v",
+            "error",
+            "-y",
+            "-i",
+            str(merged),
+            "-vn",
+            "-ar",
+            "44100",
+            "-ac",
+            "2",
+            str(audio_44k),
+        ],
         check=True,
         timeout=900,
     )
     subprocess.run(
-        [ffmpeg, "-v", "error", "-y", "-i", str(merged), "-vn", "-ar", "16000",
-         "-ac", "1", str(audio_16k)],
+        [
+            ffmpeg,
+            "-v",
+            "error",
+            "-y",
+            "-i",
+            str(merged),
+            "-vn",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            str(audio_16k),
+        ],
         check=True,
         timeout=900,
     )
@@ -695,9 +730,7 @@ def download_and_check_timing(
 # ---------------------------------------------------------------------------
 
 
-def compare_with_youtube(
-    ffmpeg: str, ffprobe: str, bili_audio: Path
-) -> dict[str, Any] | None:
+def compare_with_youtube(ffmpeg: str, ffprobe: str, bili_audio: Path) -> dict[str, Any] | None:
     """把 bilibili 的音轨与 YouTube 同曲音轨做逐帧对比。
 
     做法：都解码成 48 kHz 单声道 → 互相关估时间偏移 → 增益归一 → 以 YouTube 轨为
@@ -714,14 +747,42 @@ def compare_with_youtube(
     bili_wav = OUT_DIR / "cmp_bili_mono48k.wav"
     yt_wav = OUT_DIR / "cmp_yt_mono48k.wav"
     subprocess.run(
-        [ffmpeg, "-v", "error", "-y", "-i", str(bili_audio), "-ac", "1", "-ar", "48000",
-         "-f", "wav", str(bili_wav)],
+        [
+            ffmpeg,
+            "-v",
+            "error",
+            "-y",
+            "-i",
+            str(bili_audio),
+            "-ac",
+            "1",
+            "-ar",
+            "48000",
+            "-f",
+            "wav",
+            str(bili_wav),
+        ],
         check=True,
         timeout=600,
     )
     subprocess.run(
-        [ffmpeg, "-v", "error", "-y", "-i", str(YT_BASELINE_MKV), "-map", "0:a:0",
-         "-ac", "1", "-ar", "48000", "-f", "wav", str(yt_wav)],
+        [
+            ffmpeg,
+            "-v",
+            "error",
+            "-y",
+            "-i",
+            str(YT_BASELINE_MKV),
+            "-map",
+            "0:a:0",
+            "-ac",
+            "1",
+            "-ar",
+            "48000",
+            "-f",
+            "wav",
+            str(yt_wav),
+        ],
         check=True,
         timeout=600,
     )
@@ -755,8 +816,14 @@ def compare_with_youtube(
     window = np.hanning(size)
     freqs = np.fft.rfftfreq(size, 1 / sample_rate)
     bands = [
-        (0, 1000), (1000, 2000), (2000, 4000), (4000, 6000),
-        (6000, 8000), (8000, 12000), (12000, 16000), (16000, 20000),
+        (0, 1000),
+        (1000, 2000),
+        (2000, 4000),
+        (4000, 6000),
+        (6000, 8000),
+        (8000, 12000),
+        (12000, 16000),
+        (16000, 20000),
     ]
     sig = np.zeros(len(bands))
     noise = np.zeros(len(bands))
@@ -804,15 +871,29 @@ def simulate_bilibili_grade_audio(
     """
     encoded = dest_stem.with_suffix(".m4a")
     subprocess.run(
-        [ffmpeg, "-v", "error", "-y", "-i", str(source), "-ar", "48000",
-         "-c:a", "aac", "-b:a", f"{kbps}k", "-cutoff", str(cutoff_hz), str(encoded)],
+        [
+            ffmpeg,
+            "-v",
+            "error",
+            "-y",
+            "-i",
+            str(source),
+            "-ar",
+            "48000",
+            "-c:a",
+            "aac",
+            "-b:a",
+            f"{kbps}k",
+            "-cutoff",
+            str(cutoff_hz),
+            str(encoded),
+        ],
         check=True,
         timeout=600,
     )
     decoded = dest_stem.with_suffix(".wav")
     subprocess.run(
-        [ffmpeg, "-v", "error", "-y", "-i", str(encoded), "-ar", "44100", "-ac", "2",
-         str(decoded)],
+        [ffmpeg, "-v", "error", "-y", "-i", str(encoded), "-ar", "44100", "-ac", "2", str(decoded)],
         check=True,
         timeout=600,
     )
@@ -831,9 +912,7 @@ def separation_impact(ffmpeg: str, kbps: int, cutoff_hz: int) -> dict[str, Any]:
     另一实验的产物也是全零，说明是既有问题，不是本脚本引入的）。
     """
     out: dict[str, Any] = {"ok": False}
-    missing = [
-        str(p) for p in (YT_SYNTH_MIX, YT_VOCAL_REF, YT_INST_REF) if not p.is_file()
-    ]
+    missing = [str(p) for p in (YT_SYNTH_MIX, YT_VOCAL_REF, YT_INST_REF) if not p.is_file()]
     if missing:
         out["error"] = f"缺少真值素材（需先跑 experiments/download_mv.py）：{missing}"
         return out
@@ -855,9 +934,7 @@ def separation_impact(ffmpeg: str, kbps: int, cutoff_hz: int) -> dict[str, Any]:
     for tag, src in [("reference", YT_SYNTH_MIX), ("bilibili_grade", degraded)]:
         target = OUT_DIR / f"sep_{tag}"
         target.mkdir(parents=True, exist_ok=True)
-        separator = Separator(
-            model_file_dir=str(model_dir), output_dir=str(target), log_level=40
-        )
+        separator = Separator(model_file_dir=str(model_dir), output_dir=str(target), log_level=40)
         separator.load_model("htdemucs.yaml")
         separator.separate(str(src))
         runs[tag] = target
@@ -873,9 +950,7 @@ def separation_impact(ffmpeg: str, kbps: int, cutoff_hz: int) -> dict[str, Any]:
         alpha = float(np.dot(est, ref) / np.dot(ref, ref))
         target = alpha * ref
         noise = est - target
-        return float(
-            10 * np.log10(np.dot(target, target) / max(np.dot(noise, noise), 1e-30))
-        )
+        return float(10 * np.log10(np.dot(target, target) / max(np.dot(noise, noise), 1e-30)))
 
     def _stem(tag: str, base: str, name: str) -> Any:
         return _mono(runs[tag] / f"{base}_({name})_htdemucs.wav")
@@ -933,9 +1008,7 @@ def _print_probe_table(probes: list[SampleProbe]) -> None:
         print("  音频档位 :")
         for audio in sorted(probe.audios, key=lambda s: s.format_id):
             measured = (
-                f"{audio.measured_kbps:6.1f} kbps(实测容器)"
-                if audio.measured_kbps
-                else "   n/a"
+                f"{audio.measured_kbps:6.1f} kbps(实测容器)" if audio.measured_kbps else "   n/a"
             )
             print(
                 f"    {audio.format_id:>6} {audio.tier_name:<32} "
@@ -974,9 +1047,7 @@ def main() -> int:
             continue
         # 同码率时取档位 id 更大的那条：bilibili 会把 30232/30280 转出同一份数据，
         # 但 30280 才是"这个稿件能给到的最高档"，报告里记它更能反映真实上限。
-        best_audio = max(
-            probe.audios, key=lambda s: (s.measured_kbps or 0, s.format_id)
-        )
+        best_audio = max(probe.audios, key=lambda s: (s.measured_kbps or 0, s.format_id))
         print(f"\n▌{probe.key}  取 format {best_audio.format_id}")
         if (probe.duration_s or 0) > AUDIO_DOWNLOAD_MAX_DURATION_S:
             audio_facts[probe.key] = {
@@ -993,9 +1064,7 @@ def main() -> int:
                 f"{best_audio.measured_kbps:.1f} kbps（容器口径）"
             )
             continue
-        path = download_stream(
-            probe.url, best_audio.format_id, OUT_DIR / f"audio_{probe.key}"
-        )
+        path = download_stream(probe.url, best_audio.format_id, OUT_DIR / f"audio_{probe.key}")
         if path is None:
             audio_facts[probe.key] = {"error": "下载失败"}
             continue
@@ -1052,9 +1121,7 @@ def main() -> int:
     print("\n" + "=" * 96)
     print("【五】实际下载一个样本并验证时间基准（CLAUDE.md §6.2 的未验证项）")
     print("=" * 96)
-    timing = download_and_check_timing(
-        ffmpeg, ffprobe, SAMPLES[0].url, "sample_mv_repost_4k"
-    )
+    timing = download_and_check_timing(ffmpeg, ffprobe, SAMPLES[0].url, "sample_mv_repost_4k")
     report["full_download"] = timing
     if timing.get("ok"):
         info = timing["timing"]
@@ -1116,7 +1183,9 @@ def main() -> int:
         sep = separation_impact(ffmpeg, kbps, cutoff)
         report["separation_impact"] = sep
         if sep.get("ok"):
-            print(f"  模拟参数  : AAC {sep['simulated_kbps']}k / 低通 {sep['simulated_cutoff_hz']}Hz")
+            print(
+                f"  模拟参数  : AAC {sep['simulated_kbps']}k / 低通 {sep['simulated_cutoff_hz']}Hz"
+            )
             for tag, score in sep["scores"].items():
                 print(
                     f"  {tag:<16} vocals {score['vocals_si_sdr_db']:6.2f} dB   "
@@ -1126,9 +1195,7 @@ def main() -> int:
         else:
             print(f"  ❌ {sep.get('error')}")
 
-    REPORT_PATH.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    REPORT_PATH.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n结构化报告已写入: {REPORT_PATH}")
     return 0
 

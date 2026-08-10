@@ -152,19 +152,16 @@ class LibassMetrics:
                 f"Dialogue: 0,0:00:00.00,0:00:10.00,M,,0,0,0,,"
                 f"{{\\an7\\pos(0,{y})\\bord0\\shad0}}{_escape_ass_text(s)}\n"
             )
-        ass = (
-            _HEADER.format(
-                w=self._w,
-                h=height,
-                font=font.name,
-                size=font.size,
-                bold=-1 if font.bold else 0,
-                italic=-1 if font.italic else 0,
-                spacing=font.spacing,
-                scale_x=font.scale_x,
-            )
-            + "".join(body)
-        )
+        ass = _HEADER.format(
+            w=self._w,
+            h=height,
+            font=font.name,
+            size=font.size,
+            bold=-1 if font.bold else 0,
+            italic=-1 if font.italic else 0,
+            spacing=font.spacing,
+            scale_x=font.scale_x,
+        ) + "".join(body)
 
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "m.ass"
@@ -189,12 +186,23 @@ class LibassMetrics:
 def _run_ffmpeg_gray(ffmpeg: str, ass_path: Path, w: int, h: int) -> bytes:
     escaped = str(ass_path).replace("\\", "/").replace(":", r"\:")
     cmd = [
-        ffmpeg, "-hide_banner", "-loglevel", "error",
-        "-f", "lavfi",
-        "-i", f"color=c=black:s={w}x{h}:d=1:r=1",
-        "-vf", f"ass={escaped}",
-        "-frames:v", "1",
-        "-f", "rawvideo", "-pix_fmt", "gray", "-",
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        f"color=c=black:s={w}x{h}:d=1:r=1",
+        "-vf",
+        f"ass={escaped}",
+        "-frames:v",
+        "1",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "gray",
+        "-",
     ]
     proc = subprocess.run(cmd, capture_output=True, timeout=300)
     if proc.returncode != 0:

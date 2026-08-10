@@ -129,9 +129,7 @@ def uuencode_font(data: bytes) -> list[str]:
             value |= chunk[2]
         for j in range(len(chunk) + 1):
             chars.append(chr(((value >> (18 - 6 * j)) & 0x3F) + 33))
-    return [
-        "".join(chars[i : i + _UU_LINE_WIDTH]) for i in range(0, len(chars), _UU_LINE_WIDTH)
-    ]
+    return ["".join(chars[i : i + _UU_LINE_WIDTH]) for i in range(0, len(chars), _UU_LINE_WIDTH)]
 
 
 def fonts_section(entries: Sequence[tuple[str, bytes]]) -> str:
@@ -356,8 +354,7 @@ def subset_font(
         from fontTools.ttLib import TTCollection, TTFont
     except ImportError as exc:  # pragma: no cover - 取决于运行环境
         msg = (
-            "缺少 fonttools，无法生成预览字体。"
-            "安装命令：uv run --with fonttools --with brotli ..."
+            "缺少 fonttools，无法生成预览字体。安装命令：uv run --with fonttools --with brotli ..."
         )
         raise RuntimeError(msg) from exc
 

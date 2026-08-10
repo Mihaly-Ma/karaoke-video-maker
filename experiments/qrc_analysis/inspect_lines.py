@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """按真实换行切开 LyricContent（不能用 XML 解析器：属性值里的换行会被规范化成空格）"""
+
 import html
 import pathlib
 import re

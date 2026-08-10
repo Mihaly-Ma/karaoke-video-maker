@@ -289,7 +289,7 @@ def lyric_activity_curve(lines: list[tuple[int, int, str]], n_frames: int) -> np
     for start, dur, _ in lines:
         i0 = int(round((start * SR / 1000.0 - N_FFT / 2) / HOP + 0.5))
         i1 = int(round(((start + dur) * SR / 1000.0 - N_FFT / 2) / HOP + 0.5))
-        v[max(0, i0): max(0, min(n_frames, i1))] = 1.0
+        v[max(0, i0) : max(0, min(n_frames, i1))] = 1.0
     w = max(3, int(round(0.6 * SR / HOP)))
     v = np.convolve(v, np.ones(w) / w, mode="same")
     std = v.std()
@@ -301,8 +301,9 @@ def lyric_activity_curve(lines: list[tuple[int, int, str]], n_frames: int) -> np
 # ---------------------------------------------------------------------------
 
 
-def ncc(a: np.ndarray, b: np.ndarray, lag_min: int, lag_max: int,
-        min_overlap: int) -> tuple[np.ndarray, np.ndarray]:
+def ncc(
+    a: np.ndarray, b: np.ndarray, lag_min: int, lag_max: int, min_overlap: int
+) -> tuple[np.ndarray, np.ndarray]:
     """计算 c[L] = corr(a[n], b[n+L])，逐 lag 做皮尔逊归一化。
 
     lag 符号约定：**L>0 表示目标 b 比参照 a 晚 L 帧**。
@@ -389,28 +390,34 @@ def _candidates(lags: np.ndarray, y: np.ndarray, top: int = 4) -> list[tuple[flo
         if not np.isfinite(yy[k]) or yy[k] <= 0:
             break
         out.append((float((lags[k] + _parabolic(y, k)) * HOP_MS), float(y[k])))
-        yy[max(0, k - r): k + r + 1] = -np.inf
+        yy[max(0, k - r) : k + r + 1] = -np.inf
     return out
 
 
-def estimate_offset(env_ref: np.ndarray, env_tgt: np.ndarray,
-                    max_lag_s: float = MAX_LAG_S,
-                    peak_min: float = PEAK_MIN_AUDIO) -> OffsetEstimate:
+def estimate_offset(
+    env_ref: np.ndarray,
+    env_tgt: np.ndarray,
+    max_lag_s: float = MAX_LAG_S,
+    peak_min: float = PEAK_MIN_AUDIO,
+) -> OffsetEstimate:
     """全局偏移估计 + 失败检测。"""
     max_lag = int(round(max_lag_s * SR / HOP))
-    min_ov = max(int(round(MIN_OVERLAP_S * SR / HOP)),
-                 int(MIN_OVERLAP_FRAC * min(len(env_ref), len(env_tgt))))
+    min_ov = max(
+        int(round(MIN_OVERLAP_S * SR / HOP)),
+        int(MIN_OVERLAP_FRAC * min(len(env_ref), len(env_tgt))),
+    )
     lags, y = ncc(env_ref, env_tgt, -max_lag, max_lag, min_ov)
     if len(lags) == 0 or not np.isfinite(y).any():
-        return OffsetEstimate(0.0, 0.0, 0.0, 1.0, float("inf"), 0.0, False, True,
-                              [], "重叠不足，无可用 lag")
+        return OffsetEstimate(
+            0.0, 0.0, 0.0, 1.0, float("inf"), 0.0, False, True, [], "重叠不足，无可用 lag"
+        )
 
     k = int(np.argmax(np.where(np.isfinite(y), y, -np.inf)))
     peak = float(y[k])
     off_frames = lags[k] + _parabolic(y, k)
     excl = int(round(SECOND_PEAK_EXCL_S * SR / HOP))
     mask = np.isfinite(y).copy()
-    mask[max(0, k - excl): k + excl + 1] = False
+    mask[max(0, k - excl) : k + excl + 1] = False
     second = float(np.max(y[mask])) if mask.any() else 0.0
     ratio = second / peak if peak > 1e-9 else 1.0
     width = _half_width_ms(lags, y, k)
@@ -422,17 +429,28 @@ def estimate_offset(env_ref: np.ndarray, env_tgt: np.ndarray,
     if ratio > PEAK_RATIO_MAX:
         reasons.append(f"次峰比 {ratio:.3f} > {PEAK_RATIO_MAX}（存在几乎并列的备选 offset）")
     return OffsetEstimate(
-        offset_ms=float(off_frames * HOP_MS), peak=peak, second_peak=second,
-        peak_ratio=float(ratio), width_ms=width, overlap_s=overlap,
-        reliable=not reasons, ambiguous=bool(ratio > 0.90),
-        candidates=_candidates(lags, y), reason="；".join(reasons),
+        offset_ms=float(off_frames * HOP_MS),
+        peak=peak,
+        second_peak=second,
+        peak_ratio=float(ratio),
+        width_ms=width,
+        overlap_s=overlap,
+        reliable=not reasons,
+        ambiguous=bool(ratio > 0.90),
+        candidates=_candidates(lags, y),
+        reason="；".join(reasons),
     )
 
 
-def segment_offsets(env_ref: np.ndarray, env_tgt: np.ndarray,
-                    center_ms=0.0, search_s: float = MAX_LAG_S,
-                    win_s: float = SEG_WIN_S, hop_s: float = SEG_HOP_S,
-                    peak_min: float = PEAK_MIN_SEG) -> list[SegmentEstimate]:
+def segment_offsets(
+    env_ref: np.ndarray,
+    env_tgt: np.ndarray,
+    center_ms=0.0,
+    search_s: float = MAX_LAG_S,
+    win_s: float = SEG_WIN_S,
+    hop_s: float = SEG_HOP_S,
+    peak_min: float = PEAK_MIN_SEG,
+) -> list[SegmentEstimate]:
     """分段互相关：每段独立估一个偏移，得到 offset(t) 的采样点。
 
     这是"要不要非线性 warp"的唯一判据来源 —— 单个全局互相关无论峰多高，
@@ -458,14 +476,14 @@ def segment_offsets(env_ref: np.ndarray, env_tgt: np.ndarray,
 
     out: list[SegmentEstimate] = []
     for beg in range(0, max(1, len(env_ref) - win + 1), step):
-        seg = env_ref[beg: beg + win]
+        seg = env_ref[beg : beg + win]
         if len(seg) < win:
             break
         t_center = flux_frame_time_ms(beg + win / 2)
         c = int(round(cfn(t_center) / HOP_MS))
         lo, hi = beg + c - search, beg + c + win + search
         pad = max(0, -lo)
-        tgt = env_tgt[max(0, lo): min(len(env_tgt), max(0, hi))]
+        tgt = env_tgt[max(0, lo) : min(len(env_tgt), max(0, hi))]
         if len(tgt) < win + 4:  # 目标侧不够长，这一段没法估
             continue
         lags, y = ncc(seg, tgt, 0, len(tgt) - win, min_overlap=int(0.95 * win))
@@ -477,16 +495,21 @@ def segment_offsets(env_ref: np.ndarray, env_tgt: np.ndarray,
         off_frames = (lo + pad) + (lags[k] + _parabolic(y, k)) - beg
         excl = int(round(0.3 * SR / HOP))
         mask = np.isfinite(y).copy()
-        mask[max(0, k - excl): k + excl + 1] = False
+        mask[max(0, k - excl) : k + excl + 1] = False
         second = float(np.max(y[mask])) if mask.any() else 0.0
         ratio = second / peak if peak > 1e-9 else 1.0
         energy = float(np.mean(np.abs(seg))) / mean_energy
         edge = bool(k <= 1 or k >= len(y) - 2)  # 顶到可搜索边界 = 真值在窗外，不可信
-        out.append(SegmentEstimate(
-            t_ref_ms=t_center, offset_ms=float(off_frames * HOP_MS), peak=peak,
-            peak_ratio=float(ratio), energy=energy,
-            reliable=bool(peak >= peak_min and energy >= 0.3 and not edge),
-        ))
+        out.append(
+            SegmentEstimate(
+                t_ref_ms=t_center,
+                offset_ms=float(off_frames * HOP_MS),
+                peak=peak,
+                peak_ratio=float(ratio),
+                energy=energy,
+                reliable=bool(peak >= peak_min and energy >= 0.3 and not edge),
+            )
+        )
     return out
 
 
@@ -495,8 +518,9 @@ def segment_offsets(env_ref: np.ndarray, env_tgt: np.ndarray,
 # ---------------------------------------------------------------------------
 
 
-def fit_affine_ransac(t: np.ndarray, y: np.ndarray, tol_ms: float = TOL_GOOD_MS,
-                      seed: int = 0) -> tuple[float, float, np.ndarray]:
+def fit_affine_ransac(
+    t: np.ndarray, y: np.ndarray, tol_ms: float = TOL_GOOD_MS, seed: int = 0
+) -> tuple[float, float, np.ndarray]:
     """RANSAC 拟合 offset(t) = a + b·t，返回 (a, b, inlier 掩码)。
 
     必须抗离群：落在纯伴奏段或对唱重叠段的局部互相关会给出离谱值，
@@ -533,7 +557,7 @@ def find_breakpoint(t: np.ndarray, y: np.ndarray) -> tuple[int, float, float]:
     n = len(t)
     best = (0, 0.0, float("inf"))
     for i in range(2, n - 1):
-        left, right = y[: max(1, i - 1)], y[min(n - 1, i + 1):]
+        left, right = y[: max(1, i - 1)], y[min(n - 1, i + 1) :]
         if len(left) < 2 or len(right) < 2:
             continue
         ml, mr = float(np.median(left)), float(np.median(right))
@@ -543,44 +567,70 @@ def find_breakpoint(t: np.ndarray, y: np.ndarray) -> tuple[int, float, float]:
     return best
 
 
-def diagnose(env_ref: np.ndarray, env_tgt: np.ndarray, *,
-             peak_min: float = PEAK_MIN_AUDIO,
-             peak_min_seg: float = PEAK_MIN_SEG,
-             seg_search_s: float = MAX_LAG_S) -> Verdict:
+def diagnose(
+    env_ref: np.ndarray,
+    env_tgt: np.ndarray,
+    *,
+    peak_min: float = PEAK_MIN_AUDIO,
+    peak_min_seg: float = PEAK_MIN_SEG,
+    seg_search_s: float = MAX_LAG_S,
+) -> Verdict:
     """完整的重锚定裁决流程；分段不一致时自动用更短的窗重试一次。
 
     重试的意义：窗越长每段的互相关越可靠，但窗内自身的漂移也越大。
     5000ppm 漂移下 20s 窗内部就要糊掉 100ms，长窗必然失效；短窗能救回来。
     """
-    v = _diagnose_once(env_ref, env_tgt, peak_min=peak_min, peak_min_seg=peak_min_seg,
-                       seg_search_s=seg_search_s)
+    v = _diagnose_once(
+        env_ref, env_tgt, peak_min=peak_min, peak_min_seg=peak_min_seg, seg_search_s=seg_search_s
+    )
     if v.kind in ("needs_manual", "no_match"):
-        v2 = _diagnose_once(env_ref, env_tgt, peak_min=peak_min, peak_min_seg=peak_min_seg,
-                            seg_search_s=seg_search_s, win_s=8.0, hop_s=4.0)
+        v2 = _diagnose_once(
+            env_ref,
+            env_tgt,
+            peak_min=peak_min,
+            peak_min_seg=peak_min_seg,
+            seg_search_s=seg_search_s,
+            win_s=8.0,
+            hop_s=4.0,
+        )
         if v2.kind in ("constant", "linear", "piecewise"):
             v2.notes.insert(0, "（20s 窗判不一致，自动改用 8s 短窗重试后成立）")
             return v2
     return v
 
 
-def _diagnose_once(env_ref: np.ndarray, env_tgt: np.ndarray, *,
-                   peak_min: float = PEAK_MIN_AUDIO,
-                   peak_min_seg: float = PEAK_MIN_SEG,
-                   seg_search_s: float = MAX_LAG_S,
-                   win_s: float = SEG_WIN_S, hop_s: float = SEG_HOP_S) -> Verdict:
+def _diagnose_once(
+    env_ref: np.ndarray,
+    env_tgt: np.ndarray,
+    *,
+    peak_min: float = PEAK_MIN_AUDIO,
+    peak_min_seg: float = PEAK_MIN_SEG,
+    seg_search_s: float = MAX_LAG_S,
+    win_s: float = SEG_WIN_S,
+    hop_s: float = SEG_HOP_S,
+) -> Verdict:
     g = estimate_offset(env_ref, env_tgt, peak_min=peak_min)
     notes: list[str] = []
     nan = math.nan
     if g.ambiguous:
-        notes.append(f"注意：全局次峰比 {g.peak_ratio:.3f}，候选 offset "
-                     + "、".join(f"{o:.0f}ms({v:.3f})" for o, v in g.candidates[:3]))
+        notes.append(
+            f"注意：全局次峰比 {g.peak_ratio:.3f}，候选 offset "
+            + "、".join(f"{o:.0f}ms({v:.3f})" for o, v in g.candidates[:3])
+        )
 
     # 全局互相关只做"是不是同一首曲子"的报告与兜底，**不作为 offset 的最终来源**：
     # 线性漂移会把全局峰打散，分段全量程搜索反而更稳。
     # seg_search_s 默认全量程；模式 B 每段信息量太少，必须收窄到全局估计附近
     # （实测：模式 B 全量程分段搜索在真实素材上给出 35s/-36s 这种彻底散掉的段落估计）
-    segs = segment_offsets(env_ref, env_tgt, center_ms=g.offset_ms, search_s=seg_search_s,
-                           win_s=win_s, hop_s=hop_s, peak_min=peak_min_seg)
+    segs = segment_offsets(
+        env_ref,
+        env_tgt,
+        center_ms=g.offset_ms,
+        search_s=seg_search_s,
+        win_s=win_s,
+        hop_s=hop_s,
+        peak_min=peak_min_seg,
+    )
     used = [s for s in segs if s.reliable]
     seg_frac = len(used) / max(1, len(segs))
     if len(used) < MIN_SEG_USED or seg_frac < 0.25:
@@ -590,23 +640,62 @@ def _diagnose_once(env_ref: np.ndarray, env_tgt: np.ndarray, *,
         # 会让用户去换歌词源，反而更糟。实测 5000ppm 漂移的同曲仍能留下 22% 有效段，
         # 而真正不相关的素材是 0%，所以 15% 是安全的分界。
         kind = "no_match" if (g.peak < peak_min and seg_frac < 0.15) else "needs_manual"
-        notes.append(f"有效段落 {len(used)}/{len(segs)}（{seg_frac:.0%}），全局峰值 {g.peak:.3f}"
-                     f" → {'判定不是同一段音频' if kind == 'no_match' else '证据不足，降级人工确认'}")
-        return Verdict(kind, g.offset_ms, g.offset_ms, 0.0, 0.0, 0.0,
-                       nan, nan, nan, None, None, len(used), len(segs), g, notes, segs)
+        notes.append(
+            f"有效段落 {len(used)}/{len(segs)}（{seg_frac:.0%}），全局峰值 {g.peak:.3f}"
+            f" → {'判定不是同一段音频' if kind == 'no_match' else '证据不足，降级人工确认'}"
+        )
+        return Verdict(
+            kind,
+            g.offset_ms,
+            g.offset_ms,
+            0.0,
+            0.0,
+            0.0,
+            nan,
+            nan,
+            nan,
+            None,
+            None,
+            len(used),
+            len(segs),
+            g,
+            notes,
+            segs,
+        )
 
     t = np.array([s.t_ref_ms for s in used])
     y = np.array([s.offset_ms for s in used])
     a, b, inl = fit_affine_ransac(t, y)
     if inl.mean() < 0.5:
         kind = "no_match" if (g.peak < peak_min and seg_frac < 0.15) else "needs_manual"
-        notes.append(f"分段之间互不同意（RANSAC 内点仅 {inl.mean():.0%}），全局峰值 {g.peak:.3f}"
-                     f" → {'判定不匹配' if kind == 'no_match' else '只能给候选 offset，需人工确认'}")
-        return Verdict(kind, g.offset_ms, g.offset_ms, 0.0, 0.0, 0.0,
-                       nan, nan, nan, None, None, len(used), len(segs), g, notes, segs)
+        notes.append(
+            f"分段之间互不同意（RANSAC 内点仅 {inl.mean():.0%}），全局峰值 {g.peak:.3f}"
+            f" → {'判定不匹配' if kind == 'no_match' else '只能给候选 offset，需人工确认'}"
+        )
+        return Verdict(
+            kind,
+            g.offset_ms,
+            g.offset_ms,
+            0.0,
+            0.0,
+            0.0,
+            nan,
+            nan,
+            nan,
+            None,
+            None,
+            len(used),
+            len(segs),
+            g,
+            notes,
+            segs,
+        )
     resid = np.abs(y - (a + b * t))
-    p50, p90, pmax = (float(np.percentile(resid, 50)), float(np.percentile(resid, 90)),
-                      float(np.max(resid)))
+    p50, p90, pmax = (
+        float(np.percentile(resid, 50)),
+        float(np.percentile(resid, 90)),
+        float(np.max(resid)),
+    )
     span = float(t.max() - t.min())
     drift_total = b * span
     off_center = a + b * float(np.median(t))
@@ -617,28 +706,52 @@ def _diagnose_once(env_ref: np.ndarray, env_tgt: np.ndarray, *,
 
     if p90 <= TOL_GOOD_MS and abs(drift_total) <= TOL_GOOD_MS:
         kind = "constant"
-        notes.append(f"各段偏移一致（p90 残差 {p90:.1f}ms，全曲累计漂移 {drift_total:.1f}ms）"
-                     f"，单一全局 offset 足够")
+        notes.append(
+            f"各段偏移一致（p90 残差 {p90:.1f}ms，全曲累计漂移 {drift_total:.1f}ms）"
+            f"，单一全局 offset 足够"
+        )
     elif p90 <= TOL_GOOD_MS:
         kind = "linear"
-        notes.append(f"线性漂移 {b * 1e6:.0f} ppm，全曲累计 {drift_total:.1f}ms，"
-                     f"需要 offset+scale 仿射变换")
+        notes.append(
+            f"线性漂移 {b * 1e6:.0f} ppm，全曲累计 {drift_total:.1f}ms，需要 offset+scale 仿射变换"
+        )
     elif bp_resid <= TOL_GOOD_MS and abs(step) >= TOL_FLAG_MS:
         kind = "piecewise"
         bp_ms = float((t[bp_idx - 1] + t[bp_idx]) / 2)
         step_ms = float(step)
-        notes.append(f"检出分段错位：断点约 {bp_ms / 1000:.1f}s，台阶 {step:+.0f}ms；"
-                     f"单一仿射不够，必须分段（或 DTW）")
+        notes.append(
+            f"检出分段错位：断点约 {bp_ms / 1000:.1f}s，台阶 {step:+.0f}ms；"
+            f"单一仿射不够，必须分段（或 DTW）"
+        )
     else:
         kind = "needs_manual"
-        notes.append(f"各段偏移既不一致也不是单个台阶（p90 残差 {p90:.0f}ms，最大 {pmax:.0f}ms）"
-                     f"，判定自动校准不可靠，需人工确认")
+        notes.append(
+            f"各段偏移既不一致也不是单个台阶（p90 残差 {p90:.0f}ms，最大 {pmax:.0f}ms）"
+            f"，判定自动校准不可靠，需人工确认"
+        )
     if kind not in ("needs_manual", "no_match") and pmax > TOL_FLAG_MS:
-        notes.append(f"警告：{int(np.sum(resid > TOL_FLAG_MS))} 个段落残差 >{TOL_FLAG_MS:.0f}ms，"
-                     f"应在 UI 上打红标")
-    return Verdict(kind, float(off_center), float(a), float(b), float(b * 1e6),
-                   float(drift_total), p50, p90, pmax, bp_ms, step_ms,
-                   len(used), len(segs), g, notes, segs)
+        notes.append(
+            f"警告：{int(np.sum(resid > TOL_FLAG_MS))} 个段落残差 >{TOL_FLAG_MS:.0f}ms，"
+            f"应在 UI 上打红标"
+        )
+    return Verdict(
+        kind,
+        float(off_center),
+        float(a),
+        float(b),
+        float(b * 1e6),
+        float(drift_total),
+        p50,
+        p90,
+        pmax,
+        bp_ms,
+        step_ms,
+        len(used),
+        len(segs),
+        g,
+        notes,
+        segs,
+    )
 
 
 def build_warp_map(v: Verdict) -> list[tuple[float, float]]:
@@ -669,8 +782,9 @@ def _adsr(n: int, attack: int, decay: float) -> np.ndarray:
     return env
 
 
-def synth_song(duration_s: float = 200.0, bpm: float = 118.0, seed: int = 0,
-               sr: int = SR) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def synth_song(
+    duration_s: float = 200.0, bpm: float = 118.0, seed: int = 0, sr: int = SR
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """合成一段"歌"：鼓组 + 和声垫 + 人声音节，带段落编排与演奏抖动。
 
     刻意加入过门、段落配器变化、±4ms 打点抖动 —— 否则合成信号会是完美周期的，
@@ -695,8 +809,13 @@ def synth_song(duration_s: float = 200.0, bpm: float = 118.0, seed: int = 0,
     def kick(t0: int, amp: float = 0.9) -> None:
         m = int(0.16 * sr)
         f = np.linspace(110, 45, m)
-        place(drums, t0, (np.sin(2 * np.pi * np.cumsum(f) / sr)
-                          * _adsr(m, 20, 0.03 * sr) * amp).astype(np.float32))
+        place(
+            drums,
+            t0,
+            (np.sin(2 * np.pi * np.cumsum(f) / sr) * _adsr(m, 20, 0.03 * sr) * amp).astype(
+                np.float32
+            ),
+        )
 
     def snare(t0: int, amp: float = 0.5) -> None:
         m = int(0.13 * sr)
@@ -741,9 +860,13 @@ def synth_song(duration_s: float = 200.0, bpm: float = 118.0, seed: int = 0,
             tt = np.arange(m) / sr
             f0 = rng.uniform(180, 330) * (1 + 0.01 * np.sin(2 * np.pi * 5.5 * tt))
             ph = 2 * np.pi * np.cumsum(f0) / sr
-            sig = sum(np.sin(k * ph) / (k ** 1.4) for k in (1, 2, 3, 4, 5))
+            sig = sum(np.sin(k * ph) / (k**1.4) for k in (1, 2, 3, 4, 5))
             sig += 0.15 * sps.sosfilt(hp3k, rng.standard_normal(m)) * np.exp(-tt / 0.02)
-            place(vocal, int(t * sr), (sig * _adsr(m, int(0.008 * sr), 0.12 * sr) * 0.45).astype(np.float32))
+            place(
+                vocal,
+                int(t * sr),
+                (sig * _adsr(m, int(0.008 * sr), 0.12 * sr) * 0.45).astype(np.float32),
+            )
             onsets.append(t * 1000.0)
 
     mix = drums + harm + vocal
@@ -784,12 +907,12 @@ def splice(x: np.ndarray, at_s: float, insert_s: float, sr: int = SR) -> np.ndar
     p = int(at_s * sr)
     if insert_s >= 0:
         m = int(insert_s * sr)
-        src = x[p: p + m] * 0.6  # 插入"另一段间奏"，比纯静音更像真实剪辑
+        src = x[p : p + m] * 0.6  # 插入"另一段间奏"，比纯静音更像真实剪辑
         if len(src) < m:
             src = np.pad(src, (0, m - len(src)))
         return np.concatenate([x[:p], src.astype(np.float32), x[p:]])
     m = int(-insert_s * sr)
-    return np.concatenate([x[:p], x[p + m:]])
+    return np.concatenate([x[:p], x[p + m :]])
 
 
 # ---------------------------------------------------------------------------
@@ -845,29 +968,45 @@ def run_synthetic(duration_s: float = 200.0) -> dict:
     t0 = time.time()
     mix, vocal, onsets = synth_song(duration_s=duration_s, seed=7)
     env_ref = onset_envelope(mix)
-    print(f"合成 {len(mix) / SR:.1f}s，人声音节 {len(onsets)} 个；"
-          f"onset 包络 {len(env_ref)} 帧 @ {HOP_MS:.1f}ms（{SR / HOP:.0f}Hz），"
-          f"耗时 {time.time() - t0:.1f}s\n")
+    print(
+        f"合成 {len(mix) / SR:.1f}s，人声音节 {len(onsets)} 个；"
+        f"onset 包络 {len(env_ref)} 帧 @ {HOP_MS:.1f}ms（{SR / HOP:.0f}Hz），"
+        f"耗时 {time.time() - t0:.1f}s\n"
+    )
 
     res: dict = {}
 
     # --- 组1：纯偏移，精度上限 ---
     print("-" * 104)
     print("[组1] 纯偏移注入（目标 = 参照 + 偏移，无其他劣化）—— 精度上限")
-    print(f"{'注入(ms)':>12}{'恢复(ms)':>12}{'误差(ms)':>11}{'峰值':>8}{'次峰比':>8}"
-          f"{'峰宽(ms)':>10}{'重叠(s)':>9}  判定")
+    print(
+        f"{'注入(ms)':>12}{'恢复(ms)':>12}{'误差(ms)':>11}{'峰值':>8}{'次峰比':>8}"
+        f"{'峰宽(ms)':>10}{'重叠(s)':>9}  判定"
+    )
     g1 = []
     for inj in (-8500.0, -3457.0, -1000.0, -137.0, 0.0, 137.0, 501.0, 2003.0, 8500.0, 20000.0):
         est = estimate_offset(env_ref, onset_envelope(shift(mix, inj)))
         err = est.offset_ms - inj
-        g1.append({"injected_ms": inj, "recovered_ms": est.offset_ms, "error_ms": err,
-                   "peak": est.peak, "peak_ratio": est.peak_ratio, "width_ms": est.width_ms})
-        print(f"{inj:>12.1f}{est.offset_ms:>12.2f}{err:>+11.2f}{est.peak:>8.3f}"
-              f"{est.peak_ratio:>8.3f}{est.width_ms:>10.1f}{est.overlap_s:>9.1f}  "
-              f"{'可用' if est.reliable else '不可靠'}")
+        g1.append(
+            {
+                "injected_ms": inj,
+                "recovered_ms": est.offset_ms,
+                "error_ms": err,
+                "peak": est.peak,
+                "peak_ratio": est.peak_ratio,
+                "width_ms": est.width_ms,
+            }
+        )
+        print(
+            f"{inj:>12.1f}{est.offset_ms:>12.2f}{err:>+11.2f}{est.peak:>8.3f}"
+            f"{est.peak_ratio:>8.3f}{est.width_ms:>10.1f}{est.overlap_s:>9.1f}  "
+            f"{'可用' if est.reliable else '不可靠'}"
+        )
     e = [abs(r["error_ms"]) for r in g1]
-    print(f"→ 纯偏移绝对误差：中位 {np.median(e):.2f}ms，最大 {max(e):.2f}ms"
-          f"（帧长 {HOP_MS:.1f}ms，抛物线插值把精度压到亚帧）")
+    print(
+        f"→ 纯偏移绝对误差：中位 {np.median(e):.2f}ms，最大 {max(e):.2f}ms"
+        f"（帧长 {HOP_MS:.1f}ms，抛物线插值把精度压到亚帧）"
+    )
     res["offset_only"] = g1
 
     # --- 组2：场景裁决 ---
@@ -876,53 +1015,90 @@ def run_synthetic(duration_s: float = 200.0) -> dict:
     print("[组2] 场景裁决（含另一份母带的 EQ/压缩/底噪劣化）")
     cases: list[dict] = []
 
-    def add(name: str, tgt: np.ndarray, truth_off: float, truth_ppm: float,
-            expect: str, extra: str = "") -> Verdict:
+    def add(
+        name: str, tgt: np.ndarray, truth_off: float, truth_ppm: float, expect: str, extra: str = ""
+    ) -> Verdict:
         v = diagnose(env_ref, onset_envelope(tgt))
-        cases.append({"name": name, "expect": expect, "verdict": v.kind,
-                      "truth_offset_ms": truth_off, "got_offset_ms": v.global_offset_ms,
-                      "truth_drift_ppm": truth_ppm, "got_drift_ppm": v.drift_ppm,
-                      "resid_p50_ms": v.resid_p50_ms, "resid_p90_ms": v.resid_p90_ms,
-                      "resid_max_ms": v.resid_max_ms, "breakpoint_ms": v.breakpoint_ms,
-                      "step_ms": v.step_ms,
-                      "peak": v.global_est.peak if v.global_est else 0.0,
-                      "peak_ratio": v.global_est.peak_ratio if v.global_est else 1.0,
-                      "n_seg": f"{v.n_seg_used}/{v.n_seg_total}", "extra": extra,
-                      "notes": v.notes})
+        cases.append(
+            {
+                "name": name,
+                "expect": expect,
+                "verdict": v.kind,
+                "truth_offset_ms": truth_off,
+                "got_offset_ms": v.global_offset_ms,
+                "truth_drift_ppm": truth_ppm,
+                "got_drift_ppm": v.drift_ppm,
+                "resid_p50_ms": v.resid_p50_ms,
+                "resid_p90_ms": v.resid_p90_ms,
+                "resid_max_ms": v.resid_max_ms,
+                "breakpoint_ms": v.breakpoint_ms,
+                "step_ms": v.step_ms,
+                "peak": v.global_est.peak if v.global_est else 0.0,
+                "peak_ratio": v.global_est.peak_ratio if v.global_est else 1.0,
+                "n_seg": f"{v.n_seg_used}/{v.n_seg_total}",
+                "extra": extra,
+                "notes": v.notes,
+            }
+        )
         return v
 
     add("纯偏移 +1200ms", shift(mix, 1200.0), 1200.0, 0.0, "constant")
     add("偏移 +1200ms + 另一份母带", shift(remaster(mix), 1200.0), 1200.0, 0.0, "constant")
-    add("偏移 -2500ms + 另一份母带", shift(remaster(mix, seed=3), -2500.0), -2500.0, 0.0, "constant")
-    add("偏移 +18000ms（长片头）+ 母带差异", shift(remaster(mix), 18000.0), 18000.0, 0.0, "constant")
+    add(
+        "偏移 -2500ms + 另一份母带", shift(remaster(mix, seed=3), -2500.0), -2500.0, 0.0, "constant"
+    )
+    add(
+        "偏移 +18000ms（长片头）+ 母带差异", shift(remaster(mix), 18000.0), 18000.0, 0.0, "constant"
+    )
     for factor, tag in ((1.0002, "200ppm"), (1.001, "1000ppm"), (1.005, "5000ppm")):
         total = (factor - 1) * duration_s * 1000
         expect = "linear" if abs(total) > TOL_GOOD_MS else "constant"
         if factor >= 1.004:  # 0.4% 以上的速率差超出本方法的自动处理范围，只能降级人工
             expect = "needs_manual"
-        add(f"线性拉伸 {tag} + 偏移 800ms", shift(rate_change(remaster(mix), factor), 800.0),
-            800.0, (factor - 1) * 1e6, expect, extra=f"真值漂移累计 {total:+.0f}ms")
+        add(
+            f"线性拉伸 {tag} + 偏移 800ms",
+            shift(rate_change(remaster(mix), factor), 800.0),
+            800.0,
+            (factor - 1) * 1e6,
+            expect,
+            extra=f"真值漂移累计 {total:+.0f}ms",
+        )
     for at_s, ins_s in ((110.0, 6.0), (95.0, -4.0), (120.0, 0.35)):
-        add(f"分段错位：{at_s:.0f}s 处 {ins_s:+.2f}s", shift(splice(remaster(mix), at_s, ins_s), 700.0),
-            700.0, 0.0, "piecewise", extra=f"真值断点 {at_s:.0f}s，台阶 {ins_s * 1000:+.0f}ms")
+        add(
+            f"分段错位：{at_s:.0f}s 处 {ins_s:+.2f}s",
+            shift(splice(remaster(mix), at_s, ins_s), 700.0),
+            700.0,
+            0.0,
+            "piecewise",
+            extra=f"真值断点 {at_s:.0f}s，台阶 {ins_s * 1000:+.0f}ms",
+        )
     other, _, _ = synth_song(duration_s=duration_s, bpm=132.0, seed=99)
     add("负对照：不相关的另一首曲子", other, math.nan, math.nan, "no_match")
     add("负对照：目标只有 12s（重叠不足）", mix[: 12 * SR], math.nan, math.nan, "no_match")
-    add("负对照：目标是白噪声", (np.random.default_rng(5).standard_normal(len(mix)) * 0.3).astype(np.float32),
-        math.nan, math.nan, "no_match")
+    add(
+        "负对照：目标是白噪声",
+        (np.random.default_rng(5).standard_normal(len(mix)) * 0.3).astype(np.float32),
+        math.nan,
+        math.nan,
+        "no_match",
+    )
 
-    hdr = (f"{'用例':<40}{'期望':<14}{'裁决':<14}{'offset':>10}{'真值':>10}{'ppm':>8}"
-           f"{'p50残差':>9}{'p90残差':>9}{'峰值':>7}{'次峰比':>7}{'有效段':>8}")
+    hdr = (
+        f"{'用例':<40}{'期望':<14}{'裁决':<14}{'offset':>10}{'真值':>10}{'ppm':>8}"
+        f"{'p50残差':>9}{'p90残差':>9}{'峰值':>7}{'次峰比':>7}{'有效段':>8}"
+    )
     print(hdr)
     print("-" * 104)
     n_pass = 0
     for c in cases:
         ok = c["verdict"] == c["expect"]
         n_pass += ok
-        print(f"{c['name']:<40}{c['expect']:<14}{c['verdict']:<14}"
-              f"{c['got_offset_ms']:>10.1f}{_fmt(c['truth_offset_ms']):>10}"
-              f"{c['got_drift_ppm']:>8.0f}{_fmt(c['resid_p50_ms']):>9}{_fmt(c['resid_p90_ms']):>9}"
-              f"{c['peak']:>7.3f}{c['peak_ratio']:>7.3f}{c['n_seg']:>8}  {'OK' if ok else '判错'}")
+        print(
+            f"{c['name']:<40}{c['expect']:<14}{c['verdict']:<14}"
+            f"{c['got_offset_ms']:>10.1f}{_fmt(c['truth_offset_ms']):>10}"
+            f"{c['got_drift_ppm']:>8.0f}{_fmt(c['resid_p50_ms']):>9}{_fmt(c['resid_p90_ms']):>9}"
+            f"{c['peak']:>7.3f}{c['peak_ratio']:>7.3f}{c['n_seg']:>8}  {'OK' if ok else '判错'}"
+        )
     print(f"\n裁决正确率：{n_pass}/{len(cases)}")
     for c in cases:
         if c["extra"] or c["breakpoint_ms"] is not None:
@@ -936,25 +1112,38 @@ def run_synthetic(duration_s: float = 200.0) -> dict:
     print()
     print("-" * 104)
     print("[组3] 分段错位检出阈值扫描（在 110s 处插入不同长度，看多小的台阶还能检出）")
-    print(f"{'注入台阶(ms)':>14}{'裁决':>15}{'检出台阶(ms)':>14}{'断点(s)':>10}"
-          f"{'p90残差':>10}{'max残差':>10}")
+    print(
+        f"{'注入台阶(ms)':>14}{'裁决':>15}{'检出台阶(ms)':>14}{'断点(s)':>10}"
+        f"{'p90残差':>10}{'max残差':>10}"
+    )
     sweep = []
     for ins_ms in (10, 20, 40, 80, 160, 320, 1000, 3000):
         tgt = shift(splice(remaster(mix), 110.0, ins_ms / 1000.0), 700.0)
         v = diagnose(env_ref, onset_envelope(tgt))
-        sweep.append({"injected_step_ms": ins_ms, "verdict": v.kind, "step_ms": v.step_ms,
-                      "breakpoint_ms": v.breakpoint_ms, "resid_p90_ms": v.resid_p90_ms,
-                      "resid_max_ms": v.resid_max_ms})
-        print(f"{ins_ms:>14d}{v.kind:>15}{_fmt(v.step_ms):>14}"
-              f"{_fmt(v.breakpoint_ms / 1000 if v.breakpoint_ms else None):>10}"
-              f"{_fmt(v.resid_p90_ms):>10}{_fmt(v.resid_max_ms):>10}")
+        sweep.append(
+            {
+                "injected_step_ms": ins_ms,
+                "verdict": v.kind,
+                "step_ms": v.step_ms,
+                "breakpoint_ms": v.breakpoint_ms,
+                "resid_p90_ms": v.resid_p90_ms,
+                "resid_max_ms": v.resid_max_ms,
+            }
+        )
+        print(
+            f"{ins_ms:>14d}{v.kind:>15}{_fmt(v.step_ms):>14}"
+            f"{_fmt(v.breakpoint_ms / 1000 if v.breakpoint_ms else None):>10}"
+            f"{_fmt(v.resid_p90_ms):>10}{_fmt(v.resid_max_ms):>10}"
+        )
     res["step_sweep"] = sweep
 
     # --- 组4：模式 B ---
     print()
     print("-" * 104)
     print("[组4] 模式 B：歌词逐字起点脉冲串 ↔ 音频 onset 包络（无参照录音时的唯一出路）")
-    print(f"{'注入(ms)':>12}{'目标轨':>12}{'恢复(ms)':>12}{'误差(ms)':>11}{'峰值':>8}{'次峰比':>8}  判定")
+    print(
+        f"{'注入(ms)':>12}{'目标轨':>12}{'恢复(ms)':>12}{'误差(ms)':>11}{'峰值':>8}{'次峰比':>8}  判定"
+    )
     mode_b = []
     for inj in (-1500.0, 137.0, 1200.0, 4000.0, 18000.0):
         for tag, base in (("整轨混音", mix), ("分离后人声", vocal)):
@@ -962,16 +1151,28 @@ def run_synthetic(duration_s: float = 200.0) -> dict:
             env_l = impulse_envelope(onsets, len(env_t))
             est = estimate_offset(env_l, env_t, peak_min=PEAK_MIN_MODE_B)
             err = est.offset_ms - inj
-            mode_b.append({"injected_ms": inj, "track": tag, "recovered_ms": est.offset_ms,
-                           "error_ms": err, "peak": est.peak, "peak_ratio": est.peak_ratio,
-                           "reliable": est.reliable})
-            print(f"{inj:>12.1f}{tag:>12}{est.offset_ms:>12.1f}{err:>+11.1f}"
-                  f"{est.peak:>8.3f}{est.peak_ratio:>8.3f}  {'可用' if est.reliable else '不可靠'}")
+            mode_b.append(
+                {
+                    "injected_ms": inj,
+                    "track": tag,
+                    "recovered_ms": est.offset_ms,
+                    "error_ms": err,
+                    "peak": est.peak,
+                    "peak_ratio": est.peak_ratio,
+                    "reliable": est.reliable,
+                }
+            )
+            print(
+                f"{inj:>12.1f}{tag:>12}{est.offset_ms:>12.1f}{err:>+11.1f}"
+                f"{est.peak:>8.3f}{est.peak_ratio:>8.3f}  {'可用' if est.reliable else '不可靠'}"
+            )
     for tag in ("整轨混音", "分离后人声"):
         e = [abs(r["error_ms"]) for r in mode_b if r["track"] == tag]
         p = [r["peak"] for r in mode_b if r["track"] == tag]
-        print(f"→ {tag}：绝对误差 中位 {np.median(e):.1f}ms / 最大 {max(e):.1f}ms，"
-              f"峰值中位 {np.median(p):.3f}")
+        print(
+            f"→ {tag}：绝对误差 中位 {np.median(e):.1f}ms / 最大 {max(e):.1f}ms，"
+            f"峰值中位 {np.median(p):.3f}"
+        )
     res["mode_b"] = mode_b
 
     # --- 组5：hop 对精度与成本的影响 ---
@@ -990,8 +1191,16 @@ def run_synthetic(duration_s: float = 200.0) -> dict:
         k = int(np.argmax(np.where(np.isfinite(y), y, -np.inf)))
         off = (lags[k] + _parabolic(y, k)) * hop / SR * 1000.0
         dt = time.time() - t1
-        hop_res.append({"hop": hop, "hop_ms": hop / SR * 1000, "recovered_ms": off,
-                        "error_ms": off - 137.0, "frames": len(er), "sec": dt})
+        hop_res.append(
+            {
+                "hop": hop,
+                "hop_ms": hop / SR * 1000,
+                "recovered_ms": off,
+                "error_ms": off - 137.0,
+                "frames": len(er),
+                "sec": dt,
+            }
+        )
         print(f"{hop / SR * 1000:>10.1f}{off:>12.2f}{off - 137.0:>+11.2f}{len(er):>10d}{dt:>9.2f}")
     res["hop_sweep"] = hop_res
     return res
@@ -1021,13 +1230,19 @@ def run_real() -> dict:
     onsets, lines = parse_qrc_word_onsets(qrc_path)
     print(f"MV 音轨    : {len(mv) / SR:.2f}s  ({mv_path.name})")
     print(f"Art Track  : {len(art) / SR:.2f}s  ({art_path.name})  —— 视为母带侧参照")
-    print(f"QRC        : {len(lines)} 行有效歌词，{len(onsets)} 个逐字起点，"
-          f"跨度 {onsets.min() / 1000:.2f}s ~ {onsets.max() / 1000:.2f}s")
+    print(
+        f"QRC        : {len(lines)} 行有效歌词，{len(onsets)} 个逐字起点，"
+        f"跨度 {onsets.min() / 1000:.2f}s ~ {onsets.max() / 1000:.2f}s"
+    )
     print(f"时长差     : MV − Art = {(len(mv) - len(art)) / SR:+.2f}s\n")
 
     env_mv, env_art = onset_envelope(mv), onset_envelope(art)
-    out: dict = {"mv_dur_s": len(mv) / SR, "art_dur_s": len(art) / SR,
-                 "qrc_words": len(onsets), "qrc_lines": len(lines)}
+    out: dict = {
+        "mv_dur_s": len(mv) / SR,
+        "art_dur_s": len(art) / SR,
+        "qrc_words": len(onsets),
+        "qrc_lines": len(lines),
+    }
 
     print("-" * 104)
     print("[实测 A] Art Track → MV（模式 A，音频↔音频）")
@@ -1041,8 +1256,9 @@ def run_real() -> dict:
     print("-" * 104)
     print("[实测 B] QRC 时间轴 → Art Track（模式 B 的自检：QRC 本就打在母带上，应≈0）")
     env_l_art = impulse_envelope(onsets, len(env_art))
-    v_qa = diagnose(env_l_art, env_art, peak_min=PEAK_MIN_MODE_B, peak_min_seg=0.10,
-                    seg_search_s=2.0)
+    v_qa = diagnose(
+        env_l_art, env_art, peak_min=PEAK_MIN_MODE_B, peak_min_seg=0.10, seg_search_s=2.0
+    )
     _print_verdict(v_qa)
     out["qrc_to_art"] = asdict(v_qa)
 
@@ -1050,8 +1266,7 @@ def run_real() -> dict:
     print("-" * 104)
     print("[实测 C] QRC 时间轴 → MV 音轨（模式 B，生产链路真正要做的事）")
     env_l_mv = impulse_envelope(onsets, len(env_mv))
-    v_qm = diagnose(env_l_mv, env_mv, peak_min=PEAK_MIN_MODE_B, peak_min_seg=0.10,
-                    seg_search_s=2.0)
+    v_qm = diagnose(env_l_mv, env_mv, peak_min=PEAK_MIN_MODE_B, peak_min_seg=0.10, seg_search_s=2.0)
     _print_verdict(v_qm)
     out["qrc_to_mv"] = asdict(v_qm)
 
@@ -1062,26 +1277,34 @@ def run_real() -> dict:
         vac = voice_activity_curve(wav)
         lac = lyric_activity_curve(lines, len(vac))
         est = estimate_offset(lac, vac, peak_min=0.10)
-        print(f"  QRC → {tag:<10}: offset {est.offset_ms:+9.1f}ms   峰值 {est.peak:.3f}   "
-              f"次峰比 {est.peak_ratio:.3f}   峰宽 {est.width_ms:.0f}ms   "
-              f"{'可用' if est.reliable else '不可靠'}")
+        print(
+            f"  QRC → {tag:<10}: offset {est.offset_ms:+9.1f}ms   峰值 {est.peak:.3f}   "
+            f"次峰比 {est.peak_ratio:.3f}   峰宽 {est.width_ms:.0f}ms   "
+            f"{'可用' if est.reliable else '不可靠'}"
+        )
         out[f"mode_b2_{tag}"] = asdict(est)
 
     closure = v_qm.global_offset_ms - (v_qa.global_offset_ms + v_am.global_offset_ms)
     print()
     print("-" * 104)
     print("[闭环校验] offset(QRC→MV) − [offset(QRC→Art) + offset(Art→MV)]")
-    print(f"  {v_qm.global_offset_ms:.1f} − ({v_qa.global_offset_ms:.1f} + "
-          f"{v_am.global_offset_ms:.1f}) = {closure:+.1f} ms")
-    print(f"  → 闭合误差 {abs(closure):.1f}ms。三条测量彼此独立，闭合误差即整套方法在"
-          f"真实素材上的实测一致性。")
+    print(
+        f"  {v_qm.global_offset_ms:.1f} − ({v_qa.global_offset_ms:.1f} + "
+        f"{v_am.global_offset_ms:.1f}) = {closure:+.1f} ms"
+    )
+    print(
+        f"  → 闭合误差 {abs(closure):.1f}ms。三条测量彼此独立，闭合误差即整套方法在"
+        f"真实素材上的实测一致性。"
+    )
     out["closure_error_ms"] = float(closure)
 
     # 用 A 的结果把 QRC 时间轴映射到 MV，看首句落点是否合理
     off = v_am.global_offset_ms + v_qa.global_offset_ms
-    print(f"  → 推荐重锚定：把 QRC 全部时间 {off:+.0f}ms 后贴到 MV；"
-          f"首个发音字 {onsets.min():.0f}ms → MV {onsets.min() + off:.0f}ms "
-          f"（{(onsets.min() + off) / 1000:.2f}s）")
+    print(
+        f"  → 推荐重锚定：把 QRC 全部时间 {off:+.0f}ms 后贴到 MV；"
+        f"首个发音字 {onsets.min():.0f}ms → MV {onsets.min() + off:.0f}ms "
+        f"（{(onsets.min() + off) / 1000:.2f}s）"
+    )
     out["recommended_offset_ms"] = float(off)
 
     print()
@@ -1091,11 +1314,18 @@ def run_real() -> dict:
     probes = [
         ("模式A 正例 Art→MV", env_art, env_mv),
         ("模式B 正例 QRC→MV", impulse_envelope(onsets, len(env_mv)), env_mv),
-        ("负对照 随机时间点→MV",
-         impulse_envelope(np.sort(rng.uniform(0, float(onsets.max()), len(onsets))), len(env_mv)),
-         env_mv),
-        ("负对照 QRC→白噪声", impulse_envelope(onsets, len(env_mv)),
-         onset_envelope(rng.standard_normal(len(mv)).astype(np.float32) * 0.3)),
+        (
+            "负对照 随机时间点→MV",
+            impulse_envelope(
+                np.sort(rng.uniform(0, float(onsets.max()), len(onsets))), len(env_mv)
+            ),
+            env_mv,
+        ),
+        (
+            "负对照 QRC→白噪声",
+            impulse_envelope(onsets, len(env_mv)),
+            onset_envelope(rng.standard_normal(len(mv)).astype(np.float32) * 0.3),
+        ),
     ]
     zs = {}
     for name, a, b in probes:
@@ -1109,8 +1339,10 @@ def run_real() -> dict:
         z = float((yy[k] - np.median(bg)) / bg.std())
         zs[name] = {"peak": float(yy[k]), "z": z, "offset_ms": float(lg[k] * HOP_MS)}
         print(f"  {name:<24}: 峰值 {yy[k]:.3f}   z {z:5.1f}   offset {lg[k] * HOP_MS:+9.1f}ms")
-    print("  → 正例 z 与负对照 z 重叠（音乐的自相似让 lag 背景分布重尾），z 不可用；"
-          "峰值高度仍是模式 A 唯一有效的匹配判据。")
+    print(
+        "  → 正例 z 与负对照 z 重叠（音乐的自相似让 lag 背景分布重尾），z 不可用；"
+        "峰值高度仍是模式 A 唯一有效的匹配判据。"
+    )
     out["z_stat_probe"] = zs
 
     out.update(run_codec_timebase_probe())
@@ -1129,7 +1361,10 @@ def run_codec_timebase_probe() -> dict:
     pairs = {
         "MV: opus(251) → aac(140)": (d / "mv_opus.webm", d / "mv_aac.m4a"),
         "Art: opus(251) → aac(140)": (d / "art_opus.webm", d / "art_aac.m4a"),
-        "MV: opus(251) → 合并出的 mkv": (d / "mv_opus.webm", WORKSPACE / "media" / "audio_16k_mono.wav"),
+        "MV: opus(251) → 合并出的 mkv": (
+            d / "mv_opus.webm",
+            WORKSPACE / "media" / "audio_16k_mono.wav",
+        ),
     }
     avail = {k: v for k, v in pairs.items() if v[0].exists() and v[1].exists()}
     if not avail:
@@ -1148,19 +1383,28 @@ def run_codec_timebase_probe() -> dict:
 def _print_verdict(v: Verdict) -> None:
     g = v.global_est
     print(f"  裁决        : {v.kind}")
-    print(f"  全局 offset : {v.global_offset_ms:+.1f} ms  （拟合 a={v.fit_a_ms:+.1f}ms, "
-          f"b={v.drift_ppm:.0f}ppm，全曲累计 {v.drift_total_ms:+.1f}ms）")
+    print(
+        f"  全局 offset : {v.global_offset_ms:+.1f} ms  （拟合 a={v.fit_a_ms:+.1f}ms, "
+        f"b={v.drift_ppm:.0f}ppm，全曲累计 {v.drift_total_ms:+.1f}ms）"
+    )
     if g:
-        print(f"  峰值/次峰比 : {g.peak:.3f} / {g.peak_ratio:.3f}   峰宽 {g.width_ms:.1f}ms   "
-              f"重叠 {g.overlap_s:.1f}s")
+        print(
+            f"  峰值/次峰比 : {g.peak:.3f} / {g.peak_ratio:.3f}   峰宽 {g.width_ms:.1f}ms   "
+            f"重叠 {g.overlap_s:.1f}s"
+        )
         print("  候选 offset : " + "、".join(f"{o:+.0f}ms({c:.3f})" for o, c in g.candidates))
-    print(f"  分段残差    : p50 {_fmt(v.resid_p50_ms)} / p90 {_fmt(v.resid_p90_ms)} / "
-          f"max {_fmt(v.resid_max_ms)} ms   有效段 {v.n_seg_used}/{v.n_seg_total}")
+    print(
+        f"  分段残差    : p50 {_fmt(v.resid_p50_ms)} / p90 {_fmt(v.resid_p90_ms)} / "
+        f"max {_fmt(v.resid_max_ms)} ms   有效段 {v.n_seg_used}/{v.n_seg_total}"
+    )
     if v.segments:
         s = [x for x in v.segments if x.reliable]
         if s:
-            print("  分段 offset : " + " ".join(f"{x.offset_ms:.0f}" for x in s[:14])
-                  + (" ..." if len(s) > 14 else ""))
+            print(
+                "  分段 offset : "
+                + " ".join(f"{x.offset_ms:.0f}" for x in s[:14])
+                + (" ..." if len(s) > 14 else "")
+            )
     for n in v.notes:
         print(f"  · {n}")
 
@@ -1174,8 +1418,11 @@ def main() -> int:
     ap.add_argument("--skip-real", action="store_true")
     args = ap.parse_args()
 
-    report: dict = {"config": {k: v for k, v in globals().items()
-                               if k.isupper() and isinstance(v, (int, float, str))}}
+    report: dict = {
+        "config": {
+            k: v for k, v in globals().items() if k.isupper() and isinstance(v, (int, float, str))
+        }
+    }
     t0 = time.time()
     if args.ref and args.tgt:
         print(f"自定义素材：{args.ref} → {args.tgt}")

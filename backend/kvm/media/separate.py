@@ -231,10 +231,19 @@ def _finalize_outputs(
     elif all(k in stems for k in ("Drums", "Bass", "Other")):
         mixed = run_output_dir / "instrumental.wav"
         cmd = [
-            ffmpeg_bin, "-y",
-            "-i", stems["Bass"], "-i", stems["Drums"], "-i", stems["Other"],
-            "-filter_complex", "[0:a][1:a][2:a]amix=inputs=3:duration=longest:normalize=0[out]",
-            "-map", "[out]", str(mixed),
+            ffmpeg_bin,
+            "-y",
+            "-i",
+            stems["Bass"],
+            "-i",
+            stems["Drums"],
+            "-i",
+            stems["Other"],
+            "-filter_complex",
+            "[0:a][1:a][2:a]amix=inputs=3:duration=longest:normalize=0[out]",
+            "-map",
+            "[out]",
+            str(mixed),
         ]
         run_cancelable(handle, cmd)
         out["instrumental_path"] = str(mixed)
@@ -293,11 +302,18 @@ def run_separate(handle: JobHandle, store: ProjectStore, req: SeparateRequest) -
     handle.report(0.05, f"启动分离子进程（模型 {model_filename}，首次运行可能需要下载模型权重）…")
 
     cmd = [
-        sys.executable, "-m", "kvm.media.separate", "--worker",
-        "--audio", str(audio_path),
-        "--model", model_filename,
-        "--model-dir", str(model_dir),
-        "--output-dir", str(run_output_dir),
+        sys.executable,
+        "-m",
+        "kvm.media.separate",
+        "--worker",
+        "--audio",
+        str(audio_path),
+        "--model",
+        model_filename,
+        "--model-dir",
+        str(model_dir),
+        "--output-dir",
+        str(run_output_dir),
     ]
 
     produced_files: dict[str, str] = {}
@@ -313,7 +329,9 @@ def run_separate(handle: JobHandle, store: ProjectStore, req: SeparateRequest) -
         if kind == "progress":
             # 子进程自己上报 0~1 的相对进度，映射到父任务的 [0.1, 0.9] 区间，
             # 给缓存检查/写工程留出可见的头尾
-            handle.report(0.1 + 0.8 * float(event.get("progress", 0.0)), str(event.get("message", "")))
+            handle.report(
+                0.1 + 0.8 * float(event.get("progress", 0.0)), str(event.get("message", ""))
+            )
         elif kind == "error":
             last_error = str(event.get("message", "分离子进程报告了未知错误"))
         elif kind == "done":
@@ -385,8 +403,7 @@ def _ensure_dependencies() -> None:
                 "event": "progress",
                 "progress": 0.02,
                 "message": (
-                    f"缺少分离依赖（{names}），正在自动安装到应用私有环境，"
-                    "首次可能需要下载数百 MB…"
+                    f"缺少分离依赖（{names}），正在自动安装到应用私有环境，首次可能需要下载数百 MB…"
                 ),
             }
         )
@@ -450,9 +467,7 @@ def _resolve_supported_model(requested: str, supported: list[str]) -> str:
         return candidates[0]
 
     detail = (
-        f"（前缀匹配到多个候选：{'、'.join(candidates[:5])}，需写完整文件名）"
-        if candidates
-        else ""
+        f"（前缀匹配到多个候选：{'、'.join(candidates[:5])}，需写完整文件名）" if candidates else ""
     )
     msg = (
         f"无法识别的分离模型标识：{requested}{detail}。"
@@ -522,7 +537,9 @@ def _worker_main(argv: list[str]) -> int:
     try:
         from audio_separator.separator import Separator
     except ImportError as exc:
-        _emit({"event": "error", "message": f"导入 audio-separator 失败：{exc}。{_DEPENDENCY_HINT}"})
+        _emit(
+            {"event": "error", "message": f"导入 audio-separator 失败：{exc}。{_DEPENDENCY_HINT}"}
+        )
         return 1
 
     # audio-separator 内部用标准 logging 输出，必须转到 stderr，

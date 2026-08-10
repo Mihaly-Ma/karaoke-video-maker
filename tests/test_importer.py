@@ -156,9 +156,7 @@ def test_tid_survives_split_and_merge_on_real_sample() -> None:
     project = _project(parse_qrc(_SEKISHUNKA_QRC.read_text(encoding="utf-8")))
     before = _tids(project.lines)
 
-    index, target = next(
-        (i, ln) for i, ln in enumerate(project.lines) if len(ln.tokens) >= 4
-    )
+    index, target = next((i, ln) for i, ln in enumerate(project.lines) if len(ln.tokens) >= 4)
     ops.split_line(project, line_id=target.id, token_index=2)
     assert _tids(project.lines) == before
 

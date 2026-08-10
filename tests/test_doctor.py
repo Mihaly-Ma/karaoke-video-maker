@@ -205,7 +205,9 @@ def test_非阻断项失败不拦启动() -> None:
 
 def test_报告里失败项必须带处理办法() -> None:
     report = doctor.Report(
-        checks=[doctor.CheckResult("x", "某项", "fail", "炸了", fix="来一发这个命令", blocking=True)],
+        checks=[
+            doctor.CheckResult("x", "某项", "fail", "炸了", fix="来一发这个命令", blocking=True)
+        ],
         generated_at="现在",
     )
     text = doctor.render_report(report)

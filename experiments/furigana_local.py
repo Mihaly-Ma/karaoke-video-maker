@@ -234,18 +234,12 @@ def split_furigana(surface: str, reading: str) -> tuple[list[RubySpan], str]:
     if match is None:
         # 无解：降级为整块一个 ruby（nicokara 风格里整词注音是可接受的）
         first = next(i for i, (k, _) in enumerate(blocks) if k == "need")
-        last = (
-            len(blocks)
-            - 1
-            - next(i for i, (k, _) in enumerate(reversed(blocks)) if k == "need")
-        )
+        last = len(blocks) - 1 - next(i for i, (k, _) in enumerate(reversed(blocks)) if k == "need")
         start = sum(len(t) for _, t in blocks[:first])
         end = sum(len(t) for _, t in blocks[: last + 1])
         return [RubySpan(start, end, reading)], "whole"
 
-    spans = [
-        RubySpan(s, e, match.group(i + 1)) for i, (s, e) in enumerate(need_positions)
-    ]
+    spans = [RubySpan(s, e, match.group(i + 1)) for i, (s, e) in enumerate(need_positions)]
     return spans, "anchor" if len(need_positions) else "none"
 
 
@@ -364,14 +358,10 @@ class FugashiAnalyzer:
             if pron:
                 pron = strip_pron_marks(pron)
             if not kana or kana == "*":
-                kana = (
-                    to_katakana(w.surface) if all(is_kana(c) for c in w.surface) else ""
-                )
+                kana = to_katakana(w.surface) if all(is_kana(c) for c in w.surface) else ""
             if not pron or pron == "*":
                 pron = kana
-            tokens.append(
-                Token(w.surface, kana, pron, f.pos1 or "", f.pos2 or "", self.name)
-            )
+            tokens.append(Token(w.surface, kana, pron, f.pos1 or "", f.pos2 or "", self.name))
         return tokens
 
 
@@ -501,9 +491,7 @@ def section_env() -> dict:
 
 
 def section_analyzers(lines: list[str]) -> dict:
-    head(
-        "第 1 节 形态素分析器对比（fugashi+unidic-lite vs SudachiPy vs pyopenjtalk NJD）"
-    )
+    head("第 1 节 形态素分析器对比（fugashi+unidic-lite vs SudachiPy vs pyopenjtalk NJD）")
 
     # 记号 / 空白 token 必须排除后再比：SudachiPy 会把「、」和空格的 reading_form
     # 给成「キゴウ」，fugashi 给空，NJD 原样保留 —— 这不是读音准确率的差异
@@ -572,9 +560,7 @@ def section_analyzers(lines: list[str]) -> dict:
             for t in toks
         ]
         print(f"    {a.name}")
-        print(
-            f"      display : {to_hiragana(''.join(t.reading_display for t in toks))}"
-        )
+        print(f"      display : {to_hiragana(''.join(t.reading_display for t in toks))}")
         print(f"      phonetic: {''.join(t.reading_phonetic for t in toks)}")
 
     return {
@@ -634,9 +620,7 @@ def section_okurigana(lines: list[str]) -> dict:
             }
         )
         mark = "OK " if ok and cover else "NG "
-        pretty = (
-            " ".join(f"{surface[s:e]}→{to_hiragana(rt)}" for s, e, rt in got) or "(无)"
-        )
+        pretty = " ".join(f"{surface[s:e]}→{to_hiragana(rt)}" for s, e, rt in got) or "(无)"
         print(f"  {mark}{surface:<6} {to_hiragana(reading):<10} [{method:<6}] {pretty}")
         if not ok:
             print(f"       期望 {expect}  实得 {got}")
@@ -674,9 +658,7 @@ def section_okurigana(lines: list[str]) -> dict:
     print(f"    降级整块     whole  : {whole} ({whole / max(total, 1):.1%})")
     print(f"    纯假名无需注音 none : {none_} ({none_ / max(total, 1):.1%})")
     print(f"    ruby 覆盖不变式失败 : {cover_fail}")
-    print(
-        f"    降级样本：{[s['surface'] + '/' + s['reading'] for s in fallback_samples]}"
-    )
+    print(f"    降级样本：{[s['surface'] + '/' + s['reading'] for s in fallback_samples]}")
 
     return {
         "cases_passed": passed,
@@ -748,9 +730,7 @@ def section_double_form(lines: list[str]) -> dict:
         gh = pyopenjtalk.g2p(h)
         gk = pyopenjtalk.g2p(k)
         same = gh == gk
-        kana_pairs.append(
-            {"hira": h, "kata": k, "g2p_hira": gh, "g2p_kata": gk, "same": same}
-        )
+        kana_pairs.append({"hira": h, "kata": k, "g2p_hira": gh, "g2p_kata": gk, "same": same})
         print(f"    {'一致' if same else '不一致'}  {h}")
         print(f"        平假名 → {gh}")
         print(f"        片假名 → {gk}")
@@ -896,9 +876,7 @@ def section_double_form(lines: list[str]) -> dict:
             )
         )
         # 乙：逐 token 规则推导（词性来自原文分析）
-        route_b = "".join(
-            derive_phonetic(t.reading_display, t.pos1, t.pos2) for t in toks
-        )
+        route_b = "".join(derive_phonetic(t.reading_display, t.pos1, t.pos2) for t in toks)
         if norm(route_a) == norm(ref):
             ok_a += 1
         elif len(bad_a) < 12:
@@ -908,9 +886,7 @@ def section_double_form(lines: list[str]) -> dict:
         elif len(bad_b) < 12:
             bad_b.append({"line": ln, "ref": ref, "got": route_b})
 
-    print(
-        f"    路线甲（纯假名串重新喂 g2p）行级正确 {ok_a}/{n_line} = {ok_a / max(n_line, 1):.1%}"
-    )
+    print(f"    路线甲（纯假名串重新喂 g2p）行级正确 {ok_a}/{n_line} = {ok_a / max(n_line, 1):.1%}")
     print(
         f"    路线乙（已知词性的逐 token 规则）行级正确 {ok_b}/{n_line} = {ok_b / max(n_line, 1):.1%}"
     )
@@ -1067,9 +1043,7 @@ def section_ateji() -> dict:
             got[a.name] = "".join(t.reading_display for t in toks)
         any_hit = any(v == sung for v in got.values())
         hit += any_hit
-        rows.append(
-            {"surface": surface, "sung": sung, "analyzers": got, "hit": any_hit}
-        )
+        rows.append({"surface": surface, "sung": sung, "analyzers": got, "hit": any_hit})
         print(f"  {surface}（实唱 {to_hiragana(sung)}）")
         for k, v in got.items():
             mark = "命中" if v == sung else "不同"
@@ -1088,8 +1062,7 @@ def section_ateji() -> dict:
         ov_ok += cover and inv
         pretty = " ".join(f"{surface[s.s : s.e]}→{to_hiragana(s.rt)}" for s in spans)
         print(
-            f"    {'OK ' if cover and inv else 'NG '}{surface:<6} [{method}] {pretty}"
-            f"  mora={moras}"
+            f"    {'OK ' if cover and inv else 'NG '}{surface:<6} [{method}] {pretty}  mora={moras}"
         )
     print(f"  手工覆盖后仍满足不变式：{ov_ok}/{len(ateji)}")
 
@@ -1154,9 +1127,7 @@ def main() -> int:
 
     section_conclusion()
 
-    REPORT_FILE.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    REPORT_FILE.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     head("报告已写出")
     print(f"  {REPORT_FILE}")
     return 0

@@ -86,7 +86,10 @@ def _parse_fraction(value: str | None) -> float | None:
 def _ffprobe_json(ffprobe_bin: str, path: Path) -> dict[str, Any]:
     proc = subprocess.run(
         [ffprobe_bin, "-v", "error", "-show_format", "-show_streams", "-of", "json", str(path)],
-        capture_output=True, text=True, timeout=60, check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
     )
     return json.loads(proc.stdout or "{}")
 
@@ -109,7 +112,9 @@ def probe_track(ffprobe_bin: str, path: Path) -> TrackProbe:
     audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
     video = next((s for s in streams if s.get("codec_type") == "video"), None)
 
-    duration_raw = fmt.get("duration") or (audio or {}).get("duration") or (video or {}).get("duration")
+    duration_raw = (
+        fmt.get("duration") or (audio or {}).get("duration") or (video or {}).get("duration")
+    )
     size_raw = fmt.get("size")
     try:
         size_bytes = int(size_raw) if size_raw else path.stat().st_size
@@ -125,7 +130,9 @@ def probe_track(ffprobe_bin: str, path: Path) -> TrackProbe:
         audio_codec=str(audio.get("codec_name") or "") if audio else "",
         width=int(video["width"]) if video and video.get("width") else None,
         height=int(video["height"]) if video and video.get("height") else None,
-        fps=_parse_fraction((video or {}).get("avg_frame_rate") or (video or {}).get("r_frame_rate"))
+        fps=_parse_fraction(
+            (video or {}).get("avg_frame_rate") or (video or {}).get("r_frame_rate")
+        )
         if video
         else None,
         video_codec=str(video.get("codec_name") or "") if video else "",

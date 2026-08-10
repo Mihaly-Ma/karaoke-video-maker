@@ -152,10 +152,20 @@ def probe_formats(url: str, video_id: str) -> ProbeResult:
     assert info is not None, f"extract_info 对 {url} 返回了 None"
 
     formats = info.get("formats") or []
-    video_only = [f for f in formats if f.get("vcodec") not in (None, "none") and f.get("acodec") in (None, "none")]
-    audio_only = [f for f in formats if f.get("acodec") not in (None, "none") and f.get("vcodec") in (None, "none")]
-    best_video = max(video_only, key=lambda f: (f.get("height") or 0, f.get("tbr") or 0), default=None)
-    best_audio = max(audio_only, key=lambda f: (f.get("abr") or 0), default=None)
+    video_only = [
+        f
+        for f in formats
+        if f.get("vcodec") not in (None, "none") and f.get("acodec") in (None, "none")
+    ]
+    audio_only = [
+        f
+        for f in formats
+        if f.get("acodec") not in (None, "none") and f.get("vcodec") in (None, "none")
+    ]
+    best_video = max(
+        video_only, key=lambda f: (f.get("height") or 0, f.get("tbr") or 0), default=None
+    )
+    best_audio = max(audio_only, key=lambda f: f.get("abr") or 0, default=None)
 
     return ProbeResult(
         video_id=video_id,
@@ -208,7 +218,9 @@ def verify_mv_identity(probe: ProbeResult) -> list[str]:
         problems.append(f"标题缺少关键词 {_EXPECTED_TITLE_KEYWORDS}，实际标题 {probe.title!r}")
     lo, hi = _EXPECTED_DURATION_RANGE_S
     if not (lo <= probe.duration_s <= hi):
-        problems.append(f"时长 {probe.duration_s}s 不在预期区间 [{lo}, {hi}]（可能拿到了 Art Track 或原版）")
+        problems.append(
+            f"时长 {probe.duration_s}s 不在预期区间 [{lo}, {hi}]（可能拿到了 Art Track 或原版）"
+        )
     return problems
 
 
@@ -316,9 +328,7 @@ def probe_timing(path: Path, ffmpeg_bin: str) -> TimingProbe:
         if raw is not None:
             pts_values.append(float(raw))
 
-    deltas_ms = [
-        (pts_values[i + 1] - pts_values[i]) * 1000.0 for i in range(len(pts_values) - 1)
-    ]
+    deltas_ms = [(pts_values[i + 1] - pts_values[i]) * 1000.0 for i in range(len(pts_values) - 1)]
     pts_delta_mean_ms = statistics.fmean(deltas_ms) if deltas_ms else None
     pts_delta_stdev_ms = statistics.pstdev(deltas_ms) if len(deltas_ms) > 1 else None
     # 阈值 0.5ms：CFR 编码的帧间隔抖动理论上应为 0（受限于时间基精度），
@@ -326,9 +336,15 @@ def probe_timing(path: Path, ffmpeg_bin: str) -> TimingProbe:
     is_cfr = (pts_delta_stdev_ms is not None) and (pts_delta_stdev_ms < 0.5)
 
     return TimingProbe(
-        container_start_time_s=float(fmt["start_time"]) if fmt.get("start_time") is not None else None,
-        video_stream_start_time_s=float(v_stream["start_time"]) if v_stream.get("start_time") is not None else None,
-        audio_stream_start_time_s=float(a_stream["start_time"]) if a_stream.get("start_time") is not None else None,
+        container_start_time_s=float(fmt["start_time"])
+        if fmt.get("start_time") is not None
+        else None,
+        video_stream_start_time_s=float(v_stream["start_time"])
+        if v_stream.get("start_time") is not None
+        else None,
+        audio_stream_start_time_s=float(a_stream["start_time"])
+        if a_stream.get("start_time") is not None
+        else None,
         video_r_frame_rate=r_rate,
         video_avg_frame_rate=avg_rate,
         rate_fields_agree=rate_fields_agree,
@@ -463,7 +479,11 @@ def main() -> int:
         print(f"audio_44k.wav      : {audio_44k} ({report.audio_44k_duration_s:.3f}s)")
         print(f"audio_16k_mono.wav : {audio_16k} ({report.audio_16k_mono_duration_s:.3f}s)")
 
-        start = report.merged_container_timing.container_start_time_s if report.merged_container_timing else None
+        start = (
+            report.merged_container_timing.container_start_time_s
+            if report.merged_container_timing
+            else None
+        )
         if start is not None:
             if start > 0.001:
                 video_dur = report.mv_probe.duration_s if report.mv_probe else None

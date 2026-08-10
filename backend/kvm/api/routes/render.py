@@ -286,9 +286,7 @@ def generate_ass(body: AssRequest, request: Request) -> AssResponse:
 
 
 @router.get("/preview.ass", response_class=PlainTextResponse)
-def preview_ass(
-    project_id: str, request: Request, embed_fonts: bool = False
-) -> PlainTextResponse:
+def preview_ass(project_id: str, request: Request, embed_fonts: bool = False) -> PlainTextResponse:
     """与 `/ass` 等价，但以 `text/plain` 返回，便于前端直接把响应体喂给
     JASSUB 的 `subContent`（JASSUB 吃的是原始 ASS 文本，不是 JSON 包装）。
 

@@ -543,9 +543,7 @@ class AssBuilder:
             return []
         start_ms, end_ms = window
 
-        credits = [
-            ln.text for ln in p.lines if ln.is_metadata and " - " not in ln.text
-        ]
+        credits = [ln.text for ln in p.lines if ln.is_metadata and " - " not in ln.text]
         t0, t1 = _ass_time(start_ms), _ass_time(end_ms)
         cx = p.video_width // 2
         # 填充与描边成对取，理由同引导点：描边是配色的一部分，不是固定的黑边
@@ -621,16 +619,12 @@ class AssBuilder:
                 token_x.append(x0 + (sadv[ci - 1] if 0 < ci <= len(sadv) else 0))
 
             y = base_y + (ln.slot % 2) * row_h
-            out.append(
-                _LaidOutLine(line=ln, x0=x0, y=y, token_x=token_x, scale=scale)
-            )
+            out.append(_LaidOutLine(line=ln, x0=x0, y=y, token_x=token_x, scale=scale))
         return out
 
     # ---- 事件生成 ----
 
-    def _emit_line(
-        self, lo: _LaidOutLine, ruby_size: int, window: tuple[int, int]
-    ) -> list[str]:
+    def _emit_line(self, lo: _LaidOutLine, ruby_size: int, window: tuple[int, int]) -> list[str]:
         p = self._p
         st = p.style
         ln = lo.line
@@ -670,10 +664,7 @@ class AssBuilder:
                 f"\\an7\\pos({lo.x0},{lo.y}){sc}{fad}"
                 f"\\1c{pal.unsung_fill}\\3c{pal.unsung_outline}{seg_clip}"
             )
-            events.append(
-                f"Dialogue: 0,{t_show},{t_hide},Main,,0,0,0,,"
-                f"{{{base_tags}}}{body}\n"
-            )
+            events.append(f"Dialogue: 0,{t_show},{t_hide},Main,,0,0,0,,{{{base_tags}}}{body}\n")
 
             # 顶层：已唱色 + 逐 token 推进的 clip。
             # 推进起点取本段左界、终点最远只到本段右界，所以这一个 clip
@@ -694,8 +685,7 @@ class AssBuilder:
                 x_to = lo.token_x[i + 1]
                 clip_tags.append(f"\\t({rel_a},{rel_b},\\clip({seg_x0},0,{x_to},{h}))")
             events.append(
-                f"Dialogue: 1,{t_show},{t_hide},Main,,0,0,0,,"
-                f"{{{''.join(clip_tags)}}}{body}\n"
+                f"Dialogue: 1,{t_show},{t_hide},Main,,0,0,0,,{{{''.join(clip_tags)}}}{body}\n"
             )
 
         # 注音行
@@ -761,9 +751,7 @@ class AssBuilder:
                 continue
             step = tk.dur_ms / n
             for i in range(n):
-                out.append(
-                    (int(tk.start_ms + step * i), int(tk.start_ms + step * (i + 1)))
-                )
+                out.append((int(tk.start_ms + step * i), int(tk.start_ms + step * (i + 1))))
         return out
 
     def _char_x(self, lo: _LaidOutLine) -> list[int]:
@@ -843,10 +831,7 @@ def _choose_split(line: Line, adv: list[int], avail: int) -> int:
         cum.append(adv[ci - 1] if 0 < ci <= len(adv) else 0)
 
     total = cum[-1]
-    feasible = [
-        i for i in range(1, n)
-        if cum[i - 1] <= avail and (total - cum[i - 1]) <= avail
-    ]
+    feasible = [i for i in range(1, n) if cum[i - 1] <= avail and (total - cum[i - 1]) <= avail]
     if not feasible:
         # 一刀切不开，就在放得下的最远处切，剩下的交给下一轮继续拆
         feasible = [i for i in range(1, n) if cum[i - 1] <= avail]
@@ -918,9 +903,7 @@ def _find_credit_window(
     return None
 
 
-def _layout_ruby(
-    spans: list, widths: list[int], char_x: list[int], min_gap: int
-) -> list[tuple]:
+def _layout_ruby(spans: list, widths: list[int], char_x: list[int], min_gap: int) -> list[tuple]:
     """解决注音溢出（spill）：注音比基字宽时的重排。
 
     注音理想上居中于基字格位，但假名往往比汉字宽（「桜」82px 对「さくら」111px），
@@ -939,9 +922,7 @@ def _layout_ruby(
             continue
         bx0, bx1 = char_x[r.start], char_x[r.end]
         center = (bx0 + bx1) / 2.0
-        items.append(
-            {"r": r, "w": w, "x0": center - w / 2.0, "bx0": bx0, "bx1": bx1}
-        )
+        items.append({"r": r, "w": w, "x0": center - w / 2.0, "bx0": bx0, "bx1": bx1})
     if not items:
         return []
 

@@ -30,10 +30,16 @@ def probe_video(ffmpeg: str, path: Path) -> dict:
     """探测分辨率与时长。ffprobe 与 ffmpeg 同目录。"""
     ffprobe = str(Path(ffmpeg).with_name("ffprobe"))
     cmd = [
-        ffprobe, "-v", "error",
-        "-select_streams", "v:0",
-        "-show_entries", "stream=width,height,r_frame_rate:format=duration,start_time",
-        "-of", "json", str(path),
+        ffprobe,
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height,r_frame_rate:format=duration,start_time",
+        "-of",
+        "json",
+        str(path),
     ]
     out = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     if out.returncode != 0:
@@ -79,10 +85,20 @@ def burn(
     if duration_s is not None:
         cmd += ["-t", f"{duration_s}"]
     cmd += [
-        "-vf", f"ass={esc}",
-        "-c:v", "libx264", "-crf", str(crf), "-preset", "medium",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "192k",
+        "-vf",
+        f"ass={esc}",
+        "-c:v",
+        "libx264",
+        "-crf",
+        str(crf),
+        "-preset",
+        "medium",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
     ]
     if audio is not None:
         cmd += ["-map", "0:v:0", "-map", "1:a:0"]
@@ -104,8 +120,17 @@ def _extract_audio(ffmpeg: str, video: Path, out: Path) -> Path:
     本项目的素材实测 start_time=0，但换源时必须重新核算。
     """
     cmd = [
-        ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-        "-i", str(video), "-vn", "-c:a", "pcm_s16le", str(out),
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(video),
+        "-vn",
+        "-c:a",
+        "pcm_s16le",
+        str(out),
     ]
     proc = subprocess.run(cmd, capture_output=True, timeout=1800)
     if proc.returncode != 0:
@@ -121,10 +146,20 @@ def _mix_audio(ffmpeg: str, base: Path, overlay: Path, out: Path) -> Path:
     伴奏音量会被直接砍半，听起来像是引导声"压过"了伴奏。
     """
     cmd = [
-        ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-        "-i", str(base), "-i", str(overlay),
-        "-filter_complex", "amix=inputs=2:normalize=0:duration=first",
-        "-c:a", "pcm_s16le", str(out),
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(base),
+        "-i",
+        str(overlay),
+        "-filter_complex",
+        "amix=inputs=2:normalize=0:duration=first",
+        "-c:a",
+        "pcm_s16le",
+        str(out),
     ]
     proc = subprocess.run(cmd, capture_output=True, timeout=1800)
     if proc.returncode != 0:
@@ -142,60 +177,81 @@ def main() -> int:
     ap.add_argument("--ass-out", type=Path, default=None)
     ap.add_argument("--audio", type=Path, default=None, help="替换音轨（OFF VOCAL）")
     ap.add_argument(
-        "--offset-ms", type=int, default=62,
-        help="全局偏移。歌词源轴对准商业录音，MV 音轨与之有偏差；"
-             "赤春花实测 Art→MV 为 +62ms",
+        "--offset-ms",
+        type=int,
+        default=62,
+        help="全局偏移。歌词源轴对准商业录音，MV 音轨与之有偏差；赤春花实测 Art→MV 为 +62ms",
     )
     ap.add_argument("--font", default="Noto Sans CJK JP")
     ap.add_argument("--font-size", type=int, default=0, help="0 表示按分辨率自动")
     ap.add_argument(
-        "--drums", type=Path, default=None,
+        "--drums",
+        type=Path,
+        default=None,
         help="鼓组 stem，用于节拍检测（引导点踩拍）。缺省则用 --audio 或视频音轨",
     )
     ap.add_argument(
-        "--guide-vocals", type=Path, default=None,
+        "--guide-vocals",
+        type=Path,
+        default=None,
         help="人声 stem。给出后会合成引导声（ガイドメロディ）并混入 --audio",
     )
     # 引导声参数全部走 CLI：合适的阈值与音色因曲速、唱法而异，写死常量等于逼人改代码
     guide_defaults = GuideConfig()
     ap.add_argument(
-        "--guide-gain", type=float, default=guide_defaults.gain,
+        "--guide-gain",
+        type=float,
+        default=guide_defaults.gain,
         help=f"引导声音量（RMS 口径，默认 {guide_defaults.gain}，约低于伴奏 5dB）",
     )
     ap.add_argument(
-        "--guide-timbre", choices=TIMBRES, default=guide_defaults.timbre,
+        "--guide-timbre",
+        choices=TIMBRES,
+        default=guide_defaults.timbre,
         help="引导声音色。square 穿透力最好、最接近卡拉OK 引导音；sine 最不抢原曲",
     )
     ap.add_argument(
-        "--guide-max-harmonics", type=int, default=guide_defaults.max_harmonics,
+        "--guide-max-harmonics",
+        type=int,
+        default=guide_defaults.max_harmonics,
         help="谐波数上限（实际还会按奈奎斯特再截断防混叠）。越大越亮",
     )
     ap.add_argument(
-        "--guide-no-quantize", action="store_true",
+        "--guide-no-quantize",
+        action="store_true",
         help="不把音高吸附到半音格。关掉量化会退回照搬实测 f0 的旧行为，听感偏人声",
     )
     ap.add_argument(
-        "--guide-legato-ms", type=float, default=guide_defaults.legato_gap_s * 1000,
+        "--guide-legato-ms",
+        type=float,
+        default=guide_defaults.legato_gap_s * 1000,
         help="短于此的音符间隙做 legato 桥接（辅音/换气），更长的才算真正的休止",
     )
     ap.add_argument(
-        "--guide-min-note-ms", type=float, default=guide_defaults.min_note_s * 1000,
+        "--guide-min-note-ms",
+        type=float,
+        default=guide_defaults.min_note_s * 1000,
         help="短于此的音符并入音高最接近的邻居（滑音碎片），而不是丢弃",
     )
     ap.add_argument(
-        "--guide-voicing-db", type=float, default=guide_defaults.voicing_drop_db,
+        "--guide-voicing-db",
+        type=float,
+        default=guide_defaults.voicing_drop_db,
         help="发声判定门限：帧能量低于演唱响度基准（p95）这么多 dB 就算没在唱。"
-             "调低会补上更多空洞但可能填进休止，调高相反",
+        "调低会补上更多空洞但可能填进休止，调高相反",
     )
     ap.add_argument(
-        "--guide-pitch-median", type=int, default=guide_defaults.pitch_median_frames,
+        "--guide-pitch-median",
+        type=int,
+        default=guide_defaults.pitch_median_frames,
         help="音高中值滤波窗口（奇数帧，每帧 10ms，1 表示关闭）。"
-             "压掉 CREPE 偶发的孤立跳变，避免被切分放大成错音",
+        "压掉 CREPE 偶发的孤立跳变，避免被切分放大成错音",
     )
     ap.add_argument(
-        "--guide-crepe-model", choices=("full", "tiny"), default=guide_defaults.crepe_model,
-        help="CREPE 音高模型。tiny（2MB）比 full（89MB）快很多但更容易走音，"
-             "纯 CPU 机器上可换",
+        "--guide-crepe-model",
+        choices=("full", "tiny"),
+        default=guide_defaults.crepe_model,
+        help="CREPE 音高模型。tiny（2MB）比 full（89MB）快很多但更容易走音，纯 CPU 机器上可换",
     )
     ap.add_argument("--no-beat", action="store_true", help="跳过节拍检测")
     ap.add_argument("--start", type=float, default=None, help="截取起点秒（用于试渲染）")
@@ -206,14 +262,18 @@ def main() -> int:
     ffmpeg = _find_ffmpeg()
     info = probe_video(ffmpeg, args.video)
     print(f"ffmpeg   : {ffmpeg}")
-    print(f"视频     : {info['width']}x{info['height']}  "
-          f"{info['duration']:.3f}s  start_time={info['start_time']}")
+    print(
+        f"视频     : {info['width']}x{info['height']}  "
+        f"{info['duration']:.3f}s  start_time={info['start_time']}"
+    )
     if abs(info["start_time"]) > 1e-6:
         print(f"⚠️ 容器起始 PTS 非零（{info['start_time']}s），ASS 绝对时间需核算")
 
     proj = load_project(
-        args.parsed, args.kana,
-        video_width=info["width"], video_height=info["height"],
+        args.parsed,
+        args.kana,
+        video_width=info["width"],
+        video_height=info["height"],
         global_offset_ms=args.offset_ms,
     )
     st = proj.style
@@ -232,8 +292,10 @@ def main() -> int:
     proj.palettes = {
         "main": VoicePalette(
             name="main",
-            unsung_fill="&H00FFFFFF&", unsung_outline="&H00202020&",
-            sung_fill="&H00FF9010&", sung_outline="&H00501800&",
+            unsung_fill="&H00FFFFFF&",
+            unsung_outline="&H00202020&",
+            sung_fill="&H00FF9010&",
+            sung_outline="&H00501800&",
         )
     }
 
@@ -301,8 +363,13 @@ def main() -> int:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     print("烧录中…")
     burn(
-        ffmpeg, args.video, ass_path, args.out,
-        audio=audio_track, start_s=args.start, duration_s=args.duration,
+        ffmpeg,
+        args.video,
+        ass_path,
+        args.out,
+        audio=audio_track,
+        start_s=args.start,
+        duration_s=args.duration,
     )
     size_mb = args.out.stat().st_size / 1024 / 1024
     print(f"完成     : {args.out}  ({size_mb:.1f} MB)")

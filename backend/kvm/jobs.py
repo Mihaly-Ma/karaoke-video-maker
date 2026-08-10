@@ -233,7 +233,9 @@ class JobManager:
                 self._update(job_id, state="cancelled", message="已取消")
                 self._run_cleanup(job_id)
             else:
-                self._update(job_id, state="done", progress=1.0, message="完成", result=result or {})
+                self._update(
+                    job_id, state="done", progress=1.0, message="完成", result=result or {}
+                )
                 with self._lock:
                     self._cleanups.pop(job_id, None)  # 成功了，产出文件不清理
         finally:

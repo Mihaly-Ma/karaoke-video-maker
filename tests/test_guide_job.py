@@ -100,11 +100,11 @@ def test_默认参数与合成层默认值一致() -> None:
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("gain", 5.0),          # 上界 0.4
-        ("gain", 0.0),          # 下界 0.02
-        ("max_harmonics", 0),   # 至少 1
+        ("gain", 5.0),  # 上界 0.4
+        ("gain", 0.0),  # 下界 0.02
+        ("max_harmonics", 0),  # 至少 1
         ("max_harmonics", 999),
-        ("voicing_drop_db", 0.0),   # 上界 −12
+        ("voicing_drop_db", 0.0),  # 上界 −12
         ("voicing_drop_db", -80.0),
         ("legato_gap_ms", -1),
         ("legato_gap_ms", 5000),
@@ -205,7 +205,9 @@ def test_worker_命令带齐五个参数(tmp_path: Path) -> None:
         tmp_path / "v.wav",
         tmp_path / "out.wav",
         260.0,
-        GuideParamsDTO(gain=0.2, timbre="saw", max_harmonics=4, voicing_drop_db=-30, legato_gap_ms=80),
+        GuideParamsDTO(
+            gain=0.2, timbre="saw", max_harmonics=4, voicing_drop_db=-30, legato_gap_ms=80
+        ),
     )
     assert "--worker" in cmd
     assert cmd[cmd.index("--gain") + 1] == "0.2"
@@ -252,7 +254,7 @@ def test_撤销回到旧参数但保留产物(store: ProjectStore, tmp_path: Pat
     store.update_derived(created.id, _register)
 
     restored = store.undo(created.id)
-    assert restored.guide.gain == 0.11          # 参数回到上一组
+    assert restored.guide.gain == 0.11  # 参数回到上一组
     assert restored.guide_audio_path == str(guide)  # 产物没被撤没
     assert restored.guide_signature == "sig-new"
 

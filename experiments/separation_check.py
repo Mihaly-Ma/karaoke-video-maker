@@ -274,7 +274,9 @@ class DemucsMpsResult:
     has_nan: bool | None
 
 
-def check_demucs_mps(audio_path: Path, devices: tuple[str, ...] = ("mps", "cpu")) -> list[DemucsMpsResult]:
+def check_demucs_mps(
+    audio_path: Path, devices: tuple[str, ...] = ("mps", "cpu")
+) -> list[DemucsMpsResult]:
     """直接用裸 demucs 库（不经 audio-separator）在给定设备上跑一次 htdemucs 前向。
 
     这是对"Demucs 因复数张量/自定义算子与 MPS 不兼容"这个说法的直接实测，
@@ -500,32 +502,69 @@ def synthesize_test_mix(duration_s: int = 30) -> Path:
 
     subprocess.run(
         [
-            ffmpeg, "-y",
-            "-f", "lavfi", "-i", f"sine=frequency=440:duration={duration_s}:sample_rate=44100",
-            "-af", "vibrato=f=6:d=0.5,tremolo=f=4:d=0.25,volume=0.9",
-            "-ac", "2", str(vocal_ref), "-loglevel", "error",
+            ffmpeg,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency=440:duration={duration_s}:sample_rate=44100",
+            "-af",
+            "vibrato=f=6:d=0.5,tremolo=f=4:d=0.25,volume=0.9",
+            "-ac",
+            "2",
+            str(vocal_ref),
+            "-loglevel",
+            "error",
         ],
         check=True,
     )
     subprocess.run(
         [
-            ffmpeg, "-y",
-            "-f", "lavfi", "-i", f"sine=frequency=110:duration={duration_s}:sample_rate=44100",
-            "-f", "lavfi", "-i", f"sine=frequency=220:duration={duration_s}:sample_rate=44100",
-            "-f", "lavfi", "-i",
+            ffmpeg,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency=110:duration={duration_s}:sample_rate=44100",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency=220:duration={duration_s}:sample_rate=44100",
+            "-f",
+            "lavfi",
+            "-i",
             f"anoisesrc=color=pink:duration={duration_s}:amplitude=0.25:sample_rate=44100",
             "-filter_complex",
             "[0:a][1:a][2:a]amix=inputs=3:duration=longest:normalize=0,volume=0.6[out]",
-            "-map", "[out]", "-ac", "2", str(instr_ref), "-loglevel", "error",
+            "-map",
+            "[out]",
+            "-ac",
+            "2",
+            str(instr_ref),
+            "-loglevel",
+            "error",
         ],
         check=True,
     )
     subprocess.run(
         [
-            ffmpeg, "-y",
-            "-i", str(vocal_ref), "-i", str(instr_ref),
-            "-filter_complex", "[0:a][1:a]amix=inputs=2:duration=longest:normalize=0[out]",
-            "-map", "[out]", "-ac", "2", "-ar", "44100", str(mix), "-loglevel", "error",
+            ffmpeg,
+            "-y",
+            "-i",
+            str(vocal_ref),
+            "-i",
+            str(instr_ref),
+            "-filter_complex",
+            "[0:a][1:a]amix=inputs=2:duration=longest:normalize=0[out]",
+            "-map",
+            "[out]",
+            "-ac",
+            "2",
+            "-ar",
+            "44100",
+            str(mix),
+            "-loglevel",
+            "error",
         ],
         check=True,
     )

@@ -176,8 +176,13 @@ class YtDlpManager:
         已经 import 进内存的旧 extractor 不会因为装了新包就换掉。
         """
         return [
-            "uv", "pip", "install", "-U", "--pre",
-            "--target", str(self._private_dir / "python" / "site-packages"),
+            "uv",
+            "pip",
+            "install",
+            "-U",
+            "--pre",
+            "--target",
+            str(self._private_dir / "python" / "site-packages"),
             "yt-dlp[default]",
         ]
 
@@ -463,9 +468,7 @@ class StreamSelector:
             if others:
                 rationale.append(
                     "落选音频档："
-                    + "、".join(
-                        f"{a.stream_id}={a.effective_kbps:.0f}等效k" for a in others
-                    )
+                    + "、".join(f"{a.stream_id}={a.effective_kbps:.0f}等效k" for a in others)
                 )
         else:
             rationale.append("⚠ 没有可用的独立音频流")
@@ -490,8 +493,7 @@ class StreamSelector:
 
         if best_audio is None and best_video is not None:
             rationale.append(
-                "⚠ 只有合流格式：音频质量被视频档位绑架，"
-                "此时按音频反推档位，宁可牺牲画质"
+                "⚠ 只有合流格式：音频质量被视频档位绑架，此时按音频反推档位，宁可牺牲画质"
             )
 
         parts: list[str] = []
@@ -571,9 +573,7 @@ class VideoProvider(ABC):
 
     def _throttle(self) -> None:
         """按站点节流。B站的风控（code -352 / v_voucher）对突发请求敏感。"""
-        gap = self.capabilities.min_request_interval_s - (
-            time.monotonic() - self._last_request_at
-        )
+        gap = self.capabilities.min_request_interval_s - (time.monotonic() - self._last_request_at)
         if gap > 0:
             time.sleep(gap)
         self._last_request_at = time.monotonic()
@@ -689,11 +689,21 @@ class VideoProvider(ABC):
             _, info = self._with_retry(_run, f"下载 {target.canonical_url}")
         except RuntimeError as exc:
             return DownloadResult(
-                ok=False, site=self.site, media_id=target.media_id, path=None,
-                title="", uploader=None, duration_s=None, upload_date=None,
-                source_url=target.canonical_url, selected_video_id=None,
-                selected_audio_id=None, audio_family=None, audio_kbps=None,
-                audio_sample_rate_hz=None, error=str(exc),
+                ok=False,
+                site=self.site,
+                media_id=target.media_id,
+                path=None,
+                title="",
+                uploader=None,
+                duration_s=None,
+                upload_date=None,
+                source_url=target.canonical_url,
+                selected_video_id=None,
+                selected_audio_id=None,
+                audio_family=None,
+                audio_kbps=None,
+                audio_sample_rate_hz=None,
+                error=str(exc),
             )
 
         hits = sorted(dest_dir.glob(stem + ".*"))
@@ -809,8 +819,12 @@ class YouTubeProvider(VideoProvider):
                 hint="播放列表，需要选择具体一集",
             )
         return ResolvedTarget(
-            site=self.site, kind=TargetKind.UNSUPPORTED, canonical_url=url,
-            media_id="", raw_url=url, hint="无法从 URL 提取视频 id",
+            site=self.site,
+            kind=TargetKind.UNSUPPORTED,
+            canonical_url=url,
+            media_id="",
+            raw_url=url,
+            hint="无法从 URL 提取视频 id",
         )
 
     def _annotate(self, probe: MediaProbe, info: dict[str, Any]) -> None:
@@ -889,23 +903,31 @@ class BilibiliProvider(VideoProvider):
 
         if self._COLLECTION_RE.search(url):
             return ResolvedTarget(
-                site=self.site, kind=TargetKind.COLLECTION, canonical_url=url,
+                site=self.site,
+                kind=TargetKind.COLLECTION,
+                canonical_url=url,
                 media_id=(query.get("sid") or [parsed.path.rsplit("/", 1)[-1]])[0],
-                raw_url=url, hint="UP 主合集，需要选择具体一集",
+                raw_url=url,
+                hint="UP 主合集，需要选择具体一集",
             )
         ss_match = self._SS_RE.search(url)
         if ss_match:
             return ResolvedTarget(
-                site=self.site, kind=TargetKind.COLLECTION,
+                site=self.site,
+                kind=TargetKind.COLLECTION,
                 canonical_url=f"https://www.bilibili.com/bangumi/play/{ss_match.group(1)}",
-                media_id=ss_match.group(1), raw_url=url, hint="番剧整季，需要选择具体一集",
+                media_id=ss_match.group(1),
+                raw_url=url,
+                hint="番剧整季，需要选择具体一集",
             )
         ep_match = self._EP_RE.search(url)
         if ep_match:
             return ResolvedTarget(
-                site=self.site, kind=TargetKind.SINGLE,
+                site=self.site,
+                kind=TargetKind.SINGLE,
                 canonical_url=f"https://www.bilibili.com/bangumi/play/{ep_match.group(1)}",
-                media_id=ep_match.group(1), raw_url=url,
+                media_id=ep_match.group(1),
+                raw_url=url,
                 hint="番剧单集；游客画质上限 480P，且多数需大会员才有高清",
             )
         bv_match = self._BV_RE.search(url)
@@ -916,23 +938,32 @@ class BilibiliProvider(VideoProvider):
                 # 只保留 p，丢掉 spm_id_from / vd_source 等跟踪参数：
                 # 它们不影响解析但会让缓存键、日志、工程文件里的来源 URL 变脏
                 return ResolvedTarget(
-                    site=self.site, kind=TargetKind.SINGLE,
+                    site=self.site,
+                    kind=TargetKind.SINGLE,
                     canonical_url=f"https://www.bilibili.com/video/{bvid}?p={page}",
-                    media_id=f"{bvid}_p{page}", part_index=int(page), raw_url=url,
+                    media_id=f"{bvid}_p{page}",
+                    part_index=int(page),
+                    raw_url=url,
                     hint="已剥离跟踪参数，只保留分P 序号",
                 )
             # 裸 BV 号：单P 稿件是单集，多P 稿件会展开成列表。
             # 这里不发网络请求判定，交给 probe/list_entries 时再定，
             # 但 hint 必须把风险说清楚。
             return ResolvedTarget(
-                site=self.site, kind=TargetKind.SINGLE,
+                site=self.site,
+                kind=TargetKind.SINGLE,
                 canonical_url=f"https://www.bilibili.com/video/{bvid}",
-                media_id=bvid, raw_url=url,
+                media_id=bvid,
+                raw_url=url,
                 hint="裸 BV 号：若为多P 稿件会展开成列表，需先选择分P 再用 ?p=N",
             )
         return ResolvedTarget(
-            site=self.site, kind=TargetKind.UNSUPPORTED, canonical_url=url,
-            media_id="", raw_url=url, hint="无法识别的 bilibili URL 形态",
+            site=self.site,
+            kind=TargetKind.UNSUPPORTED,
+            canonical_url=url,
+            media_id="",
+            raw_url=url,
+            hint="无法识别的 bilibili URL 形态",
         )
 
     def _entry_id_from_url(self, url: str) -> str:
@@ -984,8 +1015,7 @@ class BilibiliProvider(VideoProvider):
             )
         elif heights and max(heights) <= 1080:
             probe.warnings.append(
-                "游客上限 1080P。源片若为 4K，1080P+/4K 档需登录 cookie，"
-                "本工具不做任何绕过"
+                "游客上限 1080P。源片若为 4K，1080P+/4K 档需登录 cookie，本工具不做任何绕过"
             )
         best = max(probe.audios, key=lambda a: a.effective_kbps, default=None)
         if best is not None and (best.kbps or 0) < 100:

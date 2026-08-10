@@ -116,9 +116,7 @@ def test_quantize_preserves_time_and_order() -> None:
 
 def test_end_to_end_notes_are_all_on_grid() -> None:
     """整条链路（含合并与吸收）之后不能再有任何离格音符。"""
-    times, f0, voiced = frames(
-        [(A4 * 2 ** (0.3 / 12), 30), (0.0, 3), (B4 * 2 ** (-0.4 / 12), 40)]
-    )
+    times, f0, voiced = frames([(A4 * 2 ** (0.3 / 12), 30), (0.0, 3), (B4 * 2 ** (-0.4 / 12), 40)])
     notes = frames_to_notes(times, f0, voiced, GuideConfig())
     assert notes
     assert max(cents_off_grid(n.freq_hz) for n in notes) == pytest.approx(0.0, abs=1e-9)
@@ -233,9 +231,7 @@ def test_same_pitch_neighbours_are_merged() -> None:
 
 def test_pipeline_leaves_no_adjacent_same_pitch_notes() -> None:
     """跑完整条链路后不应残留"同高且相接"的相邻音符，否则会多出无谓的换音斜坡。"""
-    times, f0, voiced = frames(
-        [(A4, 20), (0.0, 2), (A4 * 2 ** (0.2 / 12), 20), (0.0, 2), (A4, 25)]
-    )
+    times, f0, voiced = frames([(A4, 20), (0.0, 2), (A4 * 2 ** (0.2 / 12), 20), (0.0, 2), (A4, 25)])
     notes = frames_to_notes(times, f0, voiced, GuideConfig())
     for a, b in itertools.pairwise(notes):
         assert not (abs(a.freq_hz - b.freq_hz) < 1e-6 and b.start_s - a.end_s < 1e-6)

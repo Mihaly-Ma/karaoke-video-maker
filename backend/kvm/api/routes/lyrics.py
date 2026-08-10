@@ -106,9 +106,7 @@ def search(req: LyricSearchRequest) -> LyricSearchResponse:
     if active:
         with ThreadPoolExecutor(max_workers=len(active)) as pool:
             futures = {
-                pool.submit(
-                    provider.search, req.query, duration_hint_ms=req.duration_hint_ms
-                ): name
+                pool.submit(provider.search, req.query, duration_hint_ms=req.duration_hint_ms): name
                 for name, provider in active
             }
             for future in as_completed(futures):
@@ -199,9 +197,7 @@ def apply_lyric(req: LyricApplyRequest, request: Request) -> ProjectDTO:
         )
 
     try:
-        return _store(request).mutate(
-            req.project_id, _mutator, label=f"导入歌词（{req.provider}）"
-        )
+        return _store(request).mutate(req.project_id, _mutator, label=f"导入歌词（{req.provider}）")
     except KeyError as exc:
         raise _not_found(exc) from exc
 

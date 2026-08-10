@@ -148,7 +148,9 @@ def _parse_fraction(value: str | None) -> float:
         return 0.0
 
 
-def _probe_keyframe_interval_s(ffprobe_bin: str, path: Path, window_s: float = 30.0) -> float | None:
+def _probe_keyframe_interval_s(
+    ffprobe_bin: str, path: Path, window_s: float = 30.0
+) -> float | None:
     """估算源视频前 `window_s` 秒里的平均关键帧间隔。
 
     这是"要不要重编码"的判据之一：只读开头一小段包头，代价是毫秒级，
@@ -158,9 +160,12 @@ def _probe_keyframe_interval_s(ffprobe_bin: str, path: Path, window_s: float = 3
         meta = _ffprobe_json(
             ffprobe_bin,
             [
-                "-select_streams", "v:0",
-                "-show_entries", "packet=pts_time,flags",
-                "-read_intervals", f"%+{window_s:.0f}",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "packet=pts_time,flags",
+                "-read_intervals",
+                f"%+{window_s:.0f}",
                 str(path),
             ],
         )
@@ -246,10 +251,24 @@ def _encoder_works(ffmpeg_bin: str, encoder: str) -> bool:
     if cached is not None:
         return cached
     cmd = [
-        ffmpeg_bin, "-hide_banner", "-v", "error",
-        "-f", "lavfi", "-i", "testsrc2=size=128x128:rate=5",
-        "-frames:v", "3", "-an", "-c:v", encoder, "-b:v", "500k",
-        "-f", "null", "-",
+        ffmpeg_bin,
+        "-hide_banner",
+        "-v",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=128x128:rate=5",
+        "-frames:v",
+        "3",
+        "-an",
+        "-c:v",
+        encoder,
+        "-b:v",
+        "500k",
+        "-f",
+        "null",
+        "-",
     ]
     try:
         ok = subprocess.run(cmd, capture_output=True, timeout=60).returncode == 0
@@ -379,18 +398,32 @@ def build_proxy_command(ffmpeg_bin: str, src: Path, dest: Path, plan: ProxyPlan)
     - `-movflags +faststart`：moov 前置，浏览器不必先下完整个文件才能起播。
     """
     cmd = [
-        ffmpeg_bin, "-hide_banner", "-nostats", "-progress", "pipe:1",
-        "-y", "-i", str(src),
-        "-map", "0:v:0", "-an", "-sn", "-dn",
+        ffmpeg_bin,
+        "-hide_banner",
+        "-nostats",
+        "-progress",
+        "pipe:1",
+        "-y",
+        "-i",
+        str(src),
+        "-map",
+        "0:v:0",
+        "-an",
+        "-sn",
+        "-dn",
     ]
     if plan.mode == "remux":
         cmd += ["-c:v", "copy"]
     else:
         cmd += [
-            "-vf", f"scale=-2:{plan.target_height}",
-            "-c:v", plan.encoder,
-            "-pix_fmt", "yuv420p",
-            "-g", str(plan.gop),
+            "-vf",
+            f"scale=-2:{plan.target_height}",
+            "-c:v",
+            plan.encoder,
+            "-pix_fmt",
+            "yuv420p",
+            "-g",
+            str(plan.gop),
         ]
         if plan.encoder == "libx264":
             # 软件编码用 CRF 控质量；veryfast 是"代理要快"与"别糊"之间的折中。
@@ -597,7 +630,11 @@ def run_proxy(handle: JobHandle, store: ProjectStore, req: ProxyRequest) -> dict
 
 
 def submit_proxy_job(
-    store: ProjectStore, project_id: str, *, max_height: int = DEFAULT_MAX_HEIGHT, force: bool = False
+    store: ProjectStore,
+    project_id: str,
+    *,
+    max_height: int = DEFAULT_MAX_HEIGHT,
+    force: bool = False,
 ) -> JobStatus:
     """把代理生成排进统一任务队列，并记住 job_id 供前端查询进度。
 

@@ -150,7 +150,9 @@ def probe_ffmpeg() -> FfmpegProbe:
         )
 
     # 1. 应用私有目录
-    private = paths.private_bin_dir() / ("ffmpeg.exe" if sys.platform.startswith("win") else "ffmpeg")
+    private = paths.private_bin_dir() / (
+        "ffmpeg.exe" if sys.platform.startswith("win") else "ffmpeg"
+    )
     if private.exists():
         found = _check(str(private), str(private), "应用私有目录")
         if found is not None:

@@ -408,9 +408,7 @@ def frames_to_notes(
     return bridge_gaps(notes, config.legato_gap_s)
 
 
-def median_filter_f0(
-    f0: Sequence[float] | np.ndarray, frames: int
-) -> np.ndarray:
+def median_filter_f0(f0: Sequence[float] | np.ndarray, frames: int) -> np.ndarray:
     """对基频序列做中值滤波，压掉孤立的几帧跳变。
 
     在**对数音高域**上取中值而不是在赫兹上：音程是比值关系，赫兹域的中值会偏向高音。
@@ -491,24 +489,26 @@ def extract_notes(vocals_path: Path, config: GuideConfig | None = None) -> list[
     y, _ = librosa.load(str(vocals_path), sr=cfg.sr_analysis, mono=True)
     hop_length = max(1, round(cfg.hop_s * cfg.sr_analysis))
 
-    f0 = torchcrepe.predict(
-        torch.from_numpy(y)[None],
-        cfg.sr_analysis,
-        hop_length,
-        fmin=cfg.fmin,
-        fmax=cfg.fmax,
-        model=cfg.crepe_model,
-        # Viterbi 解码对大幅跳变加惩罚，倍频/半频错误在这一步被结构性排除；
-        # 换成 argmax 会立刻退回 pYIN 那种次谐波误判
-        decoder=torchcrepe.decode.viterbi,
-        batch_size=512,
-        device=pick_device(cfg.device),
-    )[0].cpu().numpy()
+    f0 = (
+        torchcrepe.predict(
+            torch.from_numpy(y)[None],
+            cfg.sr_analysis,
+            hop_length,
+            fmin=cfg.fmin,
+            fmax=cfg.fmax,
+            model=cfg.crepe_model,
+            # Viterbi 解码对大幅跳变加惩罚，倍频/半频错误在这一步被结构性排除；
+            # 换成 argmax 会立刻退回 pYIN 那种次谐波误判
+            decoder=torchcrepe.decode.viterbi,
+            batch_size=512,
+            device=pick_device(cfg.device),
+        )[0]
+        .cpu()
+        .numpy()
+    )
 
     # 能量窗取 4 倍 hop：太短会被颤音的波峰波谷带得忽上忽下，太长会糊掉音符边界
-    rms = librosa.feature.rms(
-        y=y, frame_length=max(256, hop_length * 4), hop_length=hop_length
-    )[0]
+    rms = librosa.feature.rms(y=y, frame_length=max(256, hop_length * 4), hop_length=hop_length)[0]
     n = min(len(f0), len(rms))
     times = np.arange(n) * (hop_length / cfg.sr_analysis)
     voiced = energy_voicing(rms[:n], cfg.voicing_drop_db, cfg.voicing_floor_dbfs)

@@ -93,9 +93,7 @@ def ensure_dependencies(
     任何失败都抛 `RuntimeError`，由调用方转成一行 JSON 错误事件，绝不静默失败。
     """
     missing = [
-        (module, spec)
-        for module, spec in requirements
-        if importlib.util.find_spec(module) is None
+        (module, spec) for module, spec in requirements if importlib.util.find_spec(module) is None
     ]
     if not missing:
         return

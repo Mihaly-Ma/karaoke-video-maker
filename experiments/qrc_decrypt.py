@@ -42,8 +42,10 @@ import requests
 
 QRC_KEY = b"!@#)(*$%123ZXC!@!@#)(NHL"  # 24 字节 = 三重 DES 的三段子密钥
 
-UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
 
 # fcg_query_lyric_new.fcg 少了这个 Referer 会返回 retcode=-1310
 PLAYER_REFERER = "https://y.qq.com/portal/player.html"
@@ -59,6 +61,11 @@ OUT_DIR = pathlib.Path(__file__).resolve().parent.parent / "workspace" / "qrc"
 
 ENCRYPT = 1
 DECRYPT = 0
+
+# fmt: off
+# 下面这一整块 DES 常量表**关掉自动格式化**，理由同 backend/kvm/lyrics/qq.py：
+# 网格排布是为了和参考实现逐行对照、也是笔误注释定位的依据，
+# 摊成每行一个数字之后就再也对不上了。到 `# fmt: on` 为止。
 
 # 标准 DES 的 8 张 S-box，但其中两处是腾讯沿用的笔误值：
 #   SBOX2[23] = 15（标准是 14）
@@ -125,6 +132,7 @@ P_PERM = ((15, 0), (6, 1), (19, 2), (20, 3), (28, 4), (11, 5), (27, 6), (16, 7),
 # InvIP：输出字节写入顺序 —— 注意这里是 32 位字内字节逆序（DES 本身没有这一步，
 # 是这份 C 实现的 BITNUM 宏带来的固有字节序特性，必须原样复刻）
 _INVIP_BYTE_ORDER = (3, 2, 1, 0, 7, 6, 5, 4)
+# fmt: on
 
 
 def _bitnum(buf: bytes, b: int, c: int) -> int:
@@ -199,14 +207,34 @@ def _inv_ip(s0: int, s1: int) -> bytes:
 
 def _f(state: int, key6: list[int]) -> int:
     """DES 轮函数：扩展置换 E → 与子密钥异或 → 8 张 S-box → P 置换。"""
-    t1 = (_bit_l(state, 31, 0) | ((state & 0xF0000000) >> 1) | _bit_l(state, 4, 5)
-          | _bit_l(state, 3, 6) | ((state & 0x0F000000) >> 3) | _bit_l(state, 8, 11)
-          | _bit_l(state, 7, 12) | ((state & 0x00F00000) >> 5) | _bit_l(state, 12, 17)
-          | _bit_l(state, 11, 18) | ((state & 0x000F0000) >> 7) | _bit_l(state, 16, 23))
-    t2 = (_bit_l(state, 15, 0) | ((state & 0x0000F000) << 15) | _bit_l(state, 20, 5)
-          | _bit_l(state, 19, 6) | ((state & 0x00000F00) << 13) | _bit_l(state, 24, 11)
-          | _bit_l(state, 23, 12) | ((state & 0x000000F0) << 11) | _bit_l(state, 28, 17)
-          | _bit_l(state, 27, 18) | ((state & 0x0000000F) << 9) | _bit_l(state, 0, 23))
+    t1 = (
+        _bit_l(state, 31, 0)
+        | ((state & 0xF0000000) >> 1)
+        | _bit_l(state, 4, 5)
+        | _bit_l(state, 3, 6)
+        | ((state & 0x0F000000) >> 3)
+        | _bit_l(state, 8, 11)
+        | _bit_l(state, 7, 12)
+        | ((state & 0x00F00000) >> 5)
+        | _bit_l(state, 12, 17)
+        | _bit_l(state, 11, 18)
+        | ((state & 0x000F0000) >> 7)
+        | _bit_l(state, 16, 23)
+    )
+    t2 = (
+        _bit_l(state, 15, 0)
+        | ((state & 0x0000F000) << 15)
+        | _bit_l(state, 20, 5)
+        | _bit_l(state, 19, 6)
+        | ((state & 0x00000F00) << 13)
+        | _bit_l(state, 24, 11)
+        | _bit_l(state, 23, 12)
+        | ((state & 0x000000F0) << 11)
+        | _bit_l(state, 28, 17)
+        | _bit_l(state, 27, 18)
+        | ((state & 0x0000000F) << 9)
+        | _bit_l(state, 0, 23)
+    )
     t1 &= 0xFFFFFFFF
     t2 &= 0xFFFFFFFF
 
@@ -217,14 +245,16 @@ def _f(state: int, key6: list[int]) -> int:
     b4 = ((t2 >> 16) & 0xFF) ^ key6[4]
     b5 = ((t2 >> 8) & 0xFF) ^ key6[5]
 
-    state = ((SBOX[0][_sboxbit(b0 >> 2)] << 28)
-             | (SBOX[1][_sboxbit(((b0 & 0x03) << 4) | (b1 >> 4))] << 24)
-             | (SBOX[2][_sboxbit(((b1 & 0x0F) << 2) | (b2 >> 6))] << 20)
-             | (SBOX[3][_sboxbit(b2 & 0x3F)] << 16)
-             | (SBOX[4][_sboxbit(b3 >> 2)] << 12)
-             | (SBOX[5][_sboxbit(((b3 & 0x03) << 4) | (b4 >> 4))] << 8)
-             | (SBOX[6][_sboxbit(((b4 & 0x0F) << 2) | (b5 >> 6))] << 4)
-             | SBOX[7][_sboxbit(b5 & 0x3F)])
+    state = (
+        (SBOX[0][_sboxbit(b0 >> 2)] << 28)
+        | (SBOX[1][_sboxbit(((b0 & 0x03) << 4) | (b1 >> 4))] << 24)
+        | (SBOX[2][_sboxbit(((b1 & 0x0F) << 2) | (b2 >> 6))] << 20)
+        | (SBOX[3][_sboxbit(b2 & 0x3F)] << 16)
+        | (SBOX[4][_sboxbit(b3 >> 2)] << 12)
+        | (SBOX[5][_sboxbit(((b3 & 0x03) << 4) | (b4 >> 4))] << 8)
+        | (SBOX[6][_sboxbit(((b4 & 0x0F) << 2) | (b5 >> 6))] << 4)
+        | SBOX[7][_sboxbit(b5 & 0x3F)]
+    )
 
     out = 0
     for b, c in P_PERM:
@@ -262,7 +292,7 @@ def triple_des_ecb(data: bytes, key24: bytes, mode: int) -> bytes:
     sch = triple_des_setup(key24, mode)
     out = bytearray()
     for i in range(0, len(data), 8):
-        blk = des_crypt_block(data[i:i + 8], sch[0])
+        blk = des_crypt_block(data[i : i + 8], sch[0])
         blk = des_crypt_block(blk, sch[1])
         blk = des_crypt_block(blk, sch[2])
         out.extend(blk)
@@ -280,6 +310,7 @@ def qrc_decrypt(encrypted_hex: str) -> bytes:
 # 第 1 / 2 步：网络访问
 # ---------------------------------------------------------------------------
 
+
 def new_session() -> requests.Session:
     s = requests.Session()
     s.headers.update({"User-Agent": UA})
@@ -287,32 +318,72 @@ def new_session() -> requests.Session:
 
 
 def search_smartbox(s: requests.Session, query: str) -> list[dict]:
-    r = s.get("https://c.y.qq.com/splcloud/fcgi-bin/smartbox_new.fcg",
-              params={"key": query, "format": "json", "g_tk": 5381, "utf8": 1,
-                      "loginUin": 0, "hostUin": 0, "inCharset": "utf8",
-                      "outCharset": "utf-8", "platform": "yqq"},
-              headers={"Referer": PLAYER_REFERER}, timeout=20)
+    r = s.get(
+        "https://c.y.qq.com/splcloud/fcgi-bin/smartbox_new.fcg",
+        params={
+            "key": query,
+            "format": "json",
+            "g_tk": 5381,
+            "utf8": 1,
+            "loginUin": 0,
+            "hostUin": 0,
+            "inCharset": "utf8",
+            "outCharset": "utf-8",
+            "platform": "yqq",
+        },
+        headers={"Referer": PLAYER_REFERER},
+        timeout=20,
+    )
     r.raise_for_status()
     items = r.json().get("data", {}).get("song", {}).get("itemlist", [])
-    return [{"songmid": it["mid"], "songid": int(it["id"]), "name": it["name"],
-             "singer": it.get("singer", ""), "interval": None} for it in items]
+    return [
+        {
+            "songmid": it["mid"],
+            "songid": int(it["id"]),
+            "name": it["name"],
+            "singer": it.get("singer", ""),
+            "interval": None,
+        }
+        for it in items
+    ]
 
 
 def search_soso(s: requests.Session, query: str) -> list[dict]:
-    r = s.get("https://c.y.qq.com/soso/fcgi-bin/search_for_qq_cp",
-              params={"g_tk": 5381, "format": "json", "inCharset": "utf-8",
-                      "outCharset": "utf-8", "notice": 0, "platform": "yqq.json",
-                      "needNewCode": 0, "w": query, "p": 1, "n": 20, "t": 0,
-                      "aggr": 1, "cr": 1, "lossless": 0, "flag_qc": 0},
-              headers={"Referer": PLAYER_REFERER}, timeout=20)
+    r = s.get(
+        "https://c.y.qq.com/soso/fcgi-bin/search_for_qq_cp",
+        params={
+            "g_tk": 5381,
+            "format": "json",
+            "inCharset": "utf-8",
+            "outCharset": "utf-8",
+            "notice": 0,
+            "platform": "yqq.json",
+            "needNewCode": 0,
+            "w": query,
+            "p": 1,
+            "n": 20,
+            "t": 0,
+            "aggr": 1,
+            "cr": 1,
+            "lossless": 0,
+            "flag_qc": 0,
+        },
+        headers={"Referer": PLAYER_REFERER},
+        timeout=20,
+    )
     r.raise_for_status()
     out = []
     for it in r.json().get("data", {}).get("song", {}).get("list", []):
-        out.append({"songmid": it["songmid"], "songid": int(it["songid"]),
-                    "name": it["songname"],
-                    "singer": "/".join(x["name"] for x in it.get("singer", [])),
-                    "interval": it.get("interval"),
-                    "album": it.get("albumname", "")})
+        out.append(
+            {
+                "songmid": it["songmid"],
+                "songid": int(it["songid"]),
+                "name": it["songname"],
+                "singer": "/".join(x["name"] for x in it.get("singer", [])),
+                "interval": it.get("interval"),
+                "album": it.get("albumname", ""),
+            }
+        )
     return out
 
 
@@ -323,30 +394,55 @@ def fetch_play_lyric(s: requests.Session, songmid: str, songid: int) -> dict:
         "req": {
             "module": "music.musichallSong.PlayLyricInfo",
             "method": "GetPlayLyricInfo",
-            "param": {"songMID": songmid, "songID": songid,
-                      "crypt": 1, "qrc": 1, "roma": 1, "trans": 1,
-                      "lrc_t": 0, "qrc_t": 0, "roma_t": 0, "trans_t": 0,
-                      "interval": 0, "type": 0, "format": "json",
-                      "ct": 19, "cv": 1859},
+            "param": {
+                "songMID": songmid,
+                "songID": songid,
+                "crypt": 1,
+                "qrc": 1,
+                "roma": 1,
+                "trans": 1,
+                "lrc_t": 0,
+                "qrc_t": 0,
+                "roma_t": 0,
+                "trans_t": 0,
+                "interval": 0,
+                "type": 0,
+                "format": "json",
+                "ct": 19,
+                "cv": 1859,
+            },
         },
     }
-    r = s.post("https://u.y.qq.com/cgi-bin/musicu.fcg",
-               data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-               headers={"Referer": "https://y.qq.com/"}, timeout=20)
+    r = s.post(
+        "https://u.y.qq.com/cgi-bin/musicu.fcg",
+        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        headers={"Referer": "https://y.qq.com/"},
+        timeout=20,
+    )
     r.raise_for_status()
     return r.json()["req"]["data"]
 
 
-def fetch_query_lyric_new(s: requests.Session, songmid: str,
-                          with_referer: bool) -> dict:
+def fetch_query_lyric_new(s: requests.Session, songmid: str, with_referer: bool) -> dict:
     """对照实验：fcg_query_lyric_new.fcg —— 缺 Referer 返回 -1310，且只给行级 LRC。"""
     h = {"Referer": PLAYER_REFERER} if with_referer else {}
-    r = s.get("https://i.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg",
-              params={"songmid": songmid, "g_tk": 5381, "format": "json",
-                      "nobase64": 1, "loginUin": 0, "hostUin": 0,
-                      "inCharset": "utf8", "outCharset": "utf-8",
-                      "platform": "yqq", "needNewCode": 0},
-              headers=h, timeout=20)
+    r = s.get(
+        "https://i.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg",
+        params={
+            "songmid": songmid,
+            "g_tk": 5381,
+            "format": "json",
+            "nobase64": 1,
+            "loginUin": 0,
+            "hostUin": 0,
+            "inCharset": "utf8",
+            "outCharset": "utf-8",
+            "platform": "yqq",
+            "needNewCode": 0,
+        },
+        headers=h,
+        timeout=20,
+    )
     r.raise_for_status()
     return r.json()
 
@@ -398,12 +494,17 @@ def parse_qrc_content(content: str) -> tuple[dict, list[dict]]:
         start, dur, body = int(m.group(1)), int(m.group(2)), m.group(3)
         tokens = []
         for tm in _TOKEN_RE.finditer(body):
-            tokens.append({"text": tm.group(1),
-                           "start_ms": int(tm.group(2)),
-                           "dur_ms": int(tm.group(3))})
-        lines.append({"start_ms": start, "dur_ms": dur,
-                      "text": "".join(t["text"] for t in tokens),
-                      "tokens": tokens})
+            tokens.append(
+                {"text": tm.group(1), "start_ms": int(tm.group(2)), "dur_ms": int(tm.group(3))}
+            )
+        lines.append(
+            {
+                "start_ms": start,
+                "dur_ms": dur,
+                "text": "".join(t["text"] for t in tokens),
+                "tokens": tokens,
+            }
+        )
     return meta, lines
 
 
@@ -431,7 +532,7 @@ def parse_kana_track(kana: str) -> list[dict]:
                 j = kana.find(")", i)
                 if j < 0:
                     break
-                t, d = kana[i + 1:j].split(",")
+                t, d = kana[i + 1 : j].split(",")
                 timings.append((int(t), int(d)))
                 i = j + 1
             elif ch.isdigit():
@@ -439,14 +540,14 @@ def parse_kana_track(kana: str) -> list[dict]:
             else:
                 reading.append(ch)
                 i += 1
-        out.append({"cover": cover, "reading": "".join(reading),
-                    "mora_timings": timings})
+        out.append({"cover": cover, "reading": "".join(reading), "mora_timings": timings})
     return out
 
 
 # ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
+
 
 def hr(title: str) -> None:
     print("\n" + "=" * 78)
@@ -465,8 +566,10 @@ def self_test_des() -> None:
     except Exception as e:  # noqa: BLE001
         print(f"  （未安装 pycryptodome，跳过标准 3DES 对照）{e}")
         return
-    for name, key in (("原序 K1K2K3", QRC_KEY),
-                      ("逆序 K3K2K1", QRC_KEY[16:] + QRC_KEY[8:16] + QRC_KEY[:8])):
+    for name, key in (
+        ("原序 K1K2K3", QRC_KEY),
+        ("逆序 K3K2K1", QRC_KEY[16:] + QRC_KEY[8:16] + QRC_KEY[:8]),
+    ):
         std = DES3.new(key, DES3.MODE_ECB).decrypt(sample)
         print(f"  标准 3DES-ECB({name}) 解一块: {std.hex()}   与自研相同={std == mine}")
 
@@ -492,19 +595,30 @@ def main() -> int:
         sb = search_smartbox(s, args.query)
         print("  smartbox_new.fcg 命中 %d 条" % len(sb))
         for it in sb[:5]:
-            print("    - {} | {} | mid={} id={}".format(it["name"], it["singer"], it["songmid"], it["songid"]))
+            print(
+                "    - {} | {} | mid={} id={}".format(
+                    it["name"], it["singer"], it["songmid"], it["songid"]
+                )
+            )
         so = search_soso(s, args.query)
         print("  search_for_qq_cp 命中 %d 条" % len(so))
         if args.query == DEFAULT_QUERY:
             # 验证曲专用：2025 年 FM802 版「赤春花」署名 Studio April / 247s，
             # 必须用「歌手含 sumika」+「时长≈260s」双条件把它排掉（CLAUDE.md §6.1 版本混淆坑）
             print("  → 验证曲双条件过滤：歌手含 sumika 且 时长≈260s")
-            cands = [x for x in so if "sumika" in x["singer"].lower()
-                     and abs((x["interval"] or 0) - 260) <= 3]
+            cands = [
+                x
+                for x in so
+                if "sumika" in x["singer"].lower() and abs((x["interval"] or 0) - 260) <= 3
+            ]
         else:
             cands = so
         for it in cands[:5]:
-            print("    - {} | {} | {}s | 专辑={} | mid={}".format(it["name"], it["singer"], it["interval"], it.get("album"), it["songmid"]))
+            print(
+                "    - {} | {} | {}s | 专辑={} | mid={}".format(
+                    it["name"], it["singer"], it["interval"], it.get("album"), it["songmid"]
+                )
+            )
         if not cands:
             print("  !! 双条件过滤后为空，退回 smartbox 首条")
             cands = sb
@@ -516,8 +630,10 @@ def main() -> int:
     for flag in (False, True):
         j = fetch_query_lyric_new(s, songmid, flag)
         lyr = j.get("lyric", "")
-        print("  fcg_query_lyric_new.fcg  Referer=%-5s retcode=%s lyric长度=%d"
-              % (flag, j.get("retcode"), len(lyr)))
+        print(
+            "  fcg_query_lyric_new.fcg  Referer=%-5s retcode=%s lyric长度=%d"
+            % (flag, j.get("retcode"), len(lyr))
+        )
         if flag and lyr:
             (OUT_DIR / "fcg_query_lyric_new.lrc").write_text(lyr, encoding="utf-8")
             print("       前 3 行: {}".format(" | ".join(lyr.splitlines()[:3])))
@@ -526,12 +642,18 @@ def main() -> int:
 
     data = fetch_play_lyric(s, songmid, songid)
     (OUT_DIR / "playlyricinfo_raw.json").write_text(
-        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    print("  musicu.fcg PlayLyricInfo: qrc={} crypt={} startTs={}".format(data.get("qrc"), data.get("crypt"), data.get("startTs")))
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    print(
+        "  musicu.fcg PlayLyricInfo: qrc={} crypt={} startTs={}".format(
+            data.get("qrc"), data.get("crypt"), data.get("startTs")
+        )
+    )
     for k in ("lyric", "trans", "roma"):
         v = data.get(k) or ""
-        print("    %-6s hex长度=%-6d → 密文 %d 字节, 前 40 hex=%s"
-              % (k, len(v), len(v) // 2, v[:40]))
+        print(
+            "    %-6s hex长度=%-6d → 密文 %d 字节, 前 40 hex=%s" % (k, len(v), len(v) // 2, v[:40])
+        )
         if v:
             (OUT_DIR / (f"{k}.hex")).write_text(v, encoding="ascii")
 
@@ -578,8 +700,7 @@ def main() -> int:
 
     print("\n  前 6 行原样：")
     for ln in lines[:6]:
-        toks = "".join("%s(%d,%d)" % (t["text"], t["start_ms"], t["dur_ms"])
-                       for t in ln["tokens"])
+        toks = "".join("%s(%d,%d)" % (t["text"], t["start_ms"], t["dur_ms"]) for t in ln["tokens"])
         print("    [%d,%d]%s" % (ln["start_ms"], ln["dur_ms"], toks[:120]))
 
     # 时间轴一致性抽查：第二个数是 duration 而非 end
@@ -588,8 +709,9 @@ def main() -> int:
         for a, b in zip(ln["tokens"], ln["tokens"][1:]):
             if a["start_ms"] + a["dur_ms"] > b["start_ms"] + 1:
                 bad += 1
-    print("\n  相邻块 start+dur > 下一块 start 的次数 = %d（若接近 0 则第二个数确为 duration）"
-          % bad)
+    print(
+        "\n  相邻块 start+dur > 下一块 start 的次数 = %d（若接近 0 则第二个数确为 duration）" % bad
+    )
 
     # kana 轨
     hr("步骤 4b / [kana:] 假名轨")
@@ -604,20 +726,32 @@ def main() -> int:
         body_text = "".join(ln["text"] for ln in lines)
         kanji_total = len(_KANJI_RE.findall(body_text))
         print("  [kana:] 原始长度=%d 字符，条目数=%d" % (len(kana), len(entries)))
-        print("  覆盖基字符数合计=%d，正文汉字总数=%d，校验和 %s"
-              % (cover, kanji_total, "通过" if cover == kanji_total else "不通过"))
-        print("  带读音条目=%d（%.1f%%），空读音占位条目=%d"
-              % (len(nonempty), 100.0 * len(nonempty) / max(len(entries), 1),
-                 len(entries) - len(nonempty)))
-        print("  **带逐拍时间的条目=%d（占带读音条目的 %.1f%%）**"
-              % (len(timed), 100.0 * len(timed) / max(len(nonempty), 1)))
-        print("  cover 值分布: {}".format(dict(sorted(Counter(e["cover"] for e in entries).items()))))
-        print("  前 12 条带读音的: %s"
-              % [(e["cover"], e["reading"], e["mora_timings"]) for e in nonempty[:12]])
+        print(
+            "  覆盖基字符数合计=%d，正文汉字总数=%d，校验和 %s"
+            % (cover, kanji_total, "通过" if cover == kanji_total else "不通过")
+        )
+        print(
+            "  带读音条目=%d（%.1f%%），空读音占位条目=%d"
+            % (
+                len(nonempty),
+                100.0 * len(nonempty) / max(len(entries), 1),
+                len(entries) - len(nonempty),
+            )
+        )
+        print(
+            "  **带逐拍时间的条目=%d（占带读音条目的 %.1f%%）**"
+            % (len(timed), 100.0 * len(timed) / max(len(nonempty), 1))
+        )
+        print(
+            "  cover 值分布: {}".format(dict(sorted(Counter(e["cover"] for e in entries).items())))
+        )
+        print(
+            "  前 12 条带读音的: %s"
+            % [(e["cover"], e["reading"], e["mora_timings"]) for e in nonempty[:12]]
+        )
 
         # 校验：kana 逐拍时间之和是否等于对应汉字块的时长
-        kanji_blocks = [t for ln in lines for t in ln["tokens"]
-                        if _KANJI_RE.fullmatch(t["text"])]
+        kanji_blocks = [t for ln in lines for t in ln["tokens"] if _KANJI_RE.fullmatch(t["text"])]
         ok = mismatch = ki = 0
         for e in entries:
             if e["mora_timings"] and e["cover"] == 1 and ki < len(kanji_blocks):
@@ -629,20 +763,27 @@ def main() -> int:
                 else:
                     mismatch += 1
                     if mismatch <= 3:
-                        print("    !! 对不上: 汉字块 %s(%d,%d) vs kana %s 拍和=%d 起=%d"
-                              % (blk["text"], blk["start_ms"], blk["dur_ms"],
-                                 e["reading"], s, t0))
+                        print(
+                            "    !! 对不上: 汉字块 %s(%d,%d) vs kana %s 拍和=%d 起=%d"
+                            % (blk["text"], blk["start_ms"], blk["dur_ms"], e["reading"], s, t0)
+                        )
             ki += e["cover"]
-        print("  逐拍时间与汉字块时间「起点相等且时长求和相等」: 吻合 %d / 不吻合 %d"
-              % (ok, mismatch))
+        print(
+            "  逐拍时间与汉字块时间「起点相等且时长求和相等」: 吻合 %d / 不吻合 %d" % (ok, mismatch)
+        )
         (OUT_DIR / "kana_entries.json").write_text(
-            json.dumps(entries, ensure_ascii=False, indent=1), encoding="utf-8")
+            json.dumps(entries, ensure_ascii=False, indent=1), encoding="utf-8"
+        )
 
     # 把解析结果落盘，便于下游复用
     (OUT_DIR / "qrc_parsed.json").write_text(
-        json.dumps({"meta": {k: v for k, v in meta.items() if k != "kana"},
-                    "lines": lines}, ensure_ascii=False, indent=1),
-        encoding="utf-8")
+        json.dumps(
+            {"meta": {k: v for k, v in meta.items() if k != "kana"}, "lines": lines},
+            ensure_ascii=False,
+            indent=1,
+        ),
+        encoding="utf-8",
+    )
 
     hr("完成")
     print(f"  产物目录: {OUT_DIR}")

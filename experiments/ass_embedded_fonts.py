@@ -104,10 +104,19 @@ def _render(tmp: Path, tag: str, font: str, text: str, embeds: list[tuple[str, P
     )
     subprocess.run(
         [
-            "ffmpeg", "-y", "-loglevel", "error",
-            "-f", "lavfi", "-i", "color=c=black:s=400x200:d=1",
-            "-vf", f"ass={ass}:shaping=complex",
-            "-frames:v", "1", str(png),
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=400x200:d=1",
+            "-vf",
+            f"ass={ass}:shaping=complex",
+            "-frames:v",
+            "1",
+            str(png),
         ],
         check=True,
     )
@@ -117,9 +126,7 @@ def _render(tmp: Path, tag: str, font: str, text: str, embeds: list[tuple[str, P
 def _run_strategy(tmp: Path, name: str, head_family: str, tail_family: str) -> bool:
     """跑一种嵌法，返回它是否成立。"""
     head = _make_subset(*_HEAD_SRC, _COMMON, head_family, tmp / f"{name}-head.otf")
-    mincho = _make_subset(
-        *_MINCHO_SRC, _COMMON + _PROBE, tail_family, tmp / f"{name}-mincho.otf"
-    )
+    mincho = _make_subset(*_MINCHO_SRC, _COMMON + _PROBE, tail_family, tmp / f"{name}-mincho.otf")
     maru = _make_subset(*_MARU_SRC, _COMMON + _PROBE, tail_family, tmp / f"{name}-maru.otf")
 
     chains = {
@@ -156,7 +163,9 @@ def main() -> int:
     # （命令行出片）不会退化成"一个字都匹配不上"。
     # 用一个系统里确实装着、且**本身就有探针字**的族名，量的正是最难的一种情形：
     # 同族的系统原字体也在候选里，且它有这个字形。
-    head_real = _run_strategy(tmp, "headfamily", "Hiragino Kaku Gothic StdN", "Hiragino Kaku Gothic StdN")
+    head_real = _run_strategy(
+        tmp, "headfamily", "Hiragino Kaku Gothic StdN", "Hiragino Kaku Gothic StdN"
+    )
 
     print("\n=== 结论 ===")
     print(f"   各留各的族名（distinct）    ：{'成立' if distinct else '不成立'}")

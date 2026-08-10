@@ -35,9 +35,7 @@ from kvm.api.schemas import LineDTO, LockItem, ProjectDTO  # noqa: E402
 from kvm.editing import ops  # noqa: E402
 from kvm.lyrics.importer import line_text, parse_qrc, parse_text, rebase_tids  # noqa: E402
 
-_SEKISHUNKA_QRC = (
-    Path(__file__).resolve().parents[1] / "workspace" / "qrc" / "lyric_decrypted.xml"
-)
+_SEKISHUNKA_QRC = Path(__file__).resolve().parents[1] / "workspace" / "qrc" / "lyric_decrypted.xml"
 
 # 逐字轴 + [kana:] 注音的 QRC 正文。
 #
@@ -288,7 +286,9 @@ def test_歌词整体换成另一首歌时全部锁定项都进清单() -> None:
         for ln in project.lines
     )
 
-    ops.merge_imported_lines(project, parse_text("Never gonna give you up\nNever gonna let you down\n"))
+    ops.merge_imported_lines(
+        project, parse_text("Never gonna give you up\nNever gonna let you down\n")
+    )
 
     assert before > 0
     assert len(project.orphans) >= before, (
@@ -324,9 +324,7 @@ def test_显式放弃修改时整体替换且不留清单() -> None:
 def test_放弃修改的回执说清了丢掉多少项() -> None:
     project = _edited_project()
 
-    outcome = ops.merge_imported_lines(
-        project, parse_qrc(_QRC_V2), keep_manual_edits=False
-    )
+    outcome = ops.merge_imported_lines(project, parse_qrc(_QRC_V2), keep_manual_edits=False)
 
     assert outcome.warnings, "整体替换是破坏性操作，至少要有一句回执"
     assert "放弃" in outcome.warnings[0]
@@ -433,9 +431,9 @@ def test_路由上的放弃修改开关(client_and_project) -> None:
 
     after = _import(client, project_id, _QRC_V2, keep_manual_edits=False)
 
-    assert all(
-        sp["text"] != "さわ" for ln in after["lines"] for sp in ln["ruby"]
-    ), "显式放弃后手工注音应当消失"
+    assert all(sp["text"] != "さわ" for ln in after["lines"] for sp in ln["ruby"]), (
+        "显式放弃后手工注音应当消失"
+    )
     assert after["orphans"] == []
 
 
@@ -460,9 +458,9 @@ def test_重新导入占一格撤销可以整体退回(client_and_project) -> No
     assert resp.status_code == 200, resp.text
 
     restored = resp.json()
-    assert any(
-        sp["text"] == "さわ" for ln in restored["lines"] for sp in ln["ruby"]
-    ), "撤销没有把手工注音带回来"
+    assert any(sp["text"] == "さわ" for ln in restored["lines"] for sp in ln["ruby"]), (
+        "撤销没有把手工注音带回来"
+    )
 
 
 # ---------------------------------------------------------------------------

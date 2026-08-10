@@ -75,29 +75,49 @@ with TestClient(app) as c:
     body = [ln for ln in proj["lines"] if not ln["is_metadata"] and ln["tokens"]]
     lid = body[0]["id"]
 
-    r = c.post("/api/editor/shift", json={
-        "project_id": pid, "scope": "global", "delta_ms": 62,
-        "line_id": None, "token_index": None})
-    check("整体平移", r.status_code == 200 and r.json()["global_offset_ms"] == 62,
-          f"offset={r.json().get('global_offset_ms') if r.status_code==200 else r.status_code}")
+    r = c.post(
+        "/api/editor/shift",
+        json={
+            "project_id": pid,
+            "scope": "global",
+            "delta_ms": 62,
+            "line_id": None,
+            "token_index": None,
+        },
+    )
+    check(
+        "整体平移",
+        r.status_code == 200 and r.json()["global_offset_ms"] == 62,
+        f"offset={r.json().get('global_offset_ms') if r.status_code == 200 else r.status_code}",
+    )
 
     before = c.get(f"/api/projects/{pid}").json()
     tok0 = next(ln for ln in before["lines"] if ln["id"] == lid)["tokens"][0]["start_ms"]
-    r = c.post("/api/editor/shift", json={
-        "project_id": pid, "scope": "line", "delta_ms": 100,
-        "line_id": lid, "token_index": None})
+    r = c.post(
+        "/api/editor/shift",
+        json={
+            "project_id": pid,
+            "scope": "line",
+            "delta_ms": 100,
+            "line_id": lid,
+            "token_index": None,
+        },
+    )
     if r.status_code == 200:
         after = next(ln for ln in r.json()["lines"] if ln["id"] == lid)["tokens"][0]
         check("单句平移", after["start_ms"] == tok0 + 100, f"{tok0} → {after['start_ms']}")
-        check("平移后标 manual+locked",
-              after["timing_source"] == "manual" and after["locked_timing"])
+        check(
+            "平移后标 manual+locked", after["timing_source"] == "manual" and after["locked_timing"]
+        )
     else:
         check("单句平移", False, f"HTTP {r.status_code} {r.text[:200]}")
 
     print("\n=== 5. 批量调轴（一个 undo 单元）===")
     h0 = c.get(f"/api/projects/{pid}/history").json()["undo"]
-    edits = [{"line_id": lid, "token_index": i, "start_ms": 1000 + i * 200, "dur_ms": 180}
-             for i in range(3)]
+    edits = [
+        {"line_id": lid, "token_index": i, "start_ms": 1000 + i * 200, "dur_ms": 180}
+        for i in range(3)
+    ]
     r = c.post("/api/editor/timings", json={"project_id": pid, "items": edits})
     if r.status_code != 200:
         r = c.post("/api/editor/timings", json={"project_id": pid, "edits": edits})
@@ -112,25 +132,33 @@ with TestClient(app) as c:
     check("重做", r.status_code == 200)
 
     print("\n=== 7. 注音编辑 ===")
-    r = c.post("/api/editor/ruby", json={
-        "project_id": pid, "line_id": lid, "start": 0, "end": 1, "text": "テスト"})
+    r = c.post(
+        "/api/editor/ruby",
+        json={"project_id": pid, "line_id": lid, "start": 0, "end": 1, "text": "テスト"},
+    )
     if r.status_code == 200:
         rl = next(ln for ln in r.json()["lines"] if ln["id"] == lid)
         hit = [x for x in rl["ruby"] if x["start"] == 0 and x["end"] == 1]
         check("设定注音", bool(hit) and hit[0]["text"] == "テスト")
-        check("注音标 manual+locked",
-              bool(hit) and hit[0]["source"] == "manual" and hit[0]["locked"])
+        check(
+            "注音标 manual+locked", bool(hit) and hit[0]["source"] == "manual" and hit[0]["locked"]
+        )
     else:
         check("设定注音", False, f"HTTP {r.status_code} {r.text[:200]}")
 
     print("\n=== 8. Token 级声部 ===")
-    r = c.post("/api/editor/voice-part", json={
-        "project_id": pid, "line_id": lid, "voice_part": "duet_a", "token_range": [0, 2]})
+    r = c.post(
+        "/api/editor/voice-part",
+        json={"project_id": pid, "line_id": lid, "voice_part": "duet_a", "token_range": [0, 2]},
+    )
     if r.status_code == 200:
         vl = next(ln for ln in r.json()["lines"] if ln["id"] == lid)
         vps = [t.get("voice_part") for t in vl["tokens"][:3]]
-        check("区间声部不拆行", len(r.json()["lines"]) == len(proj["lines"]),
-              f"行数 {len(proj['lines'])} → {len(r.json()['lines'])}")
+        check(
+            "区间声部不拆行",
+            len(r.json()["lines"]) == len(proj["lines"]),
+            f"行数 {len(proj['lines'])} → {len(r.json()['lines'])}",
+        )
         check("token 声部已写入", vps[0] == "duet_a" and vps[1] == "duet_a", f"{vps}")
     else:
         check("区间声部", False, f"HTTP {r.status_code} {r.text[:200]}")
@@ -138,22 +166,26 @@ with TestClient(app) as c:
     print("\n=== 9. 配色方案 ===")
     # 方案 = 一组四色，不带声部（声部名由用户自定义，写死会让取色全部落空）
     r = c.get("/api/palettes/schemes")
-    check("列出方案", r.status_code == 200, f"{len(r.json()) if r.status_code==200 else '?'} 套")
+    check("列出方案", r.status_code == 200, f"{len(r.json()) if r.status_code == 200 else '?'} 套")
     if r.status_code == 200 and r.json():
         first = r.json()[0]
         r = c.post("/api/palettes/schemes", json={"name": "我的配色", "colors": first["colors"]})
         check("保存自定义方案", r.status_code in (200, 201), f"HTTP {r.status_code}")
         # 用一个用户自定义的声部名施加，确认任意名字都取得到色
-        r = c.post(f"/api/projects/{pid}/palettes",
-                   json={"scheme": first["name"], "apply_to": "男"})
-        ok_apply = (r.status_code == 200
-                    and r.json()["palettes"]["男"]["sung_fill"] == first["colors"]["sung_fill"])
+        r = c.post(
+            f"/api/projects/{pid}/palettes", json={"scheme": first["name"], "apply_to": "男"}
+        )
+        ok_apply = (
+            r.status_code == 200
+            and r.json()["palettes"]["男"]["sung_fill"] == first["colors"]["sung_fill"]
+        )
         check("方案施加到自定义声部", ok_apply, f"HTTP {r.status_code}")
 
     print("\n=== 10. 字体服务 ===")
     # 字体扫描是后台异步的（冷启动约 33s，热启动 17ms）——必须等它 ready 再断言，
     # 否则拿到的是扫描中的部分结果。任何"挂载时只拉一次"的消费方都会踩这个坑。
     import time as _t
+
     _deadline = _t.time() + 90
     while _t.time() < _deadline:
         st = c.get("/api/fonts/status").json()
@@ -161,14 +193,21 @@ with TestClient(app) as c:
             break
         _t.sleep(1)
     st = c.get("/api/fonts/status").json()
-    check("字体扫描就绪", st.get("state") == "ready",
-          f"{st.get('state')} / {st.get('family_count')} 族")
+    check(
+        "字体扫描就绪",
+        st.get("state") == "ready",
+        f"{st.get('state')} / {st.get('family_count')} 族",
+    )
     r = c.get("/api/fonts/presets")
     if r.status_code == 200:
         ps = r.json()
         hit = [p for p in ps if p.get("resolved")]
-        check("字体预置", len(hit) == 4, f"{len(hit)}/{len(ps)} 档可用: " +
-              ", ".join(f"{p['label']}→{p['resolved']}" for p in hit))
+        check(
+            "字体预置",
+            len(hit) == 4,
+            f"{len(hit)}/{len(ps)} 档可用: "
+            + ", ".join(f"{p['label']}→{p['resolved']}" for p in hit),
+        )
     else:
         check("字体预置", False, f"HTTP {r.status_code}")
 

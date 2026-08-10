@@ -85,8 +85,7 @@ def render_rows(ffmpeg: str, rows: list[str], font: str) -> tuple[bytes, int]:
     for i, s in enumerate(rows):
         y = MARGIN_TOP + i * LINE_H
         body.append(
-            f"Dialogue: 0,0:00:00.00,0:00:10.00,M,,0,0,0,,"
-            f"{{\\an7\\pos(0,{y})\\bord0\\shad0}}{s}\n"
+            f"Dialogue: 0,0:00:00.00,0:00:10.00,M,,0,0,0,,{{\\an7\\pos(0,{y})\\bord0\\shad0}}{s}\n"
         )
     ass = HEADER.format(w=WIDTH, h=height, font=font, size=FONT_SIZE) + "".join(body)
 
@@ -95,12 +94,23 @@ def render_rows(ffmpeg: str, rows: list[str], font: str) -> tuple[bytes, int]:
         p.write_text(ass, encoding="utf-8")
         escaped = str(p).replace("\\", "/").replace(":", r"\:")
         cmd = [
-            ffmpeg, "-hide_banner", "-loglevel", "error",
-            "-f", "lavfi",
-            "-i", f"color=c=black:s={WIDTH}x{height}:d=1:r=1",
-            "-vf", f"ass={escaped}",
-            "-frames:v", "1",
-            "-f", "rawvideo", "-pix_fmt", "gray", "-",
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=black:s={WIDTH}x{height}:d=1:r=1",
+            "-vf",
+            f"ass={escaped}",
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "gray",
+            "-",
         ]
         proc = subprocess.run(cmd, capture_output=True, timeout=180)
     if proc.returncode != 0:
@@ -162,9 +172,7 @@ def main() -> int:
 
             chars = list(text)
             widths = [adv[0]] + [adv[i] - adv[i - 1] for i in range(1, len(adv))]
-            detail = "  ".join(
-                f"{ch}:{w}" for ch, w in zip(chars, widths) if ch != " "
-            )
+            detail = "  ".join(f"{ch}:{w}" for ch, w in zip(chars, widths) if ch != " ")
             print(f"\n[{font}] 总推进 {adv[-1]}px")
             print(f"  逐字 advance: {detail}")
 

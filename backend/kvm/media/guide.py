@@ -226,15 +226,26 @@ def _worker_command(
     vocals: Path, dest: Path, duration_s: float, params: GuideParamsDTO
 ) -> list[str]:
     return [
-        sys.executable, "-m", "kvm.media.guide", "--worker",
-        "--vocals", str(vocals),
-        "--out", str(dest),
-        "--duration", f"{duration_s:.3f}",
-        "--gain", f"{params.gain}",
-        "--timbre", params.timbre,
-        "--max-harmonics", str(params.max_harmonics),
-        "--voicing-drop-db", f"{params.voicing_drop_db}",
-        "--legato-gap-ms", str(params.legato_gap_ms),
+        sys.executable,
+        "-m",
+        "kvm.media.guide",
+        "--worker",
+        "--vocals",
+        str(vocals),
+        "--out",
+        str(dest),
+        "--duration",
+        f"{duration_s:.3f}",
+        "--gain",
+        f"{params.gain}",
+        "--timbre",
+        params.timbre,
+        "--max-harmonics",
+        str(params.max_harmonics),
+        "--voicing-drop-db",
+        f"{params.voicing_drop_db}",
+        "--legato-gap-ms",
+        str(params.legato_gap_ms),
     ]
 
 

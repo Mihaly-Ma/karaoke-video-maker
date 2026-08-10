@@ -385,8 +385,7 @@ def _song(
     lines = []
     for base in starts_ms:
         tokens = [
-            Token(text=chr(ord("あ") + i), start_ms=base + i * step, dur_ms=step)
-            for i in range(4)
+            Token(text=chr(ord("あ") + i), start_ms=base + i * step, dur_ms=step) for i in range(4)
         ]
         ln = Line(tokens=tokens)
         if ruby:
@@ -409,11 +408,7 @@ def _line_windows(ass: str) -> list[tuple[int, int]]:
     单声部，所以正好一行一个。**不能按 Start 去重**——段落头两行本来就共用
     同一个 Start，去重会把它们并成一行。
     """
-    return [
-        _window(e)
-        for e in ass.splitlines()
-        if e.startswith("Dialogue: 0,") and ",Main,," in e
-    ]
+    return [_window(e) for e in ass.splitlines() if e.startswith("Dialogue: 0,") and ",Main,," in e]
 
 
 def test_every_line_fades_in_and_out() -> None:
@@ -422,7 +417,8 @@ def test_every_line_fades_in_and_out() -> None:
     st = project.style
 
     events = [
-        e for e in _build(project).splitlines()
+        e
+        for e in _build(project).splitlines()
         if e.startswith("Dialogue:") and (",Main,," in e or ",Ruby,," in e)
     ]
 
@@ -453,8 +449,12 @@ def test_fade_shrinks_to_fit_a_short_window() -> None:
     半透明的爬升段上，永远淡不完。
     """
     project = _song(
-        [10000], countdown_dots=0, dur_ms=200,
-        lead_in_ms=100, lead_out_ms=100, paragraph_lead_ms=100,
+        [10000],
+        countdown_dots=0,
+        dur_ms=200,
+        lead_in_ms=100,
+        lead_out_ms=100,
+        paragraph_lead_ms=100,
     )
     project.style.fade_in_ms = 900
     project.style.fade_out_ms = 300
@@ -530,8 +530,7 @@ def test_countdown_dots_light_up_shortly_before_they_start_ticking() -> None:
     assert all(_window(d)[0] == first_out - st.countdown_lead_ms for d in dots)
     assert first_out - st.countdown_lead_ms > line_show, "点要晚于歌词才亮"
     assert all(_fad(d) == (st.fade_in_ms, 0) for d in dots), (
-        "淡入仍然要有，别硬生生跳出来；熄灭则要干脆，不淡出——"
-        "那一下'啪'地消失才是拍点的读数"
+        "淡入仍然要有，别硬生生跳出来；熄灭则要干脆，不淡出——那一下'啪'地消失才是拍点的读数"
     )
 
 
@@ -555,10 +554,16 @@ def test_countdown_drops_dots_that_no_longer_fit() -> None:
     # 间奏只有 1s：歌词被上一句的收尾顶到 4700ms 才浮现，
     # 而三个点的熄灭时刻是 4500/4750/5000 —— 最早那个已经在歌词之前
     project = _song(
-        [2000, 5000], dur_ms=2000, countdown_dots=3,
-        countdown_min_gap_ms=800, paragraph_gap_ms=800,
-        lead_in_ms=300, paragraph_lead_ms=300,
-        fade_in_ms=100, fade_out_ms=100, slot_gap_ms=100,
+        [2000, 5000],
+        dur_ms=2000,
+        countdown_dots=3,
+        countdown_min_gap_ms=800,
+        paragraph_gap_ms=800,
+        lead_in_ms=300,
+        paragraph_lead_ms=300,
+        fade_in_ms=100,
+        fade_out_ms=100,
+        slot_gap_ms=100,
     )
 
     ass = _build(project)
@@ -593,9 +598,7 @@ def test_countdown_falls_back_to_fixed_interval_without_a_beat_grid() -> None:
     dots = _dialogues(_build(project), "Dot")
 
     assert len(dots) == 3
-    assert [_window(d)[1] for d in dots] == [
-        12000 - st.countdown_beat_ms * i for i in range(3)
-    ]
+    assert [_window(d)[1] for d in dots] == [12000 - st.countdown_beat_ms * i for i in range(3)]
 
 
 def test_same_slot_lines_never_overlap_in_time() -> None:
@@ -611,9 +614,7 @@ def test_same_slot_lines_never_overlap_in_time() -> None:
     windows = _line_windows(_build(project))
 
     for prev, cur in zip(windows, windows[2:], strict=False):  # 隔一行 = 同槽位
-        assert cur[0] - prev[1] >= st.slot_gap_ms, (
-            f"同槽位重叠：前一行 {prev} 与后一行 {cur}"
-        )
+        assert cur[0] - prev[1] >= st.slot_gap_ms, f"同槽位重叠：前一行 {prev} 与后一行 {cur}"
 
 
 def test_fade_out_never_starts_before_the_line_is_sung() -> None:
@@ -814,9 +815,7 @@ def test_preview_font_declaration_carries_chain_and_rare_chars() -> None:
     project.style.font_names = ["Hiragino Sans", "Noto Sans CJK JP"]
     project.title = "鷗の唄"
 
-    decl = next(
-        ln for ln in _build(project).splitlines() if ln.startswith(PREVIEW_FONTS_TAG)
-    )
+    decl = next(ln for ln in _build(project).splitlines() if ln.startswith(PREVIEW_FONTS_TAG))
     payload = json.loads(decl[len(PREVIEW_FONTS_TAG) :])
     assert payload["chain"] == ["Hiragino Sans", "Noto Sans CJK JP"]
     # 「鷗」不可编码为 shift_jis，落在默认子集之外，必须被点名

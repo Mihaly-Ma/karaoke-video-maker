@@ -265,9 +265,7 @@ def set_metadata(req: SetMetadataRequest, request: Request, response: Response) 
         response,
         req.project_id,
         "标记制作名单" if req.is_metadata else "取消制作名单标记",
-        lambda draft: ops.set_metadata(
-            draft, line_id=req.line_id, is_metadata=req.is_metadata
-        ),
+        lambda draft: ops.set_metadata(draft, line_id=req.line_id, is_metadata=req.is_metadata),
     )
 
 

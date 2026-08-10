@@ -102,9 +102,7 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     _make_font(tail, [ord(IN_BOTH), ord(NOWHERE)], family=FALLBACK_FAMILY)
 
     fake = fonts_routes.FontInfo(family=FAMILY, path=str(src), index=0, is_cjk=True)
-    fake_tail = fonts_routes.FontInfo(
-        family=FALLBACK_FAMILY, path=str(tail), index=0, is_cjk=True
-    )
+    fake_tail = fonts_routes.FontInfo(family=FALLBACK_FAMILY, path=str(tail), index=0, is_cjk=True)
     monkeypatch.setattr(fonts_routes, "available_fonts", lambda: [fake, fake_tail])
     monkeypatch.setattr(
         fonts_routes,
