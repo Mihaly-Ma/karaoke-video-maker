@@ -39,7 +39,12 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import FileResponse, PlainTextResponse
-from kvm.api.routes.fonts import chain_font_bytes
+from kvm.api.routes.fonts import (
+    BOLD_WEIGHT,
+    REGULAR_WEIGHT,
+    chain_font_bytes,
+    has_real_bold,
+)
 from kvm.api.schemas import (
     AssResponse,
     ExportArtifactDTO,
@@ -253,11 +258,21 @@ def _build_ass_text(dto: ProjectDTO, *, embed_fonts: bool = False) -> str:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
-    builder = AssBuilder(project, metrics)
+    # 勾了粗体就去取真粗字面；本机没有粗字面的字体则退回 libass 合成粗体，
+    # 由 `real_bold_face` 决定 Style 行还写不写 Bold=-1（写重了会叠成一团）。
+    head = project.style.font_names[0] if project.style.font_names else ""
+    real_bold = bool(project.style.bold and head and has_real_bold(head))
+    weight = BOLD_WEIGHT if project.style.bold else REGULAR_WEIGHT
+
+    builder = AssBuilder(project, metrics, real_bold_face=real_bold)
     if not embed_fonts:
         return builder.build()
-    embedded = chain_font_bytes(project.style.font_names, builder.rendered_charset())
-    return AssBuilder(project, metrics, embedded_fonts=embedded).build()
+    embedded = chain_font_bytes(
+        project.style.font_names, builder.rendered_charset(), weight=weight
+    )
+    return AssBuilder(
+        project, metrics, embedded_fonts=embedded, real_bold_face=real_bold
+    ).build()
 
 
 # ---- POST /ass、GET /preview.ass ----

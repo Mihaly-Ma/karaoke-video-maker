@@ -67,7 +67,7 @@ def _cache_dir() -> Path:
 
 
 def _subset_cache_key(
-    family: str, index: int, mtime_ns: int, size: int, as_family: str, extra: str
+    family: str, index: int, mtime_ns: int, size: int, as_family: str, extra: str, weight: int
 ) -> str:
     """子集产物的磁盘缓存键。
 
@@ -82,9 +82,12 @@ def _subset_cache_key(
     （见 `subset_font` 与 `experiments/ass_embedded_fonts.py`），
     靠 `POST /coverage` 的预热把它挪到用户还在挑字体的时候完成。
     """
+    # `weight` 必须进键：同一个族的 Regular 与 Bold 是两份不同的字节，
+    # 共用一个产物文件的话，先裁好的那份会被另一档当成命中直接下发——
+    # 症状是"勾了粗体没变化"或"取消粗体还是粗的"，而且随谁先裁而变。
     payload = (
         f"v{SUBSET_VERSION}|{family}|{index}|{mtime_ns}|{size}"
-        f"|as={as_family}|extra={charset_digest(extra)}"
+        f"|as={as_family}|extra={charset_digest(extra)}|w={weight}"
     )
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
@@ -92,6 +95,21 @@ def _subset_cache_key(
 def _scan_cache_file() -> Path:
     """磁盘缓存文件：跨进程重启复用扫描结果，避免每次冷启动都重新解析几百个字体。"""
     return _cache_dir() / "font-scan-cache.json"
+
+
+class FaceRef(BaseModel):
+    """同一 family 下的一个具体字面（字重）及其文件位置。"""
+
+    weight: int
+    """OS/2 的 usWeightClass（400=Regular、700=Bold）。"""
+
+    subfamily: str
+    """子族名，如 Regular / Bold / W6。日文字体普遍不叫 Regular。"""
+
+    path: str
+    index: int = 0
+    variable: bool = False
+    """可变字体：这一条覆盖整条字重轴，需要 instancing 才能定到具体字重。"""
 
 
 class FontInfo(BaseModel):
@@ -121,6 +139,16 @@ class FontInfo(BaseModel):
     `path`/`index` 只是其中一个代表字重（优先取最接近常规字重 usWeightClass=400 的那个），
     前端可据此判断 Bold 样式命中的是本机真实粗体，还是需要合成粗体。"""
 
+    faces: list[FaceRef] = []
+    """该 family 下**每个字面各自的文件位置**，按 usWeightClass 排序。
+
+    `weights` 只有字重的名字，拿不到文件——于是"粗体"开关此前只能落到 libass 的
+    合成粗体上（把轮廓外扩），而 Windows 上 `Yu Gothic` 的真 Bold 字面
+    （`YuGothB.ttc`）明明就躺在系统里。CJK 的粗体是**重新设计过的字形**，
+    合成粗体只是把笔画撑胖，字面会糊、会胀，两者不是一回事。
+
+    有了这张表，子集阶段就能按目标字重挑文件（见 `face_for_weight`）。"""
+
 
 _FONT_DIRS_BY_OS = {
     "Darwin": ["/System/Library/Fonts", "/Library/Fonts", "~/Library/Fonts"],
@@ -142,7 +170,7 @@ def _candidate_font_files(dirs: list[str]) -> list[Path]:
     return out
 
 
-SCAN_CACHE_VERSION = 2
+SCAN_CACHE_VERSION = 3
 """扫描结果**记录格式**的版本。**给 `FontInfo` 加字段时必须 +1。**
 
 它算进磁盘缓存签名里。不加的话，老缓存会照常命中，新字段一律取默认值——
@@ -201,6 +229,13 @@ class _Face(NamedTuple):
     index: int
     is_cjk: bool
     alt_names: tuple[str, ...]
+    variable: bool = False
+    """是否可变字体（带 `fvar` 表）。
+
+    它一个文件就覆盖整条字重轴（Noto Sans JP 装的就是 `NotoSansJP-VF.ttf`，
+    100–900 全在里面），但 libass 只会拿到某个固定实例、不会自己走 wght 轴——
+    要真粗体必须在子集阶段把它在目标字重处切成静态实例。
+    """
 
 
 def _regular_weight_rank(item: _Face) -> tuple[int, int]:
@@ -261,6 +296,16 @@ def _aggregate(candidates: dict[str, list[_Face]]) -> list[FontInfo]:
             alt_names=alt,
             is_cjk=any(item.is_cjk for item in items),
             weights=sorted({item.subfamily for item in items}),
+            faces=[
+                FaceRef(
+                    weight=item.weight,
+                    subfamily=item.subfamily,
+                    path=item.path,
+                    index=item.index,
+                    variable=item.variable,
+                )
+                for item in sorted(items, key=lambda x: x.weight)
+            ],
         )
     return sorted(out.values(), key=lambda x: (not x.is_cjk, x.family))
 
@@ -375,10 +420,12 @@ def _run_scan() -> None:
                     except Exception:
                         weight = 400
                     alt = _alt_family_names(f, family)
+                    # 可变字体：一个文件覆盖整条字重轴，取真粗体要靠 instancing
+                    variable = "fvar" in f
                 except Exception:
                     continue
                 candidates.setdefault(family, []).append(
-                    _Face(weight, sub, str(p), idx, is_cjk, alt)
+                    _Face(weight, sub, str(p), idx, is_cjk, alt, variable)
                 )
 
         result = _aggregate(candidates)
@@ -548,7 +595,9 @@ def _subset_failure(dest: Path) -> str | None:
         return _subset_errors.pop(dest, None)
 
 
-def _run_subset_job(match: FontInfo, src: Path, dest: Path, as_family: str, extra: str) -> None:
+def _run_subset_job(
+    match: FontInfo, face: FaceRef, src: Path, dest: Path, as_family: str, extra: str, weight: int
+) -> None:
     """后台裁剪一份子集。
 
     **写临时文件再 rename**，不直接写 `dest`：`get_subset` 判断"有没有裁好"
@@ -565,9 +614,11 @@ def _run_subset_job(match: FontInfo, src: Path, dest: Path, as_family: str, extr
             src,
             tmp,
             charset=set(default_charset()) | set(extra),
-            family_index=match.index,
+            family_index=face.index,
             flavor=None,
             family_name=as_family,
+            # 只有可变字体需要切实例；静态字体的字重已经由 `face` 选文件决定了
+            instance_weight=weight if face.variable else None,
         )
         tmp.replace(dest)
         # 刚裁完，正是做容量清理的时机（用户本来就在等下一次轮询）。
@@ -583,27 +634,77 @@ def _run_subset_job(match: FontInfo, src: Path, dest: Path, as_family: str, extr
             _subset_jobs.pop(dest, None)
 
 
-def _ensure_subset_job(match: FontInfo, src: Path, dest: Path, as_family: str, extra: str) -> None:
+def _ensure_subset_job(
+    match: FontInfo, face: FaceRef, src: Path, dest: Path, as_family: str, extra: str, weight: int
+) -> None:
     """确保该产物正在（或已排队等待）后台裁剪。重复请求不该重复开工。"""
     with _subset_lock:
         job = _subset_jobs.get(dest)
         if job is not None and not job.done():
             return
         _subset_jobs[dest] = _subset_pool.submit(
-            _run_subset_job, match, src, dest, as_family, extra
+            _run_subset_job, match, face, src, dest, as_family, extra, weight
         )
 
 
-def _subset_target(family: str, as_family: str, extra: str) -> tuple[FontInfo, Path, Path]:
-    """解析出 `(字体记录, 源文件, 产物路径)`。找不到字体时抛 HTTPException。"""
+REGULAR_WEIGHT = 400
+BOLD_WEIGHT = 700
+"""ASS 的 Bold 标志要落到哪个 usWeightClass 上。"""
+
+_REAL_BOLD_MIN = 600
+"""判定"本机有真粗字面"的门槛。
+
+取 600（SemiBold）而不是 700：日文字体的字重命名很杂（W6 通常就是 600），
+卡到 700 会把一大批实际够粗的字面判成"没有粗体"，白白退回合成。
+"""
+
+
+def face_for_weight(info: FontInfo, weight: int) -> FaceRef:
+    """在该 family 的字面里挑最接近目标字重的一个。
+
+    老缓存（`SCAN_CACHE_VERSION` < 3）没有 `faces`，此时退回代表字面——
+    行为与加这个特性之前完全一致，不会因为缓存没刷新就报错。
+    """
+    if not info.faces:
+        return FaceRef(
+            weight=REGULAR_WEIGHT, subfamily="", path=info.path, index=info.index
+        )
+    return min(info.faces, key=lambda f: abs(f.weight - weight))
+
+
+def has_real_bold(family: str) -> bool:
+    """该 family 能否给出**真正的粗字形**，而不是靠 libass 把轮廓外扩。
+
+    这决定 ASS 里还写不写 `Bold=-1`：拿到真粗字面后仍写 `-1`，libass 会在
+    已经很粗的字形上再合成一次，糊成一团。判据见 `_REAL_BOLD_MIN`；
+    可变字体一律算有——它能被 instancing 到任意字重。
+    """
+    info = next((f for f in available_fonts() if f.family == family), None)
+    if info is None or not info.faces:
+        return False
+    return any(f.variable or f.weight >= _REAL_BOLD_MIN for f in info.faces)
+
+
+def _subset_target(
+    family: str, as_family: str, extra: str, weight: int = REGULAR_WEIGHT
+) -> tuple[FontInfo, FaceRef, Path, Path]:
+    """解析出 `(字体记录, 选中的字面, 源文件, 产物路径)`。找不到字体时抛 HTTPException。
+
+    源文件取的是**按目标字重挑出来的那个字面**，不再固定用代表字面：
+    Windows 的 `Yu Gothic` 粗体在 `YuGothB.ttc` 里，代表字面是 `YuGothR.ttc`，
+    只认后者就永远拿不到真粗体。
+    """
     match = _require_font(family)
-    src = Path(match.path)
+    face = face_for_weight(match, weight)
+    src = Path(face.path)
     try:
         st = src.stat()
     except OSError as exc:
         raise HTTPException(status_code=404, detail=f"字体文件不可读：{src}") from exc
-    key = _subset_cache_key(match.family, match.index, st.st_mtime_ns, st.st_size, as_family, extra)
-    return match, src, _cache_dir() / font_cache.artifact_name(key)
+    key = _subset_cache_key(
+        match.family, face.index, st.st_mtime_ns, st.st_size, as_family, extra, weight
+    )
+    return match, face, src, _cache_dir() / font_cache.artifact_name(key)
 
 
 def _normalize_extra(extra: str) -> str:
@@ -622,6 +723,7 @@ def get_subset(
     family: str = Query(...),
     as_family: str = Query(default="", alias="as"),
     extra: str = Query(default=""),
+    weight: int = Query(default=REGULAR_WEIGHT, ge=100, le=1000),
 ) -> FileResponse:
     """按族名产出可供 JASSUB 使用的子集字体。
 
@@ -665,10 +767,10 @@ def get_subset(
     不需要新增任何前端机制；用户看到的是"字体准备中"，而不是一块空白。
     """
     clean_extra = _normalize_extra(extra)
-    match, src, dest = _subset_target(family, as_family or family, clean_extra)
+    match, face, src, dest = _subset_target(family, as_family or family, clean_extra, weight)
 
     if not dest.exists():
-        _ensure_subset_job(match, src, dest, as_family or family, clean_extra)
+        _ensure_subset_job(match, face, src, dest, as_family or family, clean_extra, weight)
         failure = _subset_failure(dest)
         if failure is not None:
             raise HTTPException(status_code=500, detail=f"字体子集化失败：{failure}")
@@ -688,7 +790,7 @@ def get_subset(
     )
 
 
-def preheat_chain(chain: list[str], extra: str) -> None:
+def preheat_chain(chain: list[str], extra: str, weight: int = REGULAR_WEIGHT) -> None:
     """把整条链的子集产物排进后台裁剪队列。**不等结果、不抛异常。**
 
     这是"多字体冷裁剪"唯一像样的解法：真正的等待发生在用户切到预览的那一刻，
@@ -704,15 +806,15 @@ def preheat_chain(chain: list[str], extra: str) -> None:
     clean_extra = _normalize_extra(extra)
     for family in chain:
         try:
-            match, src, dest = _subset_target(family, head, clean_extra)
+            match, face, src, dest = _subset_target(family, head, clean_extra, weight)
         except HTTPException:
             continue  # 还没扫到 / 文件不可读：等真正要用时再报
         if not dest.exists():
-            _ensure_subset_job(match, src, dest, head, clean_extra)
+            _ensure_subset_job(match, face, src, dest, head, clean_extra, weight)
 
 
 def chain_font_bytes(
-    chain: list[str], extra: str, *, timeout_s: float = 180.0
+    chain: list[str], extra: str, *, weight: int = REGULAR_WEIGHT, timeout_s: float = 180.0
 ) -> list[tuple[str, bytes]]:
     """取整条链的子集字节，供导出时嵌进 ASS 的 `[Fonts]` 段。
 
@@ -732,12 +834,12 @@ def chain_font_bytes(
     deadline = time.monotonic() + timeout_s
     for family in chain:
         try:
-            match, src, dest = _subset_target(family, head, clean_extra)
+            match, face, src, dest = _subset_target(family, head, clean_extra, weight)
         except HTTPException as exc:
             _log.warning("导出内嵌字体：跳过「%s」（%s）", family, exc.detail)
             continue
         if not dest.exists():
-            _ensure_subset_job(match, src, dest, head, clean_extra)
+            _ensure_subset_job(match, face, src, dest, head, clean_extra, weight)
             with _subset_lock:
                 job = _subset_jobs.get(dest)
             if job is not None:

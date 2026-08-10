@@ -69,7 +69,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:  # pragma: no cover - 仅供类型标注，运行期不导入
     from fontTools.ttLib import TTFont
 
-SUBSET_VERSION = 5
+SUBSET_VERSION = 6
 """子集产物的生成逻辑版本。**改动 `subset_font` 的产物内容时必须 +1。**
 
 调用方（`kvm.api.routes.fonts`）把它算进磁盘缓存键，否则老用户的缓存目录里
@@ -334,6 +334,7 @@ def subset_font(
     family_index: int = 0,
     flavor: str | None = None,
     family_name: str | None = None,
+    instance_weight: int | None = None,
 ) -> tuple[int, int]:
     """把 `src` 裁成只含 `charset` 的字体写到 `dest`。
 
@@ -342,6 +343,13 @@ def subset_font(
     `family_name` 非空时把产物的族名改写成它（见 `_rewrite_family_name` 与模块文档）。
     给浏览器预览用时**必须传**，否则 libass 按调用方请求的族名找不到这份字体，
     整块字幕静默消失。
+
+    `instance_weight` 非空且源是**可变字体**时，先把它在该字重处切成静态实例。
+    可变字体一个文件覆盖整条字重轴（Windows 的 Noto Sans JP 就是
+    `NotoSansJP-VF.ttf`，100–900 全在里面），但 **libass 只会拿到某个固定实例、
+    不会自己走 wght 轴**——不切实例的话，"粗体"就只能落到合成粗体上，
+    而合成只是把轮廓外扩，和 CJK 那套重新设计过的粗字形不是一回事。
+    源不是可变字体时此参数无效（静态字体的字重由调用方挑文件决定）。
 
     **`flavor` 默认必须是 None（即产出 TTF/OTF），不要图省事改成 woff2。**
     JASSUB 是把字体字节直接喂给 libass 的，而 **libass 只认 TTF/OTF/TTC**；
@@ -368,6 +376,18 @@ def subset_font(
         font = coll.fonts[min(family_index, len(coll.fonts) - 1)]
     else:
         font = TTFont(str(src))
+
+    # 先切实例再裁子集：instancer 要读 gvar/HVAR 等变体表，放在 subset 之后做
+    # 就得小心哪些表被裁掉了。整字体切一次是几秒级，而子集本来就是后台作业
+    # （有 SUBSET_WORKERS 闸门），这点代价换掉一类难查的顺序依赖是划算的。
+    if instance_weight is not None and "fvar" in font:
+        from fontTools.varLib import instancer
+
+        # updateFontNames=False：产物的族名随后由 `_rewrite_family_name` 统一改写
+        # （整条链共用链首族名，§5.12），让 instancer 先写一遍纯属多余。
+        font = instancer.instantiateVariableFont(
+            font, {"wght": instance_weight}, inplace=False, updateFontNames=False
+        )
 
     options = ft_subset.Options()
     options.layout_features = ["*"]

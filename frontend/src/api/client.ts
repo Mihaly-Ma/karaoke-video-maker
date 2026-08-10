@@ -371,10 +371,17 @@ export const getFontStatus = () => req<FontScanStatus>('/fonts/status')
  *
  * 两者都进后端的磁盘缓存键，所以同一个字体在不同链首/不同歌下是不同产物。
  */
-export const fontSubsetUrl = (family: string, opts: { as?: string; extra?: string } = {}) => {
+export const fontSubsetUrl = (
+  family: string,
+  opts: { as?: string; extra?: string; weight?: number } = {},
+) => {
   const params = new URLSearchParams({ family })
   if (opts.as && opts.as !== family) params.set('as', opts.as)
   if (opts.extra) params.set('extra', opts.extra)
+  // 字重要跟着 ASS 声明走：勾了粗体时后端会挑本机的真粗字面（Yu Gothic 的
+  // YuGothB.ttc）或把可变字体切到 700，而不是让 libass 合成粗体。不传的话
+  // 预览拿到的是 Regular 子集，成片却是粗的——两端分叉。
+  if (opts.weight && opts.weight !== 400) params.set('weight', String(opts.weight))
   return `${BASE}/fonts/subset?${params.toString()}`
 }
 

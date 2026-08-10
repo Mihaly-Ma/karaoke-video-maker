@@ -169,10 +169,21 @@ class AssBuilder:
         metrics: LibassMetrics,
         *,
         embedded_fonts: Sequence[tuple[str, bytes]] | None = None,
+        real_bold_face: bool = False,
     ) -> None:
         self._p = project
         self._m = metrics
         self._embedded = list(embedded_fonts or [])
+        self._real_bold_face = real_bold_face
+        """喂给渲染器的字体本身就是粗字面吗？
+
+        为真时 Style 行**不再写 `Bold=-1`**：字形已经是粗的，再请求一次粗体，
+        libass 会在上面叠一层合成粗体（轮廓外扩），笔画糊成一团。
+        为假时维持合成粗体——那是本机没有粗字面时唯一的出路。
+
+        默认 False 让不经字体扫描的调用方（如 `pipeline.make_video` 这条命令行
+        链路）保持改动前的行为。
+        """
 
     def rendered_charset(self) -> str:
         """成片上会出现的全部字符（去重排序）。
@@ -201,6 +212,9 @@ class AssBuilder:
             # 只列默认子集之外的字：绝大多数歌这里是空串，于是同一个字体的子集
             # 产物能在工程之间共用，而不是每首歌各裁一份
             "extra": "".join(c for c in self.rendered_charset() if c not in base),
+            # 预览侧必须按同一个字重去取子集，否则会出现"成片是粗的、预览是细的"
+            # ——两端喂的根本不是同一份字节，而 §5.12 要的正是同源。
+            "weight": 700 if self._p.style.bold else 400,
         }
         return f"{PREVIEW_FONTS_TAG} {json.dumps(payload, ensure_ascii=False)}\n"
 
@@ -235,7 +249,8 @@ class AssBuilder:
             title_size=int(st.font_size * 1.15),
             credit_size=int(st.font_size * 0.55),
             dot_size=int(st.font_size * 0.5),
-            bold=-1 if st.bold else 0,
+            # 拿到真粗字面时写 0：粗细已经在字形里了，再写 -1 会被合成粗体叠一层
+            bold=-1 if (st.bold and not self._real_bold_face) else 0,
             outline=st.outline,
             shadow=st.shadow,
             ruby_outline=round(max(1.0, st.outline * 0.55), 1),

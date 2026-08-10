@@ -392,6 +392,8 @@ export interface PreviewFontSpec {
   chain: string[]
   /** 本曲用到、但默认子集裁不到的字（「鷗」「𠮷」「①」） */
   extra: string
+  /** 目标字重（usWeightClass）。勾了粗体是 700，否则 400 */
+  weight: number
 }
 
 const PREVIEW_FONTS_TAG = '; kvm-preview-fonts:'
@@ -424,7 +426,12 @@ export function parseFontSpec(ass: string): PreviewFontSpec | null {
       const parsed = JSON.parse(line.slice(PREVIEW_FONTS_TAG.length)) as Partial<PreviewFontSpec>
       const chain = (parsed.chain ?? []).filter((f) => typeof f === 'string' && f.trim())
       if (!chain.length) return null
-      return { chain, extra: typeof parsed.extra === 'string' ? parsed.extra : '' }
+      return {
+        chain,
+        extra: typeof parsed.extra === 'string' ? parsed.extra : '',
+        // 老 ASS（还没带 weight 的那版）落到 400，与加这个特性之前行为一致
+        weight: typeof parsed.weight === 'number' ? parsed.weight : 400,
+      }
     } catch {
       return null
     }
@@ -448,12 +455,15 @@ export function parseFontSpec(ass: string): PreviewFontSpec | null {
  * 链为空（工程还没设置字体）时返回空数组，交由 `loadFonts` 走降级路径。
  */
 export function defaultFontSources(spec: PreviewFontSpec | string): PreviewFontSource[] {
-  const { chain, extra } =
-    typeof spec === 'string' ? { chain: [spec], extra: '' } : spec
+  const { chain, extra, weight } =
+    typeof spec === 'string' ? { chain: [spec], extra: '', weight: 400 } : spec
   const clean = chain.map((f) => f.trim()).filter(Boolean)
   const head = clean[0]
   if (!head) return []
-  return clean.map((family) => ({ family, url: fontSubsetUrl(family, { as: head, extra }) }))
+  return clean.map((family) => ({
+    family,
+    url: fontSubsetUrl(family, { as: head, extra, weight }),
+  }))
 }
 
 interface LoadedFont {
@@ -709,7 +719,9 @@ export class SubtitleOverlay {
 
   static async create(opts: OverlayOptions): Promise<SubtitleOverlay> {
     // ASS 里的声明优先：它与这份字幕同源，不存在"字幕换了字体、字体还没换"的窗口期
-    const spec = parseFontSpec(opts.ass) ?? { chain: [opts.fontFamily], extra: '' }
+    // 兜底走 400：解析不出声明时无从得知字重，取常规比取粗更安全——
+    // 粗字面缺失会整块空白，而细一点只是观感差异
+    const spec = parseFontSpec(opts.ass) ?? { chain: [opts.fontFamily], extra: '', weight: 400 }
     const { fonts, warnings } = await loadFonts(opts.fontSources ?? defaultFontSources(spec))
 
     /*

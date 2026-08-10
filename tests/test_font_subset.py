@@ -229,7 +229,7 @@ def test_cache_key_invalidates_legacy_entries() -> None:
     只改生成代码而不动缓存键，装过旧版的用户会永远拿到那份坏字体 ——
     这正是本次修复必须连带处理的部分。
     """
-    args = (FAMILY, 1, 1_700_000_000_000_000_000, 5_988_268, FAMILY, "")
+    args = (FAMILY, 1, 1_700_000_000_000_000_000, 5_988_268, FAMILY, "", 400)
     legacy = hashlib.sha256(f"{args[0]}|{args[1]}|{args[2]}|{args[3]}".encode()).hexdigest()[:16]
     assert _subset_cache_key(*args) != legacy
 
@@ -242,11 +242,11 @@ def test_cache_key_invalidates_legacy_entries() -> None:
 
 def test_cache_key_tracks_source_file_changes() -> None:
     """源字体被系统更新（mtime / 大小变化）后仍必须重新生成。"""
-    base = _subset_cache_key(FAMILY, 1, 111, 222, FAMILY, "")
-    assert base != _subset_cache_key(FAMILY, 1, 112, 222, FAMILY, "")
-    assert base != _subset_cache_key(FAMILY, 1, 111, 223, FAMILY, "")
-    assert base != _subset_cache_key(FAMILY, 2, 111, 222, FAMILY, "")
-    assert base != _subset_cache_key("Other Family", 1, 111, 222, FAMILY, "")
+    base = _subset_cache_key(FAMILY, 1, 111, 222, FAMILY, "", 400)
+    assert base != _subset_cache_key(FAMILY, 1, 112, 222, FAMILY, "", 400)
+    assert base != _subset_cache_key(FAMILY, 1, 111, 223, FAMILY, "", 400)
+    assert base != _subset_cache_key(FAMILY, 2, 111, 222, FAMILY, "", 400)
+    assert base != _subset_cache_key("Other Family", 1, 111, 222, FAMILY, "", 400)
 
 
 def test_cache_key_covers_chain_rewrite_and_extra_chars() -> None:
@@ -256,11 +256,23 @@ def test_cache_key_covers_chain_rewrite_and_extra_chars() -> None:
     漏掉 `extra`：换一首含生僻字的歌，命中的是上一首裁好的产物，
     那些字在里面根本没有——症状是"预览空白、成片正常"，看成片发现不了。
     """
-    base = _subset_cache_key(FAMILY, 0, 111, 222, FAMILY, "")
-    assert base != _subset_cache_key(FAMILY, 0, 111, 222, "Other Head", "")
-    assert base != _subset_cache_key(FAMILY, 0, 111, 222, FAMILY, "鷗")
+    base = _subset_cache_key(FAMILY, 0, 111, 222, FAMILY, "", 400)
+    assert base != _subset_cache_key(FAMILY, 0, 111, 222, "Other Head", "", 400)
+    assert base != _subset_cache_key(FAMILY, 0, 111, 222, FAMILY, "鷗", 400)
     # 字符集合的顺序不该影响命中：同一批字符必须共用一份产物，
     # 否则用户每改一个字的位置就要重裁一次字体
-    assert _subset_cache_key(FAMILY, 0, 111, 222, FAMILY, "鷗𠮷") == _subset_cache_key(
-        FAMILY, 0, 111, 222, FAMILY, "𠮷鷗鷗"
+    assert _subset_cache_key(FAMILY, 0, 111, 222, FAMILY, "鷗𠮷", 400) == _subset_cache_key(
+        FAMILY, 0, 111, 222, FAMILY, "𠮷鷗鷗", 400
     )
+
+
+def test_cache_key_区分字重() -> None:
+    """同一个族的 Regular 与 Bold 是两份不同的字节，缓存键必须分开。
+
+    共用一个产物文件的话，先裁好的那份会被另一档当成命中直接下发——
+    症状是"勾了粗体没变化"，或者反过来"取消粗体还是粗的"，而且到底哪种
+    取决于谁先裁，换台机器就换个表现。
+    """
+    regular = _subset_cache_key(FAMILY, 0, 111, 222, FAMILY, "", 400)
+    bold = _subset_cache_key(FAMILY, 0, 111, 222, FAMILY, "", 700)
+    assert regular != bold
