@@ -90,7 +90,12 @@ jobs:
         # "未安装"的警告而不是真实结论。
         run: uv sync --all-extras
 
+      # 下面几步一律显式 `shell: bash`。Windows 的默认 shell 是 pwsh，多行 run 里
+      # **只有最后一条命令的退出码决定成败**，前面的失败会被无声吃掉——
+      # "前端 typecheck 挂了但 CI 绿着"正是这套门禁最不该出现的形态。
+      # GitHub 的 bash 是 `bash -eo pipefail`，两端行为一致。
       - name: Ruff
+        shell: bash
         run: uv run ruff check . && uv run ruff format --check .
 
       - name: pytest
@@ -104,6 +109,7 @@ jobs:
 
       - name: 前端类型检查 / lint / 构建
         working-directory: frontend
+        shell: bash
         run: |
           npm run typecheck
           npm run lint
@@ -170,6 +176,8 @@ jobs:
           workspaces: src-tauri
 
       - name: 安装依赖
+        # shell: bash 的理由同 check job：pwsh 下多行 run 只看最后一条的退出码。
+        shell: bash
         run: |
           uv sync --all-extras --group package
           npm ci
