@@ -666,9 +666,7 @@ def face_for_weight(info: FontInfo, weight: int) -> FaceRef:
     行为与加这个特性之前完全一致，不会因为缓存没刷新就报错。
     """
     if not info.faces:
-        return FaceRef(
-            weight=REGULAR_WEIGHT, subfamily="", path=info.path, index=info.index
-        )
+        return FaceRef(weight=REGULAR_WEIGHT, subfamily="", path=info.path, index=info.index)
     return min(info.faces, key=lambda f: abs(f.weight - weight))
 
 

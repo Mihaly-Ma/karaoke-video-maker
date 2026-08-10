@@ -267,12 +267,8 @@ def _build_ass_text(dto: ProjectDTO, *, embed_fonts: bool = False) -> str:
     builder = AssBuilder(project, metrics, real_bold_face=real_bold)
     if not embed_fonts:
         return builder.build()
-    embedded = chain_font_bytes(
-        project.style.font_names, builder.rendered_charset(), weight=weight
-    )
-    return AssBuilder(
-        project, metrics, embedded_fonts=embedded, real_bold_face=real_bold
-    ).build()
+    embedded = chain_font_bytes(project.style.font_names, builder.rendered_charset(), weight=weight)
+    return AssBuilder(project, metrics, embedded_fonts=embedded, real_bold_face=real_bold).build()
 
 
 # ---- POST /ass、GET /preview.ass ----
