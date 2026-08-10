@@ -1701,6 +1701,23 @@ uv run --python 3.12 --with audio-separator --with onnxruntime audio-separator \
 # 伴奏 = Bass + Drums + Other 相加（amix 必须 normalize=0，否则会被平均而变轻）
 ```
 
+### 版本号与发版
+
+```bash
+python3 scripts/version.py --check         # 检查所有落点是否一致（不带参数同义）
+python3 scripts/version.py --set 0.2.0     # 一条命令改全部落点（含各锁文件）
+python3 scripts/version.py --print         # 只打印当前版本，供脚本消费
+```
+
+版本号的真源是 `pyproject.toml`，其余十余处（两个 `package.json`、`Cargo.toml`、
+`tauri.conf.json`、FastAPI 的 `version=`，以及四份锁文件里记着的本项目自身条目）
+都是副本，一律用 `--set` 一起改。`--check` 跑在 pytest 与 CI 里，手改漏一处就红。
+
+**发版顺序：先 `--set` 改版本、提交，再对着那个 commit 打 tag。** 反过来（打完 tag
+再让 CI 按 tag 注入版本）是错的：产物会和它对应的 commit 说法不一致，从成品追回源码
+就断了线。CI 只做**校验**——打了 `v*` tag 就断言 tag 与仓库里的版本号相等，不一致
+直接红，绝不覆写。
+
 ### 打包与环境自动获取
 
 ```bash

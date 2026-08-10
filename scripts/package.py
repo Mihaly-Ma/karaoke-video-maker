@@ -51,9 +51,34 @@ BUILD_BACKEND = REPO_ROOT / "build-backend"
 
 IS_WINDOWS = sys.platform.startswith("win")
 
-# uvicorn 与 fastapi 大量用运行时 import（协议实现、事件循环、logging 配置），
-# 静态分析看不见，不 collect 会在启动时报 ModuleNotFoundError。
-COLLECT_ALL = ["uvicorn", "kvm"]
+# 整包收（子模块 + 数据 + 元数据）。共同点是**静态分析看不见它们真正加载了什么**。
+#
+# - uvicorn / kvm：大量运行时 import（协议实现、事件循环、logging 配置），
+#   不 collect 会在启动时报 ModuleNotFoundError。
+# - audio_separator：两条都踩了。架构类走
+#   `importlib.import_module(f"audio_separator.separator.architectures.{name}")`
+#   动态加载，静态分析一个都看不到；模型清单走
+#   `resources.open_text("audio_separator", "models.json")`，而它落在 `load_model()`
+#   的必经路径上（load_model → download_model_files → list_supported_model_files）。
+#   少任何一样，人声分离在打包后的应用里**直接不可用**——而且是跑到那一步才炸。
+COLLECT_ALL = ["uvicorn", "kvm", "audio_separator"]
+
+# 只收数据文件的包：代码静态分析找得到，但数据文件按 `__file__` /
+# `importlib.resources` 就地取。PyInstaller 只把 `.py` 收进 PYZ，这些数据默认一个
+# 都不带，症状是**打包照样能出、装完跑到那一步才报文件不存在**。
+#
+# 判据是"运行时会不会去读它"，不是"包里有没有数据文件"：site-packages 里绝大多数
+# 非 `.py` 文件是测试夹具、C 头文件、Cython 模板，进包纯属浪费体积。
+#
+# - torchcrepe：`load.py` 按 `os.path.dirname(__file__)/assets/{capacity}.pth` 找权重。
+#   漏了它，引导声一生成就报权重缺失。`full.pth` 89 MB，`tiny.pth` 2 MB——tiny 是
+#   `make_video.py --guide-crepe-model tiny` 给纯 CPU 机器留的退路，代价只有 2 MB，
+#   一起带。
+# - yt_dlp：`extractor/youtube/jsc/_builtin/vendor/*.js` 是 YouTube JS 挑战的求解脚本，
+#   用 `importlib.resources` 读。缺了它 `load_script()` 返回 None、不抛异常，只是少
+#   一条降级路径——但一共 14 KB，而 §5.1 早就写明 YouTube 这条链路会反复失效，
+#   没有理由主动少带一条退路。
+COLLECT_DATA = ["torchcrepe", "yt_dlp"]
 
 # `--lean` 排除的模块。注意排除的是**顶层包名**，PyInstaller 会连带跳过其子模块。
 HEAVY_MODULES = [
@@ -142,9 +167,16 @@ def build_backend(lean: bool) -> Path:
         if not src.is_file():
             raise SystemExit(f"许可证文件缺失，安装包不能这样出：{src}")
         cmd += ["--add-data", f"{src}{sep}."]
+    # `--lean` 排除掉的包不能再去 collect：既白白撑大产物，也让同一个包同时出现在
+    # 「收进来」和「排除掉」两张单子上，PyInstaller 的取舍不必去猜。
+    excluded = ALWAYS_EXCLUDE + (HEAVY_MODULES if lean else [])
     for mod in COLLECT_ALL:
-        cmd += ["--collect-all", mod]
-    for mod in ALWAYS_EXCLUDE + (HEAVY_MODULES if lean else []):
+        if mod not in excluded:
+            cmd += ["--collect-all", mod]
+    for mod in COLLECT_DATA:
+        if mod not in excluded:
+            cmd += ["--collect-data", mod]
+    for mod in excluded:
         cmd += ["--exclude-module", mod]
     cmd.append(str(BACKEND_DIR / "kvm" / "server.py"))
 
