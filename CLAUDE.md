@@ -907,6 +907,11 @@ PyInstaller 的运行时钩子已经把处理逻辑写进 `multiprocessing.freez
 而那行 `required: --port` 会顺着 `run_cancelable`（它把 stderr 并进 stdout）
 混进 JSON-lines 通道，**看起来就像 worker 分发失败**，排查时极易被带偏。
 
+**两个平台都已实测**：v0.1.0 出包时 macOS arm64 与 Windows x64 的 worker 分发冒烟测试
+均报「参数已抵达 worker」。Windows 这端本来是这次修复里唯一没验过的部分
+（`multiprocessing` 的启动方式与资源跟踪路径在 Windows 上本就不同），
+由**首次 Windows 出包**兜住——这正是把闸门设在产物上而非单测里的价值。
+
 **还有一处同样的写法，目前安全只是因为它不在打包链路上**：`kvm.doctor` 用
 `[sys.executable, "-c", …]` 起子进程问 torch 设备（§2.6 要求 torch 必须隔在子进程里问）。
 冻结产物实测同样掉进 argparse——但装好的应用**从不跑自检**（`kvm.doctor` 只被
@@ -936,7 +941,9 @@ PyInstaller 的运行时钩子已经把处理逻辑写进 `multiprocessing.freez
 - **冒烟测试还必须验 worker 子进程分发**（`smoke_test_workers()`）：判据是"参数到没到 worker 自己的 parser 手里"（stderr 出现 `--vocals` / `--audio`，且**不出现 `--port`**），而不是"进程起没起来"。理由见 §5.13——冻结后 `-m` 不可用，这条链路在源码环境里**永远测不出来**，只有拿打包产物跑才算数
 - **`scripts/package.py` 必须由项目 venv 的 Python 跑**（`.venv/bin/python scripts/package.py`）：它用 `sys.executable -m PyInstaller`，而系统 `python3` 上没有 PyInstaller
 - **实测体积（macOS arm64，含 CPU 版 torch）**：PyInstaller onedir **798 MB**，其中 torch 408 MB、llvmlite 123 MB、onnxruntime 65 MB、scipy 29 MB
-- Windows NSIS/WiX 有 **2GB 单安装包硬上限**（`tauri-apps/tauri#7372`）。按 macOS 的 798 MB 推算，Windows 端**大概率仍在限内**，但余量不大——**未实测**
+- Windows NSIS/WiX 有 **2GB 单安装包硬上限**（`tauri-apps/tauri#7372`）。**v0.1.0 已实测：NSIS 安装包 276 MB，余量充裕**，此前"余量不大"的估算偏悲观。
+  同一次构建的 macOS `.dmg` 是 **438 MB**——差距不是 Windows 少打了东西（Windows 的 torch wheel 反而更大：116.4 MiB vs 106.1 MiB），
+  更可能是 NSIS 的 LZMA 比 dmg 压得狠。**判断"包全不全"要看冒烟测试，不要看体积**：两端的冒烟测试项相同且都通过
 - **CUDA 版 torch 不进包（已定）**。PyPI 的 Windows `torch` wheel 本来就是 CPU-only；CUDA 版单个 wheel 就 2.58 GB，装进去必然撞穿 2 GB 上限。需要 CUDA 的用户自行替换，属高级用法
 - **`--lean`（排除 torch 等重依赖）目前不是可交付形态**：冻结后的解释器没有 pip，`kvm.media.deps` 那套"缺依赖就自动装"走不通（`sys.executable` 是打好的可执行文件）。`ensure_dependencies()` 在冻结形态下**直接这么报错**，不再走那条自动安装的路——此前它会落到"当前 Python 不是虚拟环境"那句上（PyInstaller 把 `sys.prefix` 与 `sys.base_prefix` 都指到 `_MEIPASS`），在装好的应用里完全是误导。它只用来量体积做对照。要让它可交付，得先验证"往 `private_deps_dir` 装 wheel 再加进 sys.path"这条路
 - 字体：`Noto Sans JP` / `源真ゴシック`（均 SIL OFL 1.1，允许随应用捆绑，需保留版权与许可证文本，不能单卖字体）
