@@ -179,6 +179,27 @@ def test_global_shift_clamped_at_first_token() -> None:
     assert out.warnings, "夹紧必须回报，静默夹紧会让用户以为旋钮坏了"
 
 
+def test_global_shift_下界不受制作名单行影响() -> None:
+    """制作名单的时间不参与渲染，因此也不该卡住整曲偏移。
+
+    歌词源把「曲名 - 歌手」「词：」「曲：」这些行塞在正文最前面，实测第一行就在
+    0ms（CLAUDE.md §6.1）。渲染层用 `if not ln.is_metadata` 把它们整个滤掉、
+    名单窗口另算（§8.5），可下界计算若把它们算进去，一首首句在 17.5s 的歌会
+    **一毫秒负偏移都调不了**——真实工程上就是这么发作的。
+    """
+    p = _project()
+    p.lines.insert(
+        0,
+        LineDTO(id="L0", tokens=[_tok("曲", 0, 200), _tok("名", 200, 200)], is_metadata=True),
+    )
+
+    out = ops.shift(p, scope="global", delta_ms=-5000)
+
+    # 下界仍由第一句真歌词（1000ms）决定，而不是名单那行的 0ms
+    assert p.global_offset_ms == -1000
+    assert out.warnings
+
+
 def test_line_shift_clamped_at_zero() -> None:
     p = _project()
 

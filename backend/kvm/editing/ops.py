@@ -615,8 +615,14 @@ def _shift_global(project: ProjectDTO, delta_ms: int, out: EditOutcome) -> None:
 
     夹紧下界取"最早的 token 起点的相反数"——再往前推第一个字就落到负时间了，
     ASS 里表达不出来。工程尚无 token 时不设限，此时没有任何时间会变负。
+
+    **制作名单行不算数。** 它们的时间是歌词源塞在正文里的产物，实测每行只有
+    几十毫秒（CLAUDE.md §8.5），渲染层压根不用——`AssBuilder` 先
+    `if not ln.is_metadata` 把它们滤掉，名单窗口另行算在"屏幕上真的没有歌词"
+    的空档里。拿一个不参与渲染的时间当下界，用户会看到一首首句在 17.5s 的歌
+    **一毫秒负偏移都调不了**，因为名单的第一行恰好落在 0ms。
     """
-    starts = [t.start_ms for ln in project.lines for t in ln.tokens]
+    starts = [t.start_ms for ln in project.lines if not ln.is_metadata for t in ln.tokens]
     want = project.global_offset_ms + delta_ms
     if starts:
         lower = -min(starts)
