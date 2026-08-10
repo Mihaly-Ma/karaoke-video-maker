@@ -24,8 +24,9 @@ Install three things by hand — [`uv`](https://docs.astral.sh/uv/), **Node.js 1
   it is not.
 - **macOS on Apple Silicon, or Windows x64.** Intel Macs are unsupported: PyTorch dropped
   Intel-macOS after 2.2 and separation needs it. Windows has never been run here.
-- **Model weights download on first use** — 84–640 MB for separation, 2–89 MB for the pitch model.
-  Never silently: the self-check reports what is missing and downloads nothing.
+- **Separation weights download on first use** (84–640 MB), never silently: the self-check
+  reports what is missing and downloads nothing. The guide-melody pitch model (CREPE) ships
+  inside its Python package — no network at runtime.
 - **No cloud AI, by design.** Fetching video and lyric text is fine; sending audio or lyrics to a
   remote model is out of scope (`CLAUDE.md` §2.1).
 
@@ -45,6 +46,23 @@ prints a copy-pasteable fix; a missing optional extra only warns, and names the 
 machine-readable; `dev.py --backend-port/--frontend-port` move the servers. For the environment
 report on its own: `PYTHONPATH=backend uv run python -m kvm.doctor --copy`.
 
+### As a desktop app
+
+```bash
+python3 scripts/package.py   # frontend build → PyInstaller → Tauri bundle
+```
+
+Output lands in `src-tauri/target/release/bundle/` (macOS: a 1.1 GB `.app`, a 352 MB `.dmg`).
+The window is the app — nothing to open in a browser. On first launch it downloads a
+libass-enabled ffmpeg into its own private directory (`~/.karaoke-video-maker/bin`), with a
+progress bar, a pinned SHA256, and resumable transfers; uninstalling is deleting that directory.
+If it cannot, the launch screen says what is missing, why, and what to do — it never spins
+forever.
+
+Builds are **unsigned**. macOS Gatekeeper blocks the first launch of a `.dmg` you downloaded:
+right-click the app → *Open* → *Open*, or `xattr -dr com.apple.quarantine "/Applications/Karaoke Video Maker.app"`.
+Windows SmartScreen shows *More info* → *Run anyway*. Building locally avoids both.
+
 Driving it yourself instead: `uv sync --all-extras`, then
 `uv run uvicorn --app-dir backend kvm.api.app:app` and `npm --prefix frontend run dev`.
 Both servers set the COOP/COEP headers JASSUB needs for `SharedArrayBuffer`. A background font
@@ -59,11 +77,11 @@ Open `http://localhost:5173`, create a project, walk the five steps.
 
 | Step | What you do |
 |---|---|
-| **1. Material** | Paste a YouTube link or drop in a local file. Separation runs from the same screen, three quality tiers. A low-res proxy video is built in the background, so a 4K AV1 source scrubs smoothly. |
+| **1. Material** | Paste a YouTube link or drop in a local file. Separation runs from the same screen, three quality tiers. A low-res proxy video is built in the background, so a 4K AV1 source scrubs smoothly. The guide melody (ガイドメロディ) is made here too — five knobs, and you audition it on the spot instead of finding out after a burn. |
 | **2. Lyrics** | Search for a source, or paste and import text yourself — equal-weight entry points, not a happy path and a fallback. Candidates show their duration difference from your video: the best signal for telling the right release from a cover or a 41-second preview. Granularity and furigana read *unknown* until you open one, because the search endpoint does not know either. |
 | **3. Edit** | The heart of the tool. Keep the per-character timing the source gave you, or build it yourself: play at 0.5–1.0×, tap <kbd>Space</kbd> per syllable, drag boundaries, nudge with arrow keys (±10 ms, ±1 ms with <kbd>Alt</kbd>). Colour shows where each timing came from. Readings, furigana and the lyric text are edited on this same stage. |
-| **4. Style** | Pick a font; set size, outline and shadow as a share of frame height, so one style works at 1080p and 4K. Each voice part gets four colours — unsung fill and outline, sung fill and outline — because the outline flips with the fill. The preview is a real libass render of the finished frame over black, green or white. |
-| **5. Export** | Choose the audio track and whether to mix in a synthesized guide melody (ガイドメロディ). Before a multi-minute burn, the cue rail jumps the preview to the spots most likely to be wrong: first line, verse heads, credits card, widest line, densest furigana, ending. |
+| **4. Style** | Build an ordered **font chain** — whatever the primary font lacks, the next one supplies — searching hundreds of system fonts by their English, Japanese or Chinese name. Set size, outline and shadow as a share of frame height, so one style works at 1080p and 4K. Each voice part gets four colours — unsung fill and outline, sung fill and outline — because the outline flips with the fill. The preview is a real libass render of the finished frame over black, green or white. |
+| **5. Export** | Choose the audio track and whether to mix in the guide melody — the preview plays it, so the checkbox is not a leap of faith. Before a multi-minute burn, the cue rail jumps the preview to the spots most likely to be wrong: first line, verse heads, credits card, widest line, densest furigana, ending. |
 
 | | |
 |---|---|
@@ -136,7 +154,8 @@ Verified against the code. Full breakdown, including what *does* work: [`docs/st
 - **Voice-part diarization**, and the lead/backing split — so no コーラス入り mix yet.
 - **Downloading dependencies for you.** `python -m kvm.doctor` checks the environment and
   `scripts/setup.py` installs the Python and npm side, but ffmpeg is only *located*, never fetched.
-- **Bundled fonts.** You pick from system fonts; glyph coverage *is* checked before you render.
+- **Bundled fonts.** You pick from system fonts. Glyph coverage across the whole chain *is*
+  checked before you render, and it tells you which font ends up drawing each character.
 - **Japanese and English UI**, and **Windows** has never been run.
 
 ## License and legal

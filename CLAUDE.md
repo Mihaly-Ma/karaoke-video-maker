@@ -129,6 +129,10 @@ Windows x64 与 macOS Apple Silicon (arm64) 双端。任何"只有 Linux 有 whe
 - **自检不下载任何东西。** 模型权重只报告有没有（§5.14：静默拉 1.3 GB 会被当成程序卡死），下载必须是显式动作。
 - **每条检查都要自带"是不是启动的硬前提"。** 硬前提不满足就不启动；其余一律降级放行，并说清用户正在放弃哪些功能（§2.5 失败要降级不能终止）。判据只允许有一处定义，启动脚本不得另立一套。
 - **字体缺字必须在渲染前拦截**。预览（JASSUB）与导出（ffmpeg）若 fallback 到不同字体，WYSIWYG 直接失效，而这类问题往往到成片里才暴露。
+  单个字体覆盖不全是常态，所以字体是**有序候选链**（`KaraokeStyle.font_names`）而非一个族名——缺字时用谁，必须是工程里显式记着的一份数据，两端照同一份走（机制见 §5.12）。
+  预检因此回答两个问题：**整条链够不够**，以及**每个字实际由链上哪个字体承担**。后者不是锦上添花——用户配了链却不知道链尾有没有被用到，等于配了个不知道有没有生效的东西。
+- **预览用的子集字体必须按本曲字符集加裁**。子集默认只含 ASCII + 假名 + JIS X 0208 一/二水准，而「鷗」「𠮷」「①」「㍿」都在集合外，
+  症状是**预览空白、成片正常**——与缺字相反的分叉，只看成片根本发现不了。本曲用到的额外字符由 ASS 头部的声明带给前端（§5.12）。
   **警惕这一条退化成死代码**：后端端点与前端客户端函数曾经都写好了、注释还引用着本节，却没有任何调用点——检查存在与检查生效是两回事，加接口时要连调用点一起验。
 - 自检报告要能一键复制，便于排查环境问题。
 
@@ -744,6 +748,48 @@ libass 扩展可以放心用（链路两端都是 libass）：`BorderStyle=4`（
 
 **字体**：JASSUB 用 `ASS_FONTPROVIDER_NONE`（浏览器侧没有系统字体，必须通过 `fonts` / `availableFonts` 显式喂入，自带的 `default.woff2` 只有 145KB 不含 CJK；关闭 `queryFonts`（会联网拉 Google Fonts）与 `useLocalFonts`（Chromium 独有、需授权、破坏确定性））。ffmpeg 用 `ASS_FONTPROVIDER_AUTODETECT`，`fontsdir` 只是**追加**搜索路径，**无法禁用** CoreText / DirectWrite / fontconfig 回退。所以更稳的做法是把字体 UUEncode 进 ASS 的 `[Fonts]` 段，并给打包字体使用唯一的 family name 以降低误匹配。
 
+#### 字体链：缺字时用谁，必须两端同源（已定 D17，已实测）
+
+没有一个日文字体覆盖得全，所以字体是**有序候选链**（§2.6）。难点全在"怎么让 libass 照这条链走"，
+而且两端的默认行为恰好相反：预览侧无处可退（provider NONE），导出侧退到哪儿由系统说了算且禁不掉。
+
+**下面这条是实测结论，不要凭直觉改回去**（`experiments/ass_embedded_fonts.py` 是回归基线）：
+
+| 做法 | 结果 |
+|---|---|
+| 各字体保留各自的族名，全部嵌进 `[Fonts]`，指望 libass 在已加载字体间回退 | ❌ **不成立**。ffmpeg 侧照样去用系统字体——libass 不会为了一个缺字去翻族名对不上的已加载字体 |
+| **把链上每个字体都改写成链首的族名**，让它们成为同一个族的多个字面 | ✅ 成立。libass 在同族字面里挑一个带该字形的，这是字体匹配的基本功能，不是回退启发式 |
+
+族名统一之后还有一步不能漏：**把字型声明也一并归一**（`usWeightClass` → 400、
+`fsSelection` 清 BOLD/ITALIC 置 REGULAR、`head.macStyle` → 0）。只归一字重是不够的——
+实测 `bold=True` 时链首（`fsSelection` 带 BOLD 位）反而落选，**两个字体都有的字由链尾画出**，
+用户选的主字体在自己有的字上都不生效；而 `bold=False` 时链首正常胜出。
+同一份数据因为一个开关就换字体，正是这条规约要消掉的不确定性。
+代价：Bold 开关从此对每个字体都走 libass 的合成粗体，而在此之前，
+自称粗体的字面（如 ヒラギノ角ゴ StdN W8）会**静默忽略** Bold 开关——也就是说这一改让行为一致了。
+
+两端各自的喂法（喂的是**同一批子集产物字节**，不是各裁一次）：
+
+| 端 | 怎么拿到字体 | 为什么不能反过来 |
+|---|---|---|
+| 预览 | `GET /fonts/subset?family=&as=&extra=` 逐个取，构造 JASSUB 时 `fonts: [...]` 全部喂入 | ASS 里塞字节的话，每编辑一下就要重传几 MB（一份子集 UUEncode 后约 6.8 MB） |
+| 导出 | 同一批字节 UUEncode 进 `[Fonts]` | ffmpeg 侧不把字节摆在它面前，就控制不住缺字时它选谁 |
+
+预览侧靠 ASS 头部一行 `; kvm-preview-fonts: {"chain":[...],"extra":"..."}` 知道该取哪几个字体、
+还要补哪些字。写进 ASS 而不是另开接口，是因为**它必须与这份 ASS 严格同步**——多一次往返
+就多一个"字幕已经换了字体、字体还没换过来"的窗口期，而那个窗口期里画面是空白的。
+这不违反 §4.1 的"ASS 永不被反向解析回工程"：读的是**渲染契约**，不是工程状态。
+
+**验证方式也必须记下来，因为"能配置一条链"完全不构成证据**：
+`frontend/scripts/verify-font-chain.mjs` 用一个链首真的没有的字（`𠮷`，ヒラギノ角ゴ StdN 的 cmap 里确实没有），
+让每个字形去**认领它最像的那份参照渲染**（明朝独用 / 丸ゴ独用 / 链首独用），
+两端各认一次。实测认领距离与次近相差 10–100 倍（如成片侧「𠮷」认明朝 0 格、次近 201 格），
+同配置两次渲染逐格相同（噪声底 0），chromium + WebKit 双引擎全绿；
+对照组 `KVM_SABOTAGE=nochain|samefont` 各自转红。
+**不要退回"换链尾后差了多少格"那种阈值判据**：它只说得出"变了"，说不出"变成谁"，
+而同一个字被同一个字体画两次也不是逐格相同（换链尾会让排版落在不同亚像素位置，边缘抖十几格），
+拿魔数去卡，红了之后第一反应会是调阈值。
+
 **目标是感知等价，不是像素级一致** —— JASSUB 的 `_computeRenderSize()` 默认 `prescaleHeightLimit=1080` 并乘 devicePixelRatio 取整，预览光栅化尺寸几乎不可能等于导出尺寸。回归测试用 SSIM 或像素差阈值。
 
 ### 5.13 后端长任务编排（已定 D5，待实现）
@@ -766,13 +812,67 @@ libass 扩展可以放心用（链路两端都是 libass）：`BorderStyle=4`（
 
 **`audio-separator` 默认把模型下载到 `/tmp/audio-separator-models/`** —— macOS 会被系统定期清理、Windows 语义完全不对。**必须显式传 `model_file_dir`** 指向 `platformdirs.user_cache_dir`。
 
-### 5.15 打包（后期）
+### 5.15 打包（已跑通 macOS 一端）
+
+出包一条命令：`python3 scripts/package.py`（前端构建 → PyInstaller → Tauri）。
 
 - Tauri 2 作为壳；Python 后端用 PyInstaller `--onedir`（**不是 `--onefile`**，PyTorch 体量下每次启动解压体验崩坏）
-- **风险**：Tauri `externalBin` 在 macOS 上会导致 notarization 失败（`tauri-apps/tauri#11992`，仍 open，无 workaround）。这是**分发路径上的潜在阻断项**，不是脚注 —— 若走对外分发路线，必须先验证这条
-- Windows NSIS/WiX 有 **2GB 单安装包硬上限**（`tauri-apps/tauri#7372`）。这是"把 PyTorch CUDA 版 + 模型全塞进安装包"的直接天花板
-- torch 默认只装 CPU wheel（macOS arm64 约 75MB 自带 MPS；Windows CPU 约 111MB）。CUDA 版单个 wheel 就 2.58GB，**uv 必须显式配 PyTorch index + 平台 marker**（PyPI 的 Windows torch wheel 是 CPU-only，不配就会静默得到 CPU 版）
+- **后端不走 `externalBin`，走 `bundle.resources` + `std::process::Command`（已定）。** 两条独立理由，任一条都足够：`externalBin` 在 macOS 上会导致公证失败（`tauri-apps/tauri#11992`，仍 open、无 workaround）；而且它要求每个条目是**单个文件**并带目标三元组后缀，`--onedir` 产物是一整个目录，本来就塞不进这个模型。绕开之后，**将来真要签名公证时不会被这条卡住**
+- **打包后必须就地冒烟测试**（`scripts/package.py` 已内建）：起得来、`/api/health` 通、首页是 HTML、**且首页带 `COEP: require-corp`**。最后一条尤其重要——缺了它页面拿不到跨源隔离，JASSUB 起不来，而这个故障要等用户装完打开才暴露
+- **实测体积（macOS arm64，含 CPU 版 torch）**：PyInstaller onedir **798 MB**，其中 torch 408 MB、llvmlite 123 MB、onnxruntime 65 MB、scipy 29 MB
+- Windows NSIS/WiX 有 **2GB 单安装包硬上限**（`tauri-apps/tauri#7372`）。按 macOS 的 798 MB 推算，Windows 端**大概率仍在限内**，但余量不大——**未实测**
+- **CUDA 版 torch 不进包（已定）**。PyPI 的 Windows `torch` wheel 本来就是 CPU-only；CUDA 版单个 wheel 就 2.58 GB，装进去必然撞穿 2 GB 上限。需要 CUDA 的用户自行替换，属高级用法
+- **`--lean`（排除 torch 等重依赖）目前不是可交付形态**：冻结后的解释器没有 pip，`kvm.media.deps` 那套"缺依赖就自动装"走不通（`sys.executable` 是打好的可执行文件）。它只用来量体积做对照。要让它可交付，得先验证"往 `private_deps_dir` 装 wheel 再加进 sys.path"这条路
 - 字体：`Noto Sans JP` / `源真ゴシック`（均 SIL OFL 1.1，允许随应用捆绑，需保留版权与许可证文本，不能单卖字体）
+- 应用图标由 `python3 scripts/make_icons.py` 从 `src-tauri/icons/source.png` 生成（设计稿带水印且无 alpha，必须先清洗，理由见该脚本文档字符串）
+
+### 5.16 外壳形态：界面由本地 HTTP 下发（已实测，不要改回内嵌）
+
+**结论先行：Tauri 壳的窗口不加载内嵌资源，而是加载 `http://127.0.0.1:<随机端口>`，
+由 Python 后端同源下发前端、`/api` 与 `/media`。**
+
+理由是一条硬约束（macOS 27 / Tauri 2.11 / wry 0.55 / WKWebView 实测）：
+
+| 页面来源 | `isSecureContext` | `crossOriginIsolated` | **全局 `SharedArrayBuffer`** | rVFC | OffscreenCanvas transfer | 媒体 seek |
+|---|---|---|---|---|---|---|
+| `tauri://localhost`（app 协议） | ✅ | ✅ | **❌ 不存在** | ✅ | ✅ | ✅ |
+| `http://127.0.0.1:<port>` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+
+**没有 SAB 全局不是"退回单线程"，是 JASSUB 根本实例化不了**：它的 wasm 带 pthread 编译，
+glue 里写死 `new WebAssembly.Memory({…, shared: true})`，且 `_emscripten_has_threading_support`
+直接读这个全局。装进 app 协议的壳里就是个放不出字幕的应用。
+
+有意思但**不要依赖**的一点：`tauri://` 上 SAB 这个*类型*其实存在
+（`WebAssembly.Memory({shared:true})` 能建，其 buffer 的构造器就叫 SharedArrayBuffer），
+只是全局绑定没暴露。理论上可以打 shim 救回内嵌形态——**未验证，不要走这条路**，
+一个未验证的 shim 换来的"内嵌"没有价值。
+
+已被验证是错的做法：
+
+- **用 `tauri dev` 去验证跨源隔离**。dev 模式下前端由 Tauri 自己起的 dev server
+  （`127.0.0.1:1430`）下发，那台服务器**不发 COOP/COEP**，`crossOriginIsolated` 恒为 false——
+  会得到假阴性。要看真形态必须 `tauri build`（`--debug` 也行）。探针见 `src-tauri/probe/`
+- **在前端里写死后端端口**。端口由外壳向内核要（`127.0.0.1:0`）后单向下发，
+  用户机器上很可能已经有东西占着 8000
+- **让用户知道内部走了 HTTP**。不打开系统浏览器、界面上不出现任何地址；
+  只绑 `127.0.0.1`，绝不绑 `0.0.0.0`
+
+配套事实：
+
+- Tauri 的 app 协议**没有条件请求**（永远 200、不发 ETag），所以 Vite 那个
+  「304 缺 COEP → worker 被拒」的坑在这条链路上不存在。**但不要据此删掉
+  `vite.config.ts` 里的中间件**——那是在真 Safari 上实测出来的，两套链路
+- 打包后的壳**不给远程页面开 IPC**（`window.__TAURI__` 有注入但命令被拒，
+  报 "Plugin not found"，要在 capability 里放行 `remote.urls` 才行）。
+  好在主界面根本不需要 IPC——它要的一切都走 HTTP。
+- **全应用只有一条 IPC 命令 `enter_app`**（启动页 → 壳，"我准备好了，进主界面"）。
+  **不要让启动页自己 `location.replace(后端地址)`**：那是跨源导航，实测时灵时不灵——
+  同一份页面同一套配置，有的运行能跳、有的停在启动页上，症状是"卡在加载界面"。
+  交给壳则行为确定，而且目标地址只存在于 Rust 侧，页面改不了它。
+  反方向（壳 → 页面的事件）用单向 `eval`，不需要回执也就不需要再开一条命令
+- 启动页（`src-tauri/boot/`）由 app 协议下发，它跨源轮询后端，所以后端 CORS
+  白名单里要有 `tauri://localhost`（macOS/Linux）与 `http://tauri.localhost`（Windows）。
+  **这两条只服务于"还没进主界面的那几秒"**，真界面是同源的，不要把白名单开得更宽
 
 ---
 
@@ -828,7 +928,8 @@ libass 扩展可以放心用（链路两端都是 libass）：`BorderStyle=4`（
 - **ミルフィーユ（上下半分双色）和纵向渐变在 ASS 里没有原生支持**，只能用两个横向 `\clip` 带叠加，事件数翻倍
 - **ffmpeg 硬压时渐变/彩虹效果出现条带**（libass #816，被判定为"非 libass 的 bug"），根源在 YUV 色度子采样。考虑 `format=yuv444p` 或提高位深
 - **ASS 是实现定义格式**，libass 与 VSFilter 不一致时官方立场是"VSFilter 对、libass 错"，libass 的偏离行为随时可能改。**必须把 libass 版本当作产品依赖锁死，不要用系统 ffmpeg**
-- **字体覆盖检查必须做成硬性 pre-flight check**（约 20 行：用 `fontTools` 读 cmap，扫描全部歌词字符 + 注音假名）。缺字后果严重：预览和导出可能 fallback 到**不同**字体，直接摧毁 WYSIWYG
+- **字体覆盖检查必须做成硬性 pre-flight check**（用 `fontTools` 读 cmap，扫描全部歌词字符 + 注音假名 + 制作名单）。缺字后果严重：预览和导出可能 fallback 到**不同**字体，直接摧毁 WYSIWYG。查的是**整条字体链**，且要报出每个字由谁承担（§5.12）
+- **libass 不会为了缺字去翻族名对不上的已加载字体**。"把带该字形的字体也嵌进去，它自然会找到"是错的——实测 ffmpeg 侧照样用系统字体。必须让整条链共用同一个族名（§5.12）
 - **Windows 绝对路径在滤镜图里必须转义**（`:` 和 `\` 是分隔符/转义符）：`ass=f='C\:/work/lyrics.ass'`。建议统一 chdir 到工作目录 + 相对路径
 
 ### 6.4 环境与打包
@@ -1039,7 +1140,7 @@ effective = manual_override if manual_override.locked else computed
 | **高** | 编辑器状态层 | 撤销/重做、工程持久化、崩溃恢复。见 §2.5——"一站式"定位下这是致命伤而非遗憾 |
 | **高** | 三级调轴 UI + 注音编辑 | 整体 / 单句 / 单词，以及 tap-to-time 手工打轴 |
 | **高** | 歌词**搜索 + 下载**界面 | 不是"抓取"：多源并行搜索，把候选摆出来让用户挑。详见 §5.2 备注 |
-| ~~中~~ **已实现** | **引导声（ガイドメロディ）** | 见下方「§8.9 引导声的合成规格」 |
+| ~~中~~ **已实现** | **引导声（ガイドメロディ）** | 素材页可生成、试听、调参，导出与预览用同一份产物。见下方「§8.9 引导声的合成规格」 |
 | **中** | 声部自动归属 | 见下方「§8.7 声部识别的方向」。手工标记已是可用主路径，这只是省力 |
 | **低** | 网易云歌词源 | 行级兜底 + 与 QQ 交叉校验，**不指望逐字**（匿名 API 拿不到 yrc） |
 | **低** | 同屏多声部各走各的轴 | 数据结构已预留（`Line` 时间可重叠 + `voice_part`），编辑器支持待做 |
@@ -1108,7 +1209,8 @@ effective = manual_override if manual_override.locked else computed
 
 - **对唱重叠段的强制对齐**：两人同时唱不同歌词时单流 CTC 会显著劣化（§6.2 已记，
   验证曲正好有这种段）。分层后至少能把主唱与和声分开对齐
-- **逐声部引导声**：重叠段上对混合人声做 pYIN 提取基频会得到混乱结果，分层后可分别提取
+- **逐声部引导声**：重叠段上对混合人声提基频只会得到其中一条声部（单基频跟踪器
+  面对复音本就没有正确答案），分层后可分别提取
 
 **这里有一条容易踩错的评价标准**：用于对齐与提取 f0 的分离**不需要好听**。
 CTC 要的是可懂度，引导声只要 f0，二者对残留伪影的容忍度都远高于"给人听"。
@@ -1124,8 +1226,8 @@ CTC 要的是可懂度，引导声只要 f0，二者对残留伪影的容忍度�
 **自动识别出 N 个声部时要自动分配 N 套互相区分得开的默认配色**，
 不能要求用户先手工建声部再配色，否则"自动"没有省到力。
 
-**男女对唱是最容易的一档，而且有个近乎免费的信号**：引导声功能本来就要用 pYIN
-抽基频（`pipeline/guide_melody.py`），拿这份 f0 做男女判别几乎零成本——
+**男女对唱是最容易的一档，而且有个近乎免费的信号**：引导声功能本来就要用 CREPE
+抽基频（`pipeline/guide_melody.py`，§8.9），拿这份 f0 做男女判别几乎零成本——
 与 §8.5 中"用去人声阶段本就产出的鼓轨做节拍检测"是同一类思路：**优先用流水线上
 已经存在的信号，不要为每个功能各引入一个模型。**
 
@@ -1154,10 +1256,75 @@ CTC 要的是可懂度，引导声只要 f0，二者对残留伪影的容忍度�
 
 ## 8.9 引导声的合成规格（已实现）
 
-`pipeline/guide_melody.py` + CLI `--guide-vocals`。链路：vocals stem → **CREPE** 提基频 →
-切音符 → 合成 → 混入伴奏。
+`pipeline/guide_melody.py`（算法）+ `media/guide.py`（作业）+ CLI `--guide-vocals`。
+链路：vocals stem → **CREPE** 提基频 → 切音符 → 合成 → 混入伴奏。
 
 **不是把人声调小混回去。** 残留原唱会和演唱者打架，咬字含混反而更难跟。
+
+### 引导声是一件**素材**，不是导出时的一个开关
+
+它和分离出的 stem、编辑代理同类：先做好、后面反复用。所以生成入口在素材页，
+产物落在 `ProjectDTO.guide_audio_path`，`GET /api/media/file/{id}/guide` 可播。
+
+理由不是"归类整齐"，而是**它好不好用只能靠耳朵判断**。参数改完必须立刻听得到；
+等到导出才发现跑调，一次几分钟的烧录就白费了。同一条理由要求预览必须真的把它
+放出来——预览里放不出来的东西，用户就只能靠导出来试听，那正是这条产品线要消灭的。
+
+配套三条：
+
+- **导出优先复用素材页的产物**（指纹对得上时）：用户试听并认可的就是那一份，
+  重算一次既慢又可能因为推理不确定性给出略有差别的结果。指纹对不上或压根没生成时
+  就地合成一份，**不阻断导出**（§2.5），且用工程当前那组参数——
+  否则用户调了半天，导出拿到的是默认参数那条轨。
+- **导出片段时引导声仍按整曲时长合成**。它的时间是绝对的，而 `burn` 用的是
+  output seek；按片段时长合成会得到一条只覆盖 `[0, duration)` 的轨，
+  `start_s` 之后的片段里引导声整段消失。
+- **预览的引导声增益是 1/√2，不是 1**。引导声文件是单声道，导出时 `amix` 的
+  上混矩阵为保功率给每声道乘 1/√2，于是成片里比它自己的文件电平低 3 dB
+  （实测：引导声 −19.45 dBFS，"成片混音 − 伴奏"残差 −22.46 dBFS，
+  相关系数 1.0000）。预览按 1.0 播，用户就是照着一个比成片响 3 dB 的声音在调音量。
+  **不要反过来去改导出侧的上混**——下面那个 `gain=0.11` 的默认值就是在这条链路的
+  末端量出来的。
+
+### 只暴露五个参数，其余保持默认
+
+`GuideConfig` 有十几个字段，全摊到界面上是灾难：`pitch_median_frames`、
+`cents_tolerance`、`hop_s`、`sr_analysis` 这些要么是 f0 管线的标准步骤，要么是按
+实测间隙分布定死的阈值，用户既没有判据去调，调了也只会把本节的结论推翻。
+
+留下的五个各自对应**一句真实的抱怨**，而且都能在产物上量出来（实测，赤春花全曲）：
+
+| 参数 | 抱怨 | 客观读数 |
+|---|---|---|
+| 音量 `gain` | 太响 / 太轻 | 0.11→0.30 时 RMS −20.98→−12.27 dBFS（+8.71 dB，与 20·log₁₀(0.30/0.11) 相符） |
+| 音色 `timbre` | 太尖 / 被编曲埋掉 | square→sine 时 >4kHz 能量占比 0.80%→0.00% |
+| 明亮度 `max_harmonics` | 太亮 / 太闷 | 16→2 时 >4kHz 能量占比 0.80%→0.00% |
+| 灵敏度 `voicing_drop_db` | 弱唱处没声音 | −24→−32 时发声占空比 67.3%→69.1% |
+| 连音 `legato_gap_ms` | 一顿一顿 / 该停的地方还在响 | 200→0 时间隙 >20ms 的个数 15→75 |
+
+**明亮度对 `sine` 无效**（它只有基波），界面上要禁用并说明，而不是给一个拖了
+没反应的滑块。
+
+### 改参数不自动重新生成，但"参数已变"必须可见
+
+整曲跑一次 CREPE 是十几到几十秒（本机 4:43 / MPS / full 模型实测 16–25s）。
+每拖一下滑块就重算不可接受，debounce 也只是推迟——连调三个参数就排三次队。
+所以**改参数只保存，重新生成由用户显式触发**。
+
+由此必然出现一个中间态：参数已改、产物还是旧的。**这个状态必须报出来**
+（`GuideStatus.stale`），否则用户会以为参数根本没生效。
+
+两个指纹各管一件事，不要合并：缓存命中用 `(vocals_sha256, 参数, 版本)`（内容寻址，
+§5.13 规定的形态，负责正确性）；界面上的 stale 判断用
+`(人声轨路径/体积/mtime, 参数, 版本)`——它会被前端轮询，为一次状态查询去哈希几十 MB
+的 wav 纯属浪费，而它偶然漏判也不会出错，真正生成时第一个键仍会未命中。
+
+### 撤销栈的两侧刚好都在这里
+
+**参数占一格撤销**（`store.mutate`）——那是用户拖滑块表达的意图；
+**产物路径与指纹不占**（`store.update_derived` + `BACKEND_ONLY_FIELDS`）——
+那是后台作业的登记（§8）。撤销回到旧参数时产物路径必须原样留着，
+否则界面显示"未生成"而文件明明还在磁盘上。
 
 ### 音高提取必须用 CREPE，不要用 pYIN（已定）
 
@@ -1335,11 +1502,16 @@ README 属于 `.claude/rules/doc-style.md` 里明确豁免"不许贴代码"的�
     重点覆盖 `\kf` 扫光边缘、`\blur`、`\bord+\shad`、`\fad`、`\t` 动画、
     日文小字号注音栅格化。
 
-12. **Tauri 壳内的 WebView 兼容性**：浏览器侧的 WebKit 行为已经摸清（`require-corp`
-    可拿到跨源隔离；AV1/Matroska 放不了，已由代理视频解决——见 §5.11.5），
-    但 **Tauri 壳内未测**：WebView2 与 WKWebView 对 rVFC、
-    `OffscreenCanvas.transferControlToOffscreen`、`VideoFrame` 的支持，
-    以及 Tauri 自己的 COOP/COEP 头配置是否真的生效。两个平台都要早测。
+    **字体选择这一维已经有了**（`verify-font-chain.mjs`，见 §5.12），但它刻意
+    **不跨引擎比像素**——两端是两份不同的 libass 构建，逐像素相等做不到，
+    勉强比会得到一个"差不多"的阈值，而"差不多"正好盖住"换了个字体"这种量级的差异。
+    它改为两端各自与自己的参照比，再合并结论。做整体像素回归时要正视同一个问题：
+    **先想清楚阈值之下会漏掉什么**，不要先定阈值再找解释。
+
+12. **Tauri 壳内的 WebView 兼容性**：macOS 侧**已实测**（结论见 §5.16），
+    结论改变了外壳形态——界面必须由本地 HTTP 下发，不能内嵌进 app 协议。
+    **Windows（WebView2）那半仍未实测**：探针已做成外壳的常驻能力
+    （`src-tauri/probe/`），拿到 Windows 机器一条命令就能跑出同一张能力表。
 
 ---
 
@@ -1446,6 +1618,30 @@ uv run --python 3.12 --with audio-separator --with onnxruntime audio-separator \
 # 伴奏 = Bass + Drums + Other 相加（amix 必须 normalize=0，否则会被平均而变轻）
 ```
 
+### 打包与环境自动获取
+
+```bash
+python3 scripts/package.py                # 前端构建 → PyInstaller onedir → Tauri 出包
+python3 scripts/package.py --backend-only # 只打后端（调 PyInstaller 配置时）
+python3 scripts/package.py --lean         # 排除 torch 等重依赖，只用来量体积
+python3 scripts/make_icons.py             # 从 src-tauri/icons/source.png 生成整套图标
+
+# 环境自动获取（§2.6「获取」阶段）
+PYTHONPATH=backend uv run python -m kvm.bootstrap                # 看缺什么
+PYTHONPATH=backend uv run python -m kvm.bootstrap --fetch ffmpeg # 下载并安装到应用私有目录
+PYTHONPATH=backend uv run python -m kvm.bootstrap --import-from <归档>  # 离线导入
+
+# 开发期在壳里跑（先 scripts/dev.py 起好前后端，再让壳指向 Vite —— 有 HMR）
+KVM_BACKEND_ORIGIN=http://localhost:5173 npm run shell:dev
+
+# WebView 能力探针（Windows 那端就靠它出结论）
+python3 src-tauri/probe/probe_server.py 8321 src-tauri/probe/sample.mp4
+npm run shell:probe
+KVM_UI_URL=http://127.0.0.1:8321/ src-tauri/target/debug/kvm-shell
+```
+
+**`tauri dev` 测不出跨源隔离**（dev server 不发 COOP/COEP，恒得 false），必须 `tauri build`。
+
 ### 实验脚本（已存在，作为结论证据与回归基线）
 
 ```bash
@@ -1457,6 +1653,7 @@ uv run python -m experiments.reanchor_xcorr          # 重锚定
 uv run python -m experiments.download_bilibili       # bilibili 兼容性
 uv run python -m experiments.furigana_local          # 注音链路
 uv run python -m experiments.separation_check        # 分离后端
+uv run python -m experiments.ass_embedded_fonts      # 内嵌字体能否接管缺字回退（§5.12）
 ```
 
 ### 自检里**尚未**覆盖的两项（都是"要另建机制"，不是漏写）
