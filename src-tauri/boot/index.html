@@ -86,6 +86,17 @@
         margin: 0 0 8px;
         color: var(--bad);
       }
+      /* 需要用户拍板的面板不是故障，标题不用报错色 */
+      .panel.ask h2 {
+        color: var(--fg);
+      }
+      .note {
+        margin: 12px 0 0;
+        color: var(--dim);
+      }
+      .note:first-of-type {
+        margin-top: 0;
+      }
       dl {
         margin: 0;
         display: grid;
@@ -133,6 +144,23 @@
       <div class="bar indet" id="bar"><i></i></div>
       <div class="row"><span id="stage"></span><span id="amount"></span></div>
 
+      <!-- 知情下载（§2.6：「获取」是显式动作）。下载的是第三方构建的可执行文件，
+           所以开始之前先把来源、体积、SHA256 摆出来，并给出并列的手工出路。 -->
+      <section class="panel ask" id="ask">
+        <h2>需要下载 ffmpeg</h2>
+        <p class="note">系统中没有可用于烧录字幕的 ffmpeg（未注册 ass 滤镜）</p>
+        <dl>
+          <dt>来源</dt>
+          <dd id="askHost">—</dd>
+          <dt>安装到</dt>
+          <dd id="askDir">—</dd>
+        </dl>
+        <pre id="askFiles"></pre>
+        <button id="askStart">开始下载</button>
+        <p class="note" id="askManualLabel">手工安装（装入系统，需自行卸载）</p>
+        <pre id="askManual"></pre>
+      </section>
+
       <section class="panel" id="err">
         <h2 id="errTitle">启动失败</h2>
         <dl>
@@ -157,7 +185,8 @@
       // 这一页由 Tauri 的 app 协议下发，所以它跨源访问后端，靠后端 CORS 白名单里的
       // tauri:// 那两条放行。
       //
-      // 用户不需要知道内部走了 HTTP：这里**不显示任何地址**，也绝不打开系统浏览器。
+      // 用户不需要知道内部走了 HTTP：这里**不显示后端地址**，也绝不打开系统浏览器。
+      // （下载源的域名是另一回事，那是要摆给用户看的信任点，见 askConsent。）
       const boot = globalThis.__KVM_BOOT__ ?? {}
       const $ = (id) => document.getElementById(id)
       const state = { origin: boot.origin || '', log: [], failed: false }
@@ -172,6 +201,8 @@
         if (sub !== undefined) $('sub').textContent = sub
       }
 
+      const mb = (n) => (n / 1048576).toFixed(1)
+
       const setProgress = (done, total) => {
         const bar = $('bar')
         if (!total) {
@@ -181,7 +212,6 @@
         }
         bar.classList.remove('indet')
         bar.firstElementChild.style.width = `${Math.min(100, (done / total) * 100)}%`
-        const mb = (n) => (n / 1048576).toFixed(1)
         $('amount').textContent = `${mb(done)} / ${mb(total)} MB`
       }
 
@@ -222,6 +252,11 @@
         }
       }
 
+      // 自动获取失败时，「怎么办」里要带上手工命令——这是 §2.6 三段式里
+      // 「获取」这一段失手后仅剩的出路，只写"请反馈这个问题"等于把用户扔在原地。
+      const withManual = (st, how) =>
+        st.manual_install ? `${how}；或手工安装：${st.manual_install}` : how
+
       const jget = async (path) => {
         const r = await fetch(state.origin + path, { cache: 'no-store' })
         if (!r.ok) throw new Error(`${path} → HTTP ${r.status}`)
@@ -246,6 +281,36 @@
         return false
       }
 
+      // 知情下载：开始之前把「从哪个域名下、多大、SHA256 是多少」摆出来，等用户点。
+      //
+      // 这不是多此一举的确认框。下载并执行一个第三方构建的二进制是整条链路里
+      // 唯一一处"应用替用户做出信任决定"的地方，把它藏在进度条后面等于把信任点
+      // 藏起来；而 §2.6 本来就要求「获取」是显式动作（自检连模型权重都只报告不下载）。
+      // 手工安装命令作为**并列**出路一起给出——它装进用户系统，不是推荐路径。
+      const askConsent = (st, need) =>
+        new Promise((resolve) => {
+          const arts = need.flatMap((c) => c.artifacts || [])
+          const host = arts.length ? new URL(arts[0].url).host : ''
+          $('askHost').textContent = host
+          $('askDir').textContent = st.install_dir
+          $('askFiles').textContent = arts
+            .map((a) => `${a.key}  ${mb(a.bytes)} MB\n  sha256  ${a.sha256}`)
+            .join('\n')
+          const shown = st.manual_install ? '' : 'none'
+          $('askManual').textContent = st.manual_install || ''
+          $('askManual').style.display = shown
+          $('askManualLabel').style.display = shown
+          note(`下载源 ${host}，共 ${arts.length} 个文件`)
+          setStage('等待确认', '尚未开始下载')
+          $('bar').style.display = 'none'
+          $('ask').classList.add('show')
+          $('askStart').onclick = () => {
+            $('ask').classList.remove('show')
+            $('bar').style.display = ''
+            resolve()
+          }
+        })
+
       // 环境准备：缺 ffmpeg 就下，全程显示进度。
       // 失败时**不**卡在这里转圈——转圈是最糟的失败方式，用户不知道该等还是该退出。
       const prepareEnvironment = async () => {
@@ -253,16 +318,23 @@
         const need = st.components.filter((c) => !c.ready)
         if (!need.length) return true
 
+        const blocked = need.find((c) => !c.available)
+        if (blocked) {
+          fail({
+            what: 'ffmpeg（带 libass 的构建）',
+            why: `当前平台（${st.platform}）没有可自动获取的构建`,
+            how: withManual(
+              st,
+              '请自行安装一个带 libass 的 ffmpeg，或把已下好的压缩包放进应用数据目录后重启',
+            ),
+            detail: `安装目录：${st.install_dir}`,
+          })
+          return false
+        }
+
+        await askConsent(st, need)
+
         for (const comp of need) {
-          if (!comp.available) {
-            fail({
-              what: 'ffmpeg（带 libass 的构建）',
-              why: `当前平台（${st.platform}）没有可自动获取的构建`,
-              how: '请自行安装一个带 libass 的 ffmpeg，或把已下好的压缩包放进应用数据目录后重启',
-              detail: `安装目录：${st.install_dir}`,
-            })
-            return false
-          }
           setStage('正在下载运行所需组件', '首次启动需要准备环境，只做一次')
           await fetch(state.origin + '/api/bootstrap/fetch', {
             method: 'POST',
@@ -277,7 +349,11 @@
               fail({
                 what: 'ffmpeg（带 libass 的构建）',
                 why: BOOTSTRAP_REASON[st.error.code] || st.error.code,
-                how: BOOTSTRAP_FIX[st.error.code] || '检查网络后点「重试」；也可以自行下载后放进应用数据目录',
+                how: withManual(
+                  st,
+                  BOOTSTRAP_FIX[st.error.code] ||
+                    '检查网络后点「重试」；也可以自行下载后放进应用数据目录',
+                ),
                 detail: `${st.error.message}\n安装目录：${st.install_dir}`,
               })
               return false
@@ -293,7 +369,7 @@
             fail({
               what: 'ffmpeg（带 libass 的构建）',
               why: '下载完成了，但装好的这份不能渲染 ASS 字幕（ass 滤镜没有注册）',
-              how: '这多半是下载源换了构建；请反馈这个问题，或自行安装带 libass 的 ffmpeg',
+              how: withManual(st, '这多半是下载源换了构建；请反馈这个问题'),
               detail: `安装目录：${st.install_dir}`,
             })
             return false
@@ -326,6 +402,7 @@
       const run = async () => {
         state.failed = false
         $('err').classList.remove('show')
+        $('ask').classList.remove('show')
         $('bar').style.display = ''
         $('title').textContent = '正在启动'
         setStage('等待服务就绪', '准备运行环境…')

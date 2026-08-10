@@ -25,7 +25,7 @@ ffmpeg"，而是**「`ass` 滤镜注册没注册」**——下载装完之后仍
 
 ## 进度与断点续传
 
-大文件（ffmpeg 约 22–110 MB，分离权重 84–640 MB，对齐模型 1.26 GB）必须有
+大文件（ffmpeg 约 27–110 MB，分离权重 84–640 MB，对齐模型 1.26 GB）必须有
 可见进度，否则弱网下用户会以为程序卡死（§5.14）。中断后用 HTTP Range 从
 `.part` 文件续传；服务器不支持 Range 就从头下，**不会**把半截文件当成完整的用。
 """
@@ -101,15 +101,33 @@ def _platform_key() -> str:
 
 # ffmpeg 静态构建。两个平台的来源不同，各自的理由写在下面。
 #
-# macOS arm64：osxexperts.net 的静态构建（Helmut K. C. Tessarek，即 evermeet 的作者）。
-#   选它是因为**没有别的现成选项**：BtbN 不出 macOS，evermeet 的发布件是 Intel，
-#   Homebrew 的 bottle 依赖 /opt/homebrew 下一堆 dylib、拿出来就跑不了。
-#   实测该构建的 configure 里有 `--enable-libass --enable-libfreetype
-#   --enable-fontconfig --enable-libharfbuzz`，`ass` 滤镜可用（2026-08-10 实测）。
-#   **风险要说明白**：这个站点不发布校验和，下面的哈希是我们自己下载后算的；
-#   URL 里带主版本号（81 = 8.1），上游发补丁版时可能原地替换文件。
-#   真替换了就会**校验失败并明确报错**，不会静默用一个来路不明的二进制——
-#   这正是想要的失败方向。
+# macOS arm64：ffmpeg.martin-riedl.de 的静态构建。
+#
+#   **已从 osxexperts.net 换过来**，换掉的是两个具体缺陷，不是口味问题：
+#
+#   - osxexperts **不发布校验和**。于是"SHA256 写死在代码里"这条安全规则退化成
+#     "锁住我们某一次下载到的字节"——它挡得住之后的篡改，却证明不了第一次下对了。
+#     真正的校验必须有一个**独立于我们这次下载**的期望值。
+#   - osxexperts 的 URL 只带主版本号（`ffmpeg81arm.zip`），上游发补丁版时会
+#     **原地替换**同一个文件。失败方向是安全的（校验失败并明确报错，不会用），
+#     但用户看到的是"某天突然装不上了"，而我们这边毫无察觉。
+#
+#   martin-riedl 两条都不成立：
+#
+#   - URL 按 `<构建时间戳>_<git 描述>` 定版，新构建走新路径、**旧路径不被改写**。
+#     实测该站保留 171 个历史版本，2025-02 的构建今天仍可下载——所以钉死的
+#     这条链接不会因为上游出新版而失效。
+#   - 每个归档旁边有官方 `.sha256`。下面写死的哈希是**与它比对过**的，
+#     不是我们自算的孤证（2026-08-10 实测：官方值 = 我们下载后 shasum 的值）。
+#
+#   实测（2026-08-10，本机 Apple Silicon）：configure 含 `--enable-libass
+#   --enable-libfreetype --enable-fontconfig --enable-libharfbuzz`，
+#   `ass` 与 `subtitles` 滤镜**均已注册**（本项目的判据，§2.6）；
+#   `otool -L` 除系统框架外零动态依赖，拷到别的机器可直接跑。
+#
+#   **ffmpeg 与 ffprobe 必须取自同一个构建目录**：ffprobe 报的时长/起始偏移
+#   直接进时间轴计算，两个不同构建之间的差异会变成对不上的轴
+#   （见 kvm.media.ffmpeg.ffprobe_for）。
 #
 # Windows x64：gyan.dev 的 essentials 构建，取自其 GitHub 镜像
 #   `GyanD/codexffmpeg` 的**版本 tag**（不是 `latest`）。GitHub release 资产
@@ -117,25 +135,35 @@ def _platform_key() -> str:
 #   `libass libfreetype libfribidi libharfbuzz`（官方构建说明），够本项目用；
 #   full 构建 266 MB 属实浪费。**未在 Windows 上实测**：哈希是在 macOS 上
 #   下载同一份 zip 算出来的，能力探测要等真机上跑 `kvm.doctor` 才算数。
+#   **这条不跟着 macOS 换源**：GitHub release 资产在 tag 下不会被改写，
+#   osxexperts 那两个毛病（无官方校验和、URL 原地替换）它本来就没有。
+#   而且 martin-riedl **只出 macOS 与 Linux，没有 Windows 构建**（2026-08-10 实测），
+#   想统一也统一不了。
 _FFMPEG: dict[str, tuple[Artifact, ...]] = {
     "macos-arm64": (
         Artifact(
             key="ffmpeg",
-            url="https://www.osxexperts.net/ffmpeg81arm.zip",
-            sha256="ebb82529562b71170807bbc6b0e7eb4f0b13af8cbb0e085bb9e8f6fe709598ad",
-            size=22547387,
+            url=(
+                "https://ffmpeg.martin-riedl.de/download/macos/arm64/"
+                "1785661721_N-125892-g406c5a37aa/ffmpeg.zip"
+            ),
+            sha256="2d96af0e28b81d5215d8b9a6dec4e751b5b97408205ccfae5760084fa107d936",
+            size=28503173,
             members={"ffmpeg": "ffmpeg"},
             executable=True,
-            note="ffmpeg 8.1 静态构建（含 libass）",
+            note="ffmpeg N-125892-g406c5a37aa 静态构建（含 libass）",
         ),
         Artifact(
             key="ffprobe",
-            url="https://www.osxexperts.net/ffprobe81arm.zip",
-            sha256="a6640a77d38a6f0527c5b597e599cb36a3427a6931444ed80bc62542421950a1",
-            size=22468272,
+            url=(
+                "https://ffmpeg.martin-riedl.de/download/macos/arm64/"
+                "1785661721_N-125892-g406c5a37aa/ffprobe.zip"
+            ),
+            sha256="0e60dca1df67bffc0b232d54e9833de3508787af6822aec60233dd4f2687645e",
+            size=28417691,
             members={"ffprobe": "ffprobe"},
             executable=True,
-            note="ffprobe 8.1（必须与 ffmpeg 同源，见 kvm.media.ffmpeg.ffprobe_for）",
+            note="ffprobe，与 ffmpeg 取自同一次构建",
         ),
     ),
     "windows-x64": (
@@ -156,6 +184,20 @@ _FFMPEG: dict[str, tuple[Artifact, ...]] = {
         ),
     ),
 }
+
+
+_MANUAL_INSTALL: dict[str, str] = {
+    "macos-arm64": "brew tap homebrew-ffmpeg/ffmpeg && brew install ffmpeg-full",
+    "windows-x64": "winget install --id Gyan.FFmpeg.Essentials",
+}
+"""自动获取之外的手工出路：按平台给一条可直接复制粘贴的命令（§2.6）。
+
+**摆出来不等于推荐它。** 这条路装进用户系统（本项目的原则是装进应用私有目录、
+卸载即删目录），macOS 上还有两道坎：Homebrew 主线 `ffmpeg` formula **不带
+libass**，装了也用不了；`ffmpeg-full` 在第三方 tap 里，常常要从源码编译很久。
+它存在只是为了兜住"下载失败 / 离线 / 用户不接受第三方构建"这三种情况——
+§2.6 要求这几种情况都得有出路，而不是只剩一句"请安装 X"。
+"""
 
 
 def components() -> list[Component]:
@@ -196,12 +238,20 @@ ProgressCb = Callable[[Progress], None]
 
 
 class BootstrapError(RuntimeError):
-    """带错误码的失败。文案由前端按 `code` 翻译，`args` 提供占位符。"""
+    """带错误码的失败。文案由前端按 `code` 翻译，`detail_args` 提供占位符。
+
+    **占位符字典绝不能叫 `args`。** `BaseException.args` 是内建属性，赋值时会被
+    强制转成元组——赋一个 dict 进去只剩下**键**，值（期望/实际哈希这类唯一有用的
+    信息）当场丢光，而且 `str(exc)` 会变成 `"('url', 'expected', 'actual')"`。
+    实测后果是双重的：命令行打出这串元组而不是原因；HTTP 层拿元组去填
+    `dict[str, str]` 字段，`/api/bootstrap/status` 直接 500——于是**恰好在有错误的
+    时候**启动页的轮询取不到状态，只能永远转圈，而这正是这一页反复要求杜绝的失败方式。
+    """
 
     def __init__(self, code: str, message: str, **args: str) -> None:
         super().__init__(message)
         self.code = code
-        self.args = {k: str(v) for k, v in args.items()}
+        self.detail_args = {k: str(v) for k, v in args.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -451,15 +501,26 @@ def import_offline(archive: Path) -> str:
 
 
 def status() -> dict[str, object]:
-    """当前各组件的就绪情况，供启动页轮询。"""
+    """当前各组件的就绪情况，供启动页轮询。
+
+    **`artifacts` 是"知情下载"的数据面**：下载前要把从哪儿下、多大、SHA256 是多少
+    摆给用户看（§2.6 把"获取"定义为显式动作）。这毕竟是第三方构建的二进制，
+    把信任点藏在代码里、界面上只显示一条进度条，等于要用户闭着眼睛信任我们。
+    清单本来就写死在代码里，如实报出来不增加任何风险。
+    """
     return {
         "platform": _platform_key(),
+        "manual_install": _MANUAL_INSTALL.get(_platform_key(), ""),
         "components": [
             {
                 "key": c.key,
                 "ready": ffmpeg_ready() if c.key == "ffmpeg" else False,
                 "available": bool(c.artifacts),
                 "bytes": sum(a.size for a in c.artifacts),
+                "artifacts": [
+                    {"key": a.key, "url": a.url, "bytes": a.size, "sha256": a.sha256}
+                    for a in c.artifacts
+                ],
             }
             for c in components()
         ],
@@ -488,6 +549,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"已导入：{key}")
             return 0
         if args.fetch:
+            # 下载前先报出源与校验和：命令行这一侧同样适用"知情下载"，
+            # 用户看到的不该只是一条百分比。
+            for comp in components():
+                if comp.key == args.fetch:
+                    for art in comp.artifacts:
+                        print(f"  {art.url}")
+                        print(f"    {_human(art.size)}  sha256 {art.sha256}")
             last = [""]
 
             def show(pr: Progress) -> None:
@@ -517,6 +585,11 @@ def main(argv: list[str] | None = None) -> int:
             "已就绪" if c["ready"] else ("可自动获取" if c["available"] else "本平台不支持自动获取")
         )
         print(f"  {c['key']}: {mark}（{_human(int(c['bytes']))}）")
+        for a in c["artifacts"]:  # type: ignore[index]
+            print(f"    {a['url']}")
+            print(f"      {_human(int(a['bytes']))}  sha256 {a['sha256']}")
+    if st["manual_install"]:
+        print(f"手工安装（装入系统，需自行卸载）：\n  {st['manual_install']}")
     return 0
 
 

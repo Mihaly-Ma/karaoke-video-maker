@@ -45,16 +45,37 @@ class ErrorOut(BaseModel):
     message: str = ""
 
 
+class ArtifactOut(BaseModel):
+    """一个待下载文件的**可核对信息**（§2.6「知情下载」）。
+
+    启动页在开始下载前把这些摆出来：从哪个域名下、多大、SHA256 是多少。
+    下载的是第三方构建的可执行文件，把信任点藏起来只留一条进度条是不合适的；
+    清单本来就写死在代码里，如实报出来不多暴露任何东西。
+    """
+
+    key: str
+    url: str
+    bytes: int
+    sha256: str
+
+
 class ComponentOut(BaseModel):
     key: str
     ready: bool
     available: bool
     bytes: int
+    artifacts: list[ArtifactOut] = []
 
 
 class StatusOut(BaseModel):
     platform: str
     components: list[ComponentOut]
+    manual_install: str = ""
+    """自动获取之外的手工安装命令；空串表示本平台没有现成的一条命令。
+
+    它是**并列的出路，不是推荐路径**——会装进用户系统，而本项目的原则是
+    装进应用私有目录、卸载即删目录。措辞归前端。
+    """
     running: str | None = None
     """正在获取哪个组件；None 表示空闲。"""
     progress: ProgressOut | None = None
@@ -85,6 +106,7 @@ def _snapshot() -> StatusOut:
         running, progress, error = _state.running, _state.progress, _state.error
     return StatusOut(
         platform=str(raw["platform"]),
+        manual_install=str(raw["manual_install"]),
         components=[ComponentOut(**c) for c in raw["components"]],  # type: ignore[arg-type]
         running=running,
         progress=(
@@ -97,7 +119,9 @@ def _snapshot() -> StatusOut:
             if progress
             else None
         ),
-        error=(ErrorOut(code=error.code, args=error.args, message=str(error)) if error else None),
+        error=(
+            ErrorOut(code=error.code, args=error.detail_args, message=str(error)) if error else None
+        ),
         install_dir=str(bs.paths.private_bin_dir()),
     )
 
@@ -158,6 +182,6 @@ def import_archive(body: ImportIn) -> StatusOut:
     except bs.BootstrapError as exc:
         raise HTTPException(
             status_code=400,
-            detail={"code": exc.code, "args": exc.args, "message": str(exc)},
+            detail={"code": exc.code, "args": exc.detail_args, "message": str(exc)},
         ) from exc
     return _snapshot()
