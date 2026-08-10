@@ -20,8 +20,11 @@
 
 - **独立子进程**。CREPE 是 torch 推理，绝不能在 FastAPI 的 handler 或线程池线程
   里跑（MPS 不 fork-safe；整曲十几到几十秒的阻塞会让后端假死且无法取消）。
-  本文件因此身兼两职：库（`run_guide`）与子进程入口
-  （`python -m kvm.media.guide --worker`）。
+  本文件因此身兼两职：库（`run_guide`）与子进程入口。子进程的命令行形态有两种
+  （源码 `python -m kvm.media.guide --worker …`；打包后
+  `kvm-backend --worker-module kvm.media.guide --worker …`），由
+  `kvm.media.deps.worker_command()` 统一决定——**打包后 `-m` 不可用**，
+  理由与实测症状写在那里。
 - **JSON-lines 进度**。torchcrepe 的 `predict()` 是一次前向、没有回调，所以阶段
   之间是跳变的；提取音高那一段用一个心跳线程持续上报**已用秒数**——
   进度条停在原地不动会被读成"卡死了"，而伪造一个匀速前进的百分比是撒谎。
@@ -215,38 +218,38 @@ def _write_back(store: ProjectStore, project_id: str, guide_path: str, sig: str)
     store.update_derived(project_id, _apply, label="登记引导声音轨")
 
 
-def _backend_dir() -> Path:
-    """`backend/` 目录（`kvm` 包的父目录）。子进程用 `cwd=` 指向这里，
-    这样 `python -m kvm.media.guide` 才找得到 `kvm` 包。
-    """
-    return Path(__file__).resolve().parent.parent.parent
-
-
 def _worker_command(
     vocals: Path, dest: Path, duration_s: float, params: GuideParamsDTO
 ) -> list[str]:
-    return [
-        sys.executable,
-        "-m",
+    """引导声 worker 的完整命令行。
+
+    "用哪个可执行文件、模块名怎么交代过去"由 `deps.worker_command()` 统一决定
+    （冻结形态下 `-m` 不可用，理由写在那里），这里只负责把参数填齐。
+    分离那边是同一个形态，两处必须共用同一个构造器——本仓吃过多次
+    "同一规则两份实现漂移"的亏。
+    """
+    return deps.worker_command(
         "kvm.media.guide",
-        "--worker",
-        "--vocals",
-        str(vocals),
-        "--out",
-        str(dest),
-        "--duration",
-        f"{duration_s:.3f}",
-        "--gain",
-        f"{params.gain}",
-        "--timbre",
-        params.timbre,
-        "--max-harmonics",
-        str(params.max_harmonics),
-        "--voicing-drop-db",
-        f"{params.voicing_drop_db}",
-        "--legato-gap-ms",
-        str(params.legato_gap_ms),
-    ]
+        [
+            "--worker",
+            "--vocals",
+            str(vocals),
+            "--out",
+            str(dest),
+            "--duration",
+            f"{duration_s:.3f}",
+            "--gain",
+            f"{params.gain}",
+            "--timbre",
+            params.timbre,
+            "--max-harmonics",
+            str(params.max_harmonics),
+            "--voicing-drop-db",
+            f"{params.voicing_drop_db}",
+            "--legato-gap-ms",
+            str(params.legato_gap_ms),
+        ],
+    )
 
 
 def run_guide(handle: JobHandle, store: ProjectStore, req: GuideRequest) -> dict[str, Any]:
@@ -316,7 +319,7 @@ def run_guide(handle: JobHandle, store: ProjectStore, req: GuideRequest) -> dict
 
     cmd = _worker_command(vocals, tmp, duration_s, params)
     try:
-        run_cancelable(handle, cmd, on_line=_on_line, cwd=str(_backend_dir()))
+        run_cancelable(handle, cmd, on_line=_on_line, cwd=deps.worker_cwd())
     except JobCancelled:
         raise
     except RuntimeError as exc:

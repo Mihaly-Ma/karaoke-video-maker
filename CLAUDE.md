@@ -879,6 +879,43 @@ libass 扩展可以放心用（链路两端都是 libass）：`BorderStyle=4`（
 - **磁盘预算**：一首歌 = 原视频 + 音频 + 2 条 stem + 代理视频 + 成片 ×2，轻松 3-5 GB。工作区必须有生命周期管理与磁盘余量检查
 - **取消语义**：kill 子进程后临时文件由发起方清理，不要指望子进程自己收尾
 
+#### 冻结形态下 `sys.executable -m <模块>` 不可用（已实测，v0.1.0 的发布阻断项）
+
+拉 worker 的命令**不能写死成 `[sys.executable, "-m", "kvm.media.X", ...]`**。
+打包后 `sys.executable` 就是 `kvm-backend` 自己，**PyInstaller 的引导器不认 `-m`**，
+整串参数会掉进 `kvm.server` 的 argparse，子进程当场以
+`error: the following arguments are required: --port` 秒退——
+**人声分离与引导声在装好的应用里全都跑不起来**，而源码运行与全部单元测试一切正常。
+
+这是那种"开发时永远碰不到、装完才炸"的坑，两条纪律：
+
+- **worker 的命令与工作目录只允许有一处实现**（`kvm.media.deps.worker_command()` /
+  `worker_cwd()`），冻结时改走 `kvm-backend --worker-module <模块> …`，
+  由 `kvm.server` 在入口处接住（先于 argparse、先于父进程看门狗）。
+  分离与引导声是同一个模式的两份调用，各写一份必然漂移。
+- **`cwd` 在两种形态下的职责不同**：源码运行必须是 `backend/`（`-m` 靠它进 sys.path
+  才找得到 `kvm`）；冻结后 `backend/` 不存在、`kvm` 在 PYZ 里，cwd 与 import 彻底脱钩，
+  改指**应用数据根**（必定可写）。**不要用 `_MEIPASS`**——它在 `/Applications` 下是只读的，
+  第三方库往 cwd 落个临时文件就会以一条与本功能无关的权限错误炸掉。
+
+**同一个病根还有第二个受害者：`multiprocessing`。** 它的资源跟踪进程按
+`<exe> -B -S -I -c "from multiprocessing.resource_tracker import main;main(N)"`
+重新拉起本可执行文件（`ps` 实测原话），冻结解释器不认 `-c`，于是同样掉进 argparse。
+PyInstaller 的运行时钩子已经把处理逻辑写进 `multiprocessing.freeze_support`，
+**但它不会自己调用**，必须由入口点调一次（`kvm.server._divert_multiprocessing_helpers()`）。
+不调的症状很有欺骗性：分离**照样能跑完**，只是资源跟踪进程死掉、命名信号量无人回收，
+而那行 `required: --port` 会顺着 `run_cancelable`（它把 stderr 并进 stdout）
+混进 JSON-lines 通道，**看起来就像 worker 分发失败**，排查时极易被带偏。
+
+**还有一处同样的写法，目前安全只是因为它不在打包链路上**：`kvm.doctor` 用
+`[sys.executable, "-c", …]` 起子进程问 torch 设备（§2.6 要求 torch 必须隔在子进程里问）。
+冻结产物实测同样掉进 argparse——但装好的应用**从不跑自检**（`kvm.doctor` 只被
+`scripts/setup.py` / `dev.py` 与命令行调用，全在源码形态下用真解释器跑），
+所以这条路今天走不到。**代价是这个前提没有任何东西守着**：一旦把自检接进应用界面
+（比如加个"复制诊断信息"按钮），torch 那项会立刻变成探测失败，而自检恰恰是
+用户拿来判断环境好坏的东西——报错的自检比没有自检更糟。真要接的话，
+先把这次探测也改走 `worker_command()` 那条统一的路。
+
 ### 5.14 模型权重分发（已定 D11）
 
 **运行时下载，绝不打进安装包。** 独立进度条 + SHA256 校验 + 断点续传（HTTP Range，Tauri 自带 updater 不提供断点续传）+ 支持离线导入 + `HF_HUB_OFFLINE` / `HF_HOME` 控制。
@@ -896,10 +933,12 @@ libass 扩展可以放心用（链路两端都是 libass）：`BorderStyle=4`（
 - Tauri 2 作为壳；Python 后端用 PyInstaller `--onedir`（**不是 `--onefile`**，PyTorch 体量下每次启动解压体验崩坏）
 - **后端不走 `externalBin`，走 `bundle.resources` + `std::process::Command`（已定）。** 两条独立理由，任一条都足够：`externalBin` 在 macOS 上会导致公证失败（`tauri-apps/tauri#11992`，仍 open、无 workaround）；而且它要求每个条目是**单个文件**并带目标三元组后缀，`--onedir` 产物是一整个目录，本来就塞不进这个模型。绕开之后，**将来真要签名公证时不会被这条卡住**
 - **打包后必须就地冒烟测试**（`scripts/package.py` 已内建）：起得来、`/api/health` 通、首页是 HTML、**且首页带 `COEP: require-corp`**。最后一条尤其重要——缺了它页面拿不到跨源隔离，JASSUB 起不来，而这个故障要等用户装完打开才暴露
+- **冒烟测试还必须验 worker 子进程分发**（`smoke_test_workers()`）：判据是"参数到没到 worker 自己的 parser 手里"（stderr 出现 `--vocals` / `--audio`，且**不出现 `--port`**），而不是"进程起没起来"。理由见 §5.13——冻结后 `-m` 不可用，这条链路在源码环境里**永远测不出来**，只有拿打包产物跑才算数
+- **`scripts/package.py` 必须由项目 venv 的 Python 跑**（`.venv/bin/python scripts/package.py`）：它用 `sys.executable -m PyInstaller`，而系统 `python3` 上没有 PyInstaller
 - **实测体积（macOS arm64，含 CPU 版 torch）**：PyInstaller onedir **798 MB**，其中 torch 408 MB、llvmlite 123 MB、onnxruntime 65 MB、scipy 29 MB
 - Windows NSIS/WiX 有 **2GB 单安装包硬上限**（`tauri-apps/tauri#7372`）。按 macOS 的 798 MB 推算，Windows 端**大概率仍在限内**，但余量不大——**未实测**
 - **CUDA 版 torch 不进包（已定）**。PyPI 的 Windows `torch` wheel 本来就是 CPU-only；CUDA 版单个 wheel 就 2.58 GB，装进去必然撞穿 2 GB 上限。需要 CUDA 的用户自行替换，属高级用法
-- **`--lean`（排除 torch 等重依赖）目前不是可交付形态**：冻结后的解释器没有 pip，`kvm.media.deps` 那套"缺依赖就自动装"走不通（`sys.executable` 是打好的可执行文件）。它只用来量体积做对照。要让它可交付，得先验证"往 `private_deps_dir` 装 wheel 再加进 sys.path"这条路
+- **`--lean`（排除 torch 等重依赖）目前不是可交付形态**：冻结后的解释器没有 pip，`kvm.media.deps` 那套"缺依赖就自动装"走不通（`sys.executable` 是打好的可执行文件）。`ensure_dependencies()` 在冻结形态下**直接这么报错**，不再走那条自动安装的路——此前它会落到"当前 Python 不是虚拟环境"那句上（PyInstaller 把 `sys.prefix` 与 `sys.base_prefix` 都指到 `_MEIPASS`），在装好的应用里完全是误导。它只用来量体积做对照。要让它可交付，得先验证"往 `private_deps_dir` 装 wheel 再加进 sys.path"这条路
 - 字体：`Noto Sans JP` / `源真ゴシック`（均 SIL OFL 1.1，允许随应用捆绑，需保留版权与许可证文本，不能单卖字体）
 - 应用图标由 `python3 scripts/make_icons.py` 从 `src-tauri/icons/source.png` 生成（设计稿带水印且无 alpha，必须先清洗，理由见该脚本文档字符串）。
   同一张图标还要出现在 README、前端 favicon、启动页，而这三处的交付机制互不相同

@@ -8,9 +8,12 @@ handler 或线程池线程直接执行——阻塞会让后端假死、无法取
 - 作为库被 `kvm.jobs` 的工作线程调用（`run_separate()`）：只负责编排——
   缓存命中判断、拉起子进程、解析其 JSON-lines 进度输出、htdemucs 4-stem
   合成伴奏、回写工程。
-- 作为子进程入口被自己拉起（`python -m kvm.media.separate --worker ...`）：
-  真正 import audio_separator/torch 并跑分离，逐行往 stdout 打 JSON 进度；
-  发生异常也落成一行 JSON，不让父进程去解析裸 traceback。
+- 作为子进程入口被自己拉起：真正 import audio_separator/torch 并跑分离，逐行往
+  stdout 打 JSON 进度；发生异常也落成一行 JSON，不让父进程去解析裸 traceback。
+  命令行形态有两种（源码 `python -m kvm.media.separate --worker …`；打包后
+  `kvm-backend --worker-module kvm.media.separate --worker …`），由
+  `kvm.media.deps.worker_command()` 统一决定——**打包后 `-m` 不可用**，
+  理由与实测症状写在那里。
 
 ## 依赖自动化（CLAUDE.md §2.6）
 
@@ -46,9 +49,9 @@ from kvm.jobs import JobCancelled, JobHandle, run_cancelable
 from kvm.media import deps
 
 # 注意：`experiments.ffmpeg_locate` 与 `kvm.media.download` 故意不在模块顶层
-# import——本文件同时也是 `python -m kvm.media.separate --worker` 的子进程
-# 入口，子进程的 cwd/sys.path 只保证能找到 `kvm` 包（见 `_backend_dir()`），
-# 不保证能找到仓库根目录下的 `experiments` 包。worker 分支（`_worker_main`）
+# import——本文件同时也是分离 worker 的子进程入口，子进程的 cwd/sys.path 只保证
+# 能找到 `kvm` 包（见 `kvm.media.deps.worker_cwd()`），不保证能找到仓库根目录下的
+# `experiments` 包。worker 分支（`_worker_main`）
 # 完全不需要这两个依赖，因此把它们放进 `run_separate()` 里局部 import，
 # 避免子进程加载本模块时因为顶层 import 就崩掉。
 
@@ -174,12 +177,27 @@ def _save_cache_entry(sep_dir: Path, key: str, entry: dict[str, str]) -> None:
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _backend_dir() -> Path:
-    """`backend/` 目录（`kvm` 包的父目录）。子进程用 `cwd=` 指向这里，
-    这样 `python -m kvm.media.separate` 才能找到 `kvm` 包——不依赖调用方
-    有没有把 `backend/` 加进 PYTHONPATH（这一点目前仓库里还没有统一约定）。
+def _worker_command(audio: Path, model_filename: str, model_dir: Path, out_dir: Path) -> list[str]:
+    """分离 worker 的完整命令行。
+
+    "用哪个可执行文件、模块名怎么交代过去"由 `deps.worker_command()` 统一决定
+    （冻结形态下 `-m` 不可用，理由写在那里），这里只负责把参数填齐——
+    与引导声那边共用同一个构造器，两处不会再各自演化。
     """
-    return Path(__file__).resolve().parent.parent.parent
+    return deps.worker_command(
+        "kvm.media.separate",
+        [
+            "--worker",
+            "--audio",
+            str(audio),
+            "--model",
+            model_filename,
+            "--model-dir",
+            str(model_dir),
+            "--output-dir",
+            str(out_dir),
+        ],
+    )
 
 
 def _write_back(store: ProjectStore, project_id: str, paths: dict[str, str]) -> None:
@@ -301,20 +319,7 @@ def run_separate(handle: JobHandle, store: ProjectStore, req: SeparateRequest) -
 
     handle.report(0.05, f"启动分离子进程（模型 {model_filename}，首次运行可能需要下载模型权重）…")
 
-    cmd = [
-        sys.executable,
-        "-m",
-        "kvm.media.separate",
-        "--worker",
-        "--audio",
-        str(audio_path),
-        "--model",
-        model_filename,
-        "--model-dir",
-        str(model_dir),
-        "--output-dir",
-        str(run_output_dir),
-    ]
+    cmd = _worker_command(audio_path, model_filename, model_dir, run_output_dir)
 
     produced_files: dict[str, str] = {}
     last_error: str | None = None
@@ -338,7 +343,7 @@ def run_separate(handle: JobHandle, store: ProjectStore, req: SeparateRequest) -
             produced_files.update(event.get("files", {}))
 
     try:
-        run_cancelable(handle, cmd, on_line=_on_line, cwd=str(_backend_dir()))
+        run_cancelable(handle, cmd, on_line=_on_line, cwd=deps.worker_cwd())
     except JobCancelled:
         raise
     except RuntimeError as exc:

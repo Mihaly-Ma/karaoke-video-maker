@@ -22,7 +22,8 @@
 `--lean` 把 torch / audio-separator / librosa / numba / onnxruntime 排除在外，
 产物小一个数量级。**但它目前不是可交付形态**：冻结后的解释器没有 pip，
 `kvm.media.deps` 那套"缺依赖就自动装"在打包环境里走不通（`sys.executable`
-是打好的可执行文件，`uv pip install --python` 认不了）。所以 `--lean` 只用来
+是打好的可执行文件，`uv pip install --python` 认不了；`ensure_dependencies()`
+在冻结形态下就直接这么说，不再走那条自动安装的路）。所以 `--lean` 只用来
 量体积、做对照，不要拿它出正式包——除非先验证"往 `private_deps_dir` 装 wheel
 再加进 sys.path"这条路可行。
 
@@ -243,6 +244,57 @@ def smoke_test_backend(bundle: Path) -> None:
             proc.kill()
 
 
+def smoke_test_workers(bundle: Path) -> None:
+    """打完就地验一次：worker 子进程在**冻结形态下**真的拉得起来。
+
+    这一条是被一个发布阻断项换来的：`sys.executable -m kvm.media.guide` 在源码
+    环境里天天在跑，打包后却必然失败——`sys.executable` 变成 `kvm-backend`，
+    PyInstaller 的引导器不认 `-m`，参数掉进服务端的 argparse，子进程以
+    "the following arguments are required: --port" 秒退。**人声分离与引导声
+    在装好的应用里全都跑不起来，而所有单元测试与源码运行一切正常。**
+
+    所以判据必须是"参数到没到 worker 自己的 parser 手里"，而不是"进程起没起来"：
+    断言 stderr 里出现的是 worker 的必填参数（`--vocals` / `--audio`），
+    且**不出现 `--port`**——后者一旦出现就说明又掉回服务端 parser 了。
+
+    顺带守住 stdout：它是 JSON-lines 进度协议的通道（§5.13），分发层往里写一个字
+    都会让父进程的解析出问题，所以这里要求它必须是空的。
+    """
+    log("冒烟测试 worker 子进程分发（冻结形态下 `-m` 不可用）")
+    exe = bundle / ("kvm-backend.exe" if IS_WINDOWS else "kvm-backend")
+    checks = [
+        ("kvm.media.guide", "--vocals"),
+        ("kvm.media.separate", "--audio"),
+    ]
+    for module, required_arg in checks:
+        proc = subprocess.run(
+            [str(exe), "--worker-module", module, "--worker"],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        if required_arg not in proc.stderr:
+            raise SystemExit(
+                f"worker 分发没有把参数交给 {module}：\n"
+                f"  stdout={proc.stdout!r}\n  stderr={proc.stderr!r}"
+            )
+        if "--port" in proc.stderr:
+            raise SystemExit(f"{module} 的参数又掉回服务端 parser 了：\n{proc.stderr}")
+        if proc.stdout.strip():
+            raise SystemExit(f"{module} 分发路径污染了 stdout（JSON-lines 通道）：{proc.stdout!r}")
+        print(f"    {module:<22} 参数已抵达 worker（{required_arg}）", flush=True)
+
+    bogus = subprocess.run(
+        [str(exe), "--worker-module", "kvm.does.not.exist"],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    if bogus.returncode == 0:
+        raise SystemExit("未登记的 worker 模块居然成功退出了，分发层的白名单没生效")
+    log("worker 分发冒烟测试通过")
+
+
 def build_shell() -> None:
     log("构建 Tauri 外壳")
     npx = "npx.cmd" if IS_WINDOWS else "npx"
@@ -282,6 +334,7 @@ def main(argv: list[str] | None = None) -> int:
     bundle = build_backend(args.lean)
     if not args.skip_smoke:
         smoke_test_backend(bundle)
+        smoke_test_workers(bundle)
     if not args.backend_only:
         build_shell()
     report()
