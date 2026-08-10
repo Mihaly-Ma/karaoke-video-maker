@@ -67,7 +67,7 @@ def _kill_process_tree(proc: subprocess.Popen, grace_s: float = 3.0) -> None:
 class JobHandle:
     """传给 runner 的句柄：上报进度、检查/响应取消、登记子进程与清理回调。"""
 
-    __slots__ = ("job_id", "_manager")
+    __slots__ = ("_manager", "job_id")
 
     def __init__(self, job_id: str, manager: JobManager) -> None:
         self.job_id = job_id
@@ -225,7 +225,7 @@ class JobManager:
         except JobCancelled:
             self._update(job_id, state="cancelled", message="已取消")
             self._run_cleanup(job_id)
-        except Exception as exc:  # noqa: BLE001 —— 任务失败必须落到 JobStatus.error，不能被线程默默吞掉
+        except Exception as exc:  # 任务失败必须落到 JobStatus.error，不能被线程默默吞掉
             self._update(job_id, state="failed", error=str(exc), message="失败")
             self._run_cleanup(job_id)
         else:
@@ -272,7 +272,7 @@ def run_cancelable(
     lines: list[str] = []
 
     def _reader() -> None:
-        assert proc.stdout is not None  # noqa: S101 —— 内部实现断言，构造时已固定 stdout=PIPE
+        assert proc.stdout is not None  # 内部实现断言，构造时已固定 stdout=PIPE
         for raw in proc.stdout:
             line = raw.rstrip("\n")
             lines.append(line)

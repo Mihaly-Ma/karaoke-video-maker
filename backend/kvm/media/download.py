@@ -228,7 +228,7 @@ def run_download(handle: JobHandle, store: ProjectStore, req: DownloadRequest) -
         entries: list[dict[str, Any]] = []
         try:
             entries = provider.list_entries(target, limit=50)
-        except Exception:  # noqa: BLE001 —— 列分P 本身失败不应掩盖原始错误
+        except Exception:  # 列分P 本身失败不应掩盖原始错误
             entries = []
         if entries:
             listing = "；".join(f"{e['id']}: {(e['title'] or '')[:24]}" for e in entries[:10])
@@ -281,7 +281,7 @@ def run_download(handle: JobHandle, store: ProjectStore, req: DownloadRequest) -
 
     try:
         result = provider.download(target, selection, media_dir, progress_hook=_hook)
-    except Exception as exc:  # noqa: BLE001 —— download() 正常应返回 ok=False，这里兜底极端情况
+    except Exception as exc:  # download() 正常应返回 ok=False，这里兜底极端情况
         if handle.is_cancelled():
             raise JobCancelled(handle.job_id) from exc
         msg = f"下载失败：{exc}"
@@ -375,7 +375,7 @@ def run_download(handle: JobHandle, store: ProjectStore, req: DownloadRequest) -
 
         proxy_job_id = submit_proxy_job(store, project.id).job_id
         proxy_note = "已自动开始生成编辑代理。"
-    except Exception as exc:  # noqa: BLE001 —— 代理是可选增强，任何失败都只降级不阻断
+    except Exception as exc:  # 代理是可选增强，任何失败都只降级不阻断
         proxy_note = f"编辑代理排队失败（{exc}），可在素材面板手动生成。"
 
     handle.report(1.0, "完成")

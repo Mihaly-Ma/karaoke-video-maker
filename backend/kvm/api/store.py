@@ -22,7 +22,6 @@ do/undo 配对的复杂度与出错风险。命令模式真正的价值在于内
 
 from __future__ import annotations
 
-import json
 import shutil
 import tempfile
 import threading

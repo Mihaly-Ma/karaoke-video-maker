@@ -146,7 +146,6 @@ def test_落盘缓存跨进程内存缓存生效(ffprobe_bin: str, tmp_path: Pat
 def client_and_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("KVM_DATA_DIR", str(tmp_path / "projects"))
     from fastapi.testclient import TestClient
-
     from kvm.api.app import app
 
     with TestClient(app) as client:

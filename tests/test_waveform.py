@@ -239,7 +239,6 @@ def client_and_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """起一个指向 tmp_path 的独立 ProjectStore，避免污染 `~/.karaoke-video-maker`。"""
     monkeypatch.setenv("KVM_DATA_DIR", str(tmp_path / "projects"))
     from fastapi.testclient import TestClient
-
     from kvm.api.app import app
 
     with TestClient(app) as client:
@@ -281,7 +280,7 @@ def test_waveform_二进制接口不同级别体积不同(client_and_project) ->
     assert resp0.headers["content-type"] == "application/octet-stream"
     assert len(resp0.content) > len(resp_last.content)
 
-    version, flags, sample_rate, spp, length, channels = struct.unpack(
+    version, _flags, sample_rate, spp, length, channels = struct.unpack(
         "<iiiiii", resp0.content[:24]
     )
     assert version == 2

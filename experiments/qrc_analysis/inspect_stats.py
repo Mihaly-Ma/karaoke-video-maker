@@ -2,7 +2,6 @@
 """对解析结果做补充统计"""
 import json
 import pathlib
-import re
 
 d = pathlib.Path(__file__).parent
 j = json.loads((d / "qrc_parsed.json").read_text(encoding="utf-8"))

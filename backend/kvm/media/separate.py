@@ -134,7 +134,7 @@ def _backend_version() -> str:
         from importlib.metadata import version
 
         return version("audio-separator")
-    except Exception:  # noqa: BLE001 —— 取不到版本号不该阻断分离，只影响缓存键精确度
+    except Exception:  # 取不到版本号不该阻断分离，只影响缓存键精确度
         return "unknown"
 
 
@@ -547,7 +547,7 @@ def _worker_main(argv: list[str]) -> int:
     except ModelResolutionError as exc:
         _emit({"event": "error", "message": str(exc)})  # 已是中文说明，原样透出
         return 1
-    except Exception as exc:  # noqa: BLE001 —— 子进程的职责就是把任意后端异常转成一行 JSON
+    except Exception as exc:  # 子进程的职责就是把任意后端异常转成一行 JSON
         _emit({"event": "error", "message": f"分离失败：{type(exc).__name__}: {exc}"})
         return 1
 

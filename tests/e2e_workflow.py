@@ -13,7 +13,6 @@ DATA = tempfile.mkdtemp(prefix="kvm-e2e-")
 os.environ["KVM_DATA_DIR"] = str(Path(DATA) / "projects")
 
 from fastapi.testclient import TestClient  # noqa: E402
-
 from kvm.api.app import app  # noqa: E402
 
 ok = 0
@@ -83,12 +82,12 @@ with TestClient(app) as c:
           f"offset={r.json().get('global_offset_ms') if r.status_code==200 else r.status_code}")
 
     before = c.get(f"/api/projects/{pid}").json()
-    tok0 = [ln for ln in before["lines"] if ln["id"] == lid][0]["tokens"][0]["start_ms"]
+    tok0 = next(ln for ln in before["lines"] if ln["id"] == lid)["tokens"][0]["start_ms"]
     r = c.post("/api/editor/shift", json={
         "project_id": pid, "scope": "line", "delta_ms": 100,
         "line_id": lid, "token_index": None})
     if r.status_code == 200:
-        after = [ln for ln in r.json()["lines"] if ln["id"] == lid][0]["tokens"][0]
+        after = next(ln for ln in r.json()["lines"] if ln["id"] == lid)["tokens"][0]
         check("单句平移", after["start_ms"] == tok0 + 100, f"{tok0} → {after['start_ms']}")
         check("平移后标 manual+locked",
               after["timing_source"] == "manual" and after["locked_timing"])
@@ -116,7 +115,7 @@ with TestClient(app) as c:
     r = c.post("/api/editor/ruby", json={
         "project_id": pid, "line_id": lid, "start": 0, "end": 1, "text": "テスト"})
     if r.status_code == 200:
-        rl = [ln for ln in r.json()["lines"] if ln["id"] == lid][0]
+        rl = next(ln for ln in r.json()["lines"] if ln["id"] == lid)
         hit = [x for x in rl["ruby"] if x["start"] == 0 and x["end"] == 1]
         check("设定注音", bool(hit) and hit[0]["text"] == "テスト")
         check("注音标 manual+locked",
@@ -128,7 +127,7 @@ with TestClient(app) as c:
     r = c.post("/api/editor/voice-part", json={
         "project_id": pid, "line_id": lid, "voice_part": "duet_a", "token_range": [0, 2]})
     if r.status_code == 200:
-        vl = [ln for ln in r.json()["lines"] if ln["id"] == lid][0]
+        vl = next(ln for ln in r.json()["lines"] if ln["id"] == lid)
         vps = [t.get("voice_part") for t in vl["tokens"][:3]]
         check("区间声部不拆行", len(r.json()["lines"]) == len(proj["lines"]),
               f"行数 {len(proj['lines'])} → {len(r.json()['lines'])}")

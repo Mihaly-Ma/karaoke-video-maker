@@ -14,7 +14,7 @@ from collections.abc import Iterable
 from dataclasses import InitVar, dataclass, field
 
 
-class TimingSource(str, enum.Enum):
+class TimingSource(enum.StrEnum):
     """时间的来源，决定它在自动重算时是否可被覆盖。"""
 
     PROVIDER = "provider"
@@ -30,7 +30,7 @@ class TimingSource(str, enum.Enum):
     """用户手工调整过。任何自动重算都必须跳过。"""
 
 
-class ReadingSource(str, enum.Enum):
+class ReadingSource(enum.StrEnum):
     """读音的来源。优先级见 CLAUDE.md §4.5。"""
 
     PROVIDER_KANA = "provider_kana"

@@ -48,6 +48,7 @@ from kvm.api.schemas import (
     RenderRequest,
 )
 from kvm.api.store import ProjectStore, default_root
+from kvm.media import guide as guide_module
 from kvm.media.download import _ffprobe_bin, _probe_duration
 from kvm.media.ffmpeg import find_ffmpeg_with_libass
 from kvm.models.karaoke import (
@@ -61,7 +62,6 @@ from kvm.models.karaoke import (
     Token,
     VoicePalette,
 )
-from kvm.media import guide as guide_module
 from kvm.pipeline.beat_detect import BeatGrid, detect_beats
 from kvm.pipeline.make_video import _extract_audio, _mix_audio, burn
 from kvm.render.ass_builder import AssBuilder

@@ -109,6 +109,12 @@ select = [
     "SIM",       # simplify
     "RUF",       # ruff 专有
     "PTH",       # 用 pathlib 而非 os.path
+    # 下面两条是从 pep8-naming / flake8-pytest-style 里单挑出来的：整族启用会带进
+    # 一堆与本项目风格冲突的规则（测试函数名是中文、fixture 命名等），而这两条本身
+    # 已经零违规，且代码里各有一处**有意为之的例外**带着 `# noqa` 与中文理由。
+    # 不启用的话那两处 noqa 会退化成 RUF100 死注释，例外的意图就无人守护了。
+    "N818",      # 异常类名应以 Error 结尾（例外：JobCancelled 是控制流信号）
+    "PT011",     # pytest.raises 不应过宽（例外：pydantic 抛 ValidationError，只能按 ValueError 接）
 ]
 ignore = [
     # 本项目大量调用 ffmpeg/yt-dlp 等外部工具，命令由代码构造、不含用户输入拼接，
@@ -123,9 +129,28 @@ ignore = [
     "RUF001", "RUF002", "RUF003",
 ]
 
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI 的依赖注入**要求**把 Depends()/File()/Query() 写在参数默认值上——那正是
+# B008 要拦的形状，但在 FastAPI 里它不是"可变默认值"陷阱，而是唯一的声明方式。
+# 用 extend-immutable-calls 精确豁免这几个调用，而不是整条 ignore 掉 B008：
+# 后者会连 `def f(x=list())` 这种真陷阱一起放过。
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.File",
+    "fastapi.Form",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Header",
+    "fastapi.Body",
+]
+
 [tool.ruff.lint.per-file-ignores]
-# 实验脚本是一次性验证代码，允许更松的写法
-"experiments/**" = ["B", "SIM", "RUF"]
+# 实验脚本是一次性验证代码，允许更松的写法。
+# 追加 UP / E731 的理由：这些脚本大量是从参考实现（C# / Go / Python）逐段移植过来的，
+# `%` 格式化与文件头的 `# -*- coding: utf-8 -*-` 都是移植时原样保留的痕迹。
+# 它们的价值在于"能和上游逐行对照"，重写成 f-string 只会让对照变难，还平白引入
+# 手抖改错常量的风险——而这些脚本正是 QRC 解密等结论的回归基线（CLAUDE.md §11）。
+"experiments/**" = ["B", "SIM", "RUF", "UP", "E731"]
 
 [tool.ruff.format]
 quote-style = "double"

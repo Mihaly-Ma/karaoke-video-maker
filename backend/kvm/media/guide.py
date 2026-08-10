@@ -512,7 +512,7 @@ def _worker_main(argv: list[str]) -> int:
         # 单声道音轨从 26MB 涨到 52MB，而这条轨在预览里要整份解码进内存。
         sf.write(str(out), np.asarray(audio), int(info.samplerate))
         _emit({"event": "done", "notes": len(notes), "path": str(out)})
-    except Exception as exc:  # noqa: BLE001 —— 子进程的职责就是把任意后端异常转成一行 JSON
+    except Exception as exc:  # 子进程的职责就是把任意后端异常转成一行 JSON
         _emit({"event": "error", "message": f"引导声合成失败：{type(exc).__name__}: {exc}"})
         return 1
 
