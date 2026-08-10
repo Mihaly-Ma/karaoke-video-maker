@@ -54,6 +54,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, ClassVar
 
+from kvm.media.ffmpeg import probe_ffmpeg
+
 
 def default_private_deps_dir() -> Path:
     """自动获取的依赖装在哪（CLAUDE.md §2.6：一律装进应用私有目录，不污染用户系统）。
@@ -603,6 +605,13 @@ class VideoProvider(ABC):
             # 这是 CLAUDE.md §5.1 点名的坑
             "ignoreerrors": False,
         }
+        # yt-dlp 只认 PATH，看不见应用私有目录里的 ffmpeg（§2.6），不告诉它就会在
+        # 合并音视频流那步以 "ffmpeg is not installed" 失败，而启动自检还是通过的。
+        # 传目录而非文件：ffmpeg 与 ffprobe 要同源。探测不到就不设，让 yt-dlp 自己
+        # 报错，不在这里抛（§2.5 失败要降级）。
+        ffmpeg = probe_ffmpeg()
+        if ffmpeg.path is not None:
+            opts["ffmpeg_location"] = str(Path(ffmpeg.path).parent)
         opts.update(extra or {})
         return opts
 
