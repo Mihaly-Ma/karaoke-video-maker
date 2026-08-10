@@ -24,7 +24,11 @@ export const exportStage: Record<string, string> = {
   'export.preview': '最终预览',
   // 预览与成片的两处差异，用状态而非解释的口吻
   'export.previewProxy': '代理画面',
-  'export.previewNoGuide': '预览不含引导声',
+  // 引导声生成过就真能在预览里听到，所以这里只剩两种状态：已在预览中 / 还没生成。
+  // 那句笼统的「预览不含引导声」已经不成立，撤掉了。
+  'export.previewGuideOn': '含引导声',
+  'export.previewGuideMissing': '预览无引导声',
+  'export.previewGuideMissingHint': '到「素材」步骤生成引导声，之后预览就能听到；导出会自动现场合成一份',
   // 预览字体是子集化产物，字符集比系统原字体小：这些字只有预览缺，成片是好的
   'export.previewGlyphGap': '预览缺 {n} 字',
   'export.cues': '关键位置',

@@ -37,7 +37,9 @@ from kvm.api.schemas import ProjectDTO, ProjectSummary
 
 _MAX_HISTORY = 200
 
-BACKEND_ONLY_FIELDS: frozenset[str] = frozenset({"proxy_video_path", "exports"})
+BACKEND_ONLY_FIELDS: frozenset[str] = frozenset(
+    {"proxy_video_path", "exports", "guide_audio_path", "guide_signature"}
+)
 """只有后台作业写得了、用户永远无法直接设定的字段，**整体排除在历史快照之外**。
 
 撤销回到更早的快照时，这些字段保持当前值不被回卷。理由见 CLAUDE.md §8
@@ -49,6 +51,10 @@ BACKEND_ONLY_FIELDS: frozenset[str] = frozenset({"proxy_video_path", "exports"})
 stem 路径虽然通常由分离作业写入，但用户也能通过 `POST /api/media/import`
 手工指定一份，那种情况下它确实是用户意图，必须留在历史里可撤销——所以它们
 不在这个集合里，只是分离作业写回时改走 `update_derived()` 不占撤销格而已。
+
+引导声这一组刚好把这条判据的两侧都摆了出来：**产物**（`guide_audio_path`、
+以及记录"它是用哪组参数产出的"的 `guide_signature`）在这里，用户设不了；
+而**参数** `guide.*` 不在——那是用户拖滑块表达的意图，理应可撤销。
 """
 
 

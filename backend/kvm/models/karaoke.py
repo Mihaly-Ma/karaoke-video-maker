@@ -10,7 +10,8 @@
 from __future__ import annotations
 
 import enum
-from dataclasses import dataclass, field
+from collections.abc import Iterable
+from dataclasses import InitVar, dataclass, field
 
 
 class TimingSource(str, enum.Enum):
@@ -272,11 +273,81 @@ class VoicePalette:
     sung_outline: str = "&H00202020&"
 
 
+DEFAULT_FONT_CHAIN = ("Noto Sans CJK JP",)
+"""字体链的兜底取值。链**永远不为空**——空链等于没有字体，libass 会退到自带的
+Liberation Sans，日文整片渲成豆腐块，而且不报错。"""
+
+
+def normalize_font_chain(names: Iterable[str], legacy: str | None = None) -> list[str]:
+    """把任意来源的字体链整理成规范形态：去空白、去空串、去重、保底非空。
+
+    **这条规则必须只有一份实现。**领域模型（`KaraokeStyle`）与传输层
+    （`api.schemas.StyleDTO`）各写一份的话，同一份工程经不同路径读出来会
+    不一样，而这类漂移只在"用户配了两个字体、某个面板只认一个"这种场合
+    偶然暴露一次，极难复现。
+
+    `legacy` 是老工程里那个单个 `font_name`。**只在 `names` 整理后为空时才认它**：
+    两者同时存在是常态（DTO 一直镜像着 `font_name`），规则含糊会让"打开工程
+    少一个字体"随时序发生。
+
+    去重保留首次出现的位置——链尾重复链首毫无意义，却会让"这个字体承担了
+    几个字"的归属统计冒出两条同名条目。
+    """
+    chain: list[str] = []
+    for candidate in names:
+        name = (candidate or "").strip()
+        if name and name not in chain:
+            chain.append(name)
+    if not chain and legacy and legacy.strip():
+        chain = [legacy.strip()]
+    return chain or list(DEFAULT_FONT_CHAIN)
+
+
 @dataclass
 class KaraokeStyle:
     """排版样式。与配色分离——换声部只换配色，不动排版。"""
 
-    font_name: str = "Noto Sans CJK JP"
+    font_names: list[str] = field(default_factory=list)
+    """有序字体候选链：链首缺哪个字形，就落到后面那个。
+
+    **默认值是空列表而不是默认链**，因为构造时要分得清"调用方没给链"与
+    "调用方给了链"——只有前者才轮得到兼容入口 `font_name` 说话。
+    `__post_init__` 结束后本字段**恒非空**（空则填 `DEFAULT_FONT_CHAIN`）。
+
+    ## 为什么是一条链而不是一个族名
+
+    没有一个日文字体覆盖得全。「鷗」「𠮷」「①」「㍿」这类字在常见字体里
+    时有时无，而缺字的后果是不对称的（CLAUDE.md §2.6 / §6.3）：预览走 JASSUB
+    （`ASS_FONTPROVIDER_NONE`），手里只有我们喂进去的字体，缺了就是空白；
+    导出走 ffmpeg，系统回退**无法禁用**，它会自己找个字体顶上。同一个字
+    两端各画各的，WYSIWYG 当场失效，而这种事往往到成片才被发现。
+
+    链把"缺字时用谁"从**两端各自的默认行为**变成了**工程里显式记着的一份数据**，
+    两端照着同一份数据走，才谈得上同源。
+
+    ## 顺序是怎么真正生效的（实测，别改成想当然的做法）
+
+    libass **不会**在族名互不相同的已加载字体之间做缺字回退：内嵌一份
+    带该字形的字体、族名与请求的不同时，ffmpeg 侧照样去用系统字体
+    （`experiments/ass_embedded_fonts.py` 的 distinct 组）。
+
+    真正生效的机制是：**把链上每个字体都改写成链首的族名**，让它们成为
+    同一个族的多个字面，libass 于是在这几个字面里挑一个带该字形的——
+    这是字体匹配的基本功能，不是回退启发式，两端一致。改写在
+    `render.font_subset.subset_font(family_name=...)` 里做，同时把
+    `usWeightClass` 归一到 400，否则字重距离会让链首失去优先权。
+
+    因此本字段的**首项有特殊地位**：它既是 ASS `Fontname` 写的那个族名，
+    也是全链改写后共用的族名。
+    """
+
+    font_name: InitVar[str | None] = None
+    """**只读的兼容入口**，不是字段。老工程 JSON（以及为兼容而保留 `font_name`
+    镜像的 `StyleDTO`）传进来的是单个族名，`__post_init__` 会把它升成单元素链。
+
+    取当前主字体请用 `primary_font`。
+    """
+
     font_size: int = 64
     outline: float = 3.0
     shadow: float = 1.0
@@ -405,6 +476,21 @@ class KaraokeStyle:
 
     只在第一句与间奏后出现；句与句之间的正常换行不该有点，否则满屏干扰。
     """
+
+    def __post_init__(self, font_name: str | None) -> None:
+        """把老工程的单个 `font_name` 升成链，并保证链非空、无重复、无空串。
+
+        规则本身在 `normalize_font_chain`——传输层用的是同一个函数。
+        """
+        self.font_names = normalize_font_chain(self.font_names, font_name)
+
+    @property
+    def primary_font(self) -> str:
+        """主字体族名：ASS `Fontname` 写的那个，也是全链改写后共用的族名。
+
+        链恒非空（见 `__post_init__`），所以这里不必考虑空链。
+        """
+        return self.font_names[0]
 
 
 @dataclass

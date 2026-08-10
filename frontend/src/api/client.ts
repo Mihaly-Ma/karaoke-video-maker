@@ -11,6 +11,8 @@ import type {
   FontInfo,
   FontPreset,
   FontScanStatus,
+  GuideParams,
+  GuideStatus,
   JobStatus,
   LockTarget,
   LyricPreview,
@@ -141,6 +143,31 @@ export const buildProxy = (projectId: string, maxHeight?: number, force = false)
 
 /** 代理是否就绪 + 最近一次代理任务（含后端自动发起的那次）的状态 */
 export const proxyStatus = (projectId: string) => req<ProxyStatus>(`/media/proxy/${projectId}`)
+
+/**
+ * 只保存引导声参数，**不触发合成**。占一格撤销（参数是用户意图，见 CLAUDE.md §8）。
+ *
+ * 与 `buildGuide` 分成两个动作，是因为合成一次要跑十几到几十秒的 CREPE——
+ * 每拖一下滑块就重算不可接受。
+ */
+export const setGuideParams = (projectId: string, params: GuideParams) =>
+  post<Project>('/media/guide/params', { project_id: projectId, params })
+
+/**
+ * 合成引导声（ガイドメロディ）。
+ *
+ * 带 `params` 时后端会**先存参数再合成**——界面上"改完参数点重新生成"是一个动作，
+ * 拆成两次请求会在中间留下一个两者不一致的窗口。
+ */
+export const buildGuide = (projectId: string, params?: GuideParams, force = false) =>
+  post<JobStatus>('/media/guide', {
+    project_id: projectId,
+    ...(params ? { params } : {}),
+    force,
+  })
+
+/** 引导声是否就绪、是不是旧参数产出的，以及最近一次合成任务的状态 */
+export const guideStatus = (projectId: string) => req<GuideStatus>(`/media/guide/${projectId}`)
 
 /**
  * 查询长任务状态。
@@ -333,11 +360,29 @@ export const getFontStatus = () => req<FontScanStatus>('/fonts/status')
 /**
  * 字体子集资源的直链，用法与 mediaUrl 相同——具体是二进制字体文件还是别的表示形式
  * 由后端决定，前端只负责拼 URL，不在这里假设响应体形状。
+ *
+ * 两个可选参数都与**字体链**有关，缺一条链就断一处：
+ *
+ * - `as`：产物对外自称的族名。整条链必须统一成**链首**的族名，libass 才会
+ *   在它们之间做字形回退——族名各不相同时它压根不看内嵌字体
+ *   （`experiments/ass_embedded_fonts.py` 实测）。
+ * - `extra`：本曲用到、但默认子集裁不到的字（「鷗」「𠮷」「①」）。不传的话
+ *   这些字**预览空白、成片正常**，只看成片发现不了。
+ *
+ * 两者都进后端的磁盘缓存键，所以同一个字体在不同链首/不同歌下是不同产物。
  */
-export const fontSubsetUrl = (family: string) => `${BASE}/fonts/subset?family=${encodeURIComponent(family)}`
+export const fontSubsetUrl = (family: string, opts: { as?: string; extra?: string } = {}) => {
+  const params = new URLSearchParams({ family })
+  if (opts.as && opts.as !== family) params.set('as', opts.as)
+  if (opts.extra) params.set('extra', opts.extra)
+  return `${BASE}/fonts/subset?${params.toString()}`
+}
 
 /**
- * 检查字体能否覆盖给定文本的全部字形（缺字必须在渲染前拦截，见 CLAUDE.md §2.6）。
+ * 检查**整条字体链**能否覆盖给定文本的全部字形，以及每个字由谁承担
+ * （缺字必须在渲染前拦截，见 CLAUDE.md §2.6）。
+ *
+ * 传单个族名仍然可用（导出面板走的就是这条），后端会把它当成单元素链。
  *
  * **参数走请求体，不要改回 query**：`text` 装的是整首歌的字符集，
  * percent-encode 后每个汉字占 9 字节，几百个不重复字符就逼近 uvicorn 对
@@ -345,9 +390,15 @@ export const fontSubsetUrl = (family: string) => `${BASE}/fonts/subset?family=${
  *
  * 调用方应先送**去重后的字符集**而不是原文（见 `lib/fontCoverage.ts`），
  * 两层保险各自独立：去重是为了缓存命中率，请求体是为了没有长度天花板。
+ *
+ * 副作用（刻意的）：后端借这次调用**预热整条链的子集产物**。这一刻用户还在
+ * 字体列表里挑，离切到预览还有几秒到几十秒，正是把十秒级的裁剪塞进去的地方。
  */
-export const checkFontCoverage = (family: string, text: string) =>
-  post<FontCoverageResult>('/fonts/coverage', { family, text })
+export const checkFontCoverage = (families: string | string[], text: string) =>
+  post<FontCoverageResult>('/fonts/coverage', {
+    families: typeof families === 'string' ? [families] : families,
+    text,
+  })
 
 // ---- 渲染 ----
 
@@ -384,7 +435,7 @@ export const listExports = (projectId: string) =>
  */
 export const mediaUrl = (
   projectId: string,
-  kind: 'video' | 'proxy' | 'audio' | 'instrumental' | 'vocals' | 'drums',
+  kind: 'video' | 'proxy' | 'audio' | 'instrumental' | 'vocals' | 'drums' | 'guide',
 ) => `${BASE}/media/file/${projectId}/${kind}`
 
 /**

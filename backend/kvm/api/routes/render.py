@@ -39,6 +39,7 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import FileResponse, PlainTextResponse
+from kvm.api.routes.fonts import chain_font_bytes
 from kvm.api.schemas import (
     AssResponse,
     ExportArtifactDTO,
@@ -60,8 +61,8 @@ from kvm.models.karaoke import (
     Token,
     VoicePalette,
 )
+from kvm.media import guide as guide_module
 from kvm.pipeline.beat_detect import BeatGrid, detect_beats
-from kvm.pipeline.guide_melody import build_guide_track
 from kvm.pipeline.make_video import _extract_audio, _mix_audio, burn
 from kvm.render.ass_builder import AssBuilder
 from kvm.render.text_metrics import LibassMetrics
@@ -231,9 +232,18 @@ def _load_beat_grid(dto: ProjectDTO) -> BeatGrid | None:
     return grid
 
 
-def _build_ass_text(dto: ProjectDTO) -> str:
+def _build_ass_text(dto: ProjectDTO, *, embed_fonts: bool = False) -> str:
     """DTO → ASS 文本。`POST /ass` 与 `GET /preview.ass` 共用同一条路径，
     保证两个接口所见完全一致。
+
+    `embed_fonts` **只在导出时开**：它把整条字体链的字节 UUEncode 进 `[Fonts]` 段，
+    一份子集字体编码后约 6.8 MB，预览每编辑一下就要重传一次，塞不起。
+    预览侧改由 ASS 头部的一行声明告诉前端该去取哪几个字体
+    （`render.ass_builder.PREVIEW_FONTS_TAG`），取到的是同一批产物字节。
+
+    导出侧非嵌不可：ffmpeg 用 `ASS_FONTPROVIDER_AUTODETECT`，系统字体回退
+    **无法禁用**，不把字节摆在它面前就控制不住缺字时它选谁——
+    同一个生僻字预览用链尾、成片用系统某个字体，正是 §5.12 要杜绝的分叉。
     """
     project = project_dto_to_domain(dto)
     project.beat_grid = _load_beat_grid(dto)
@@ -243,7 +253,11 @@ def _build_ass_text(dto: ProjectDTO) -> str:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
-    return AssBuilder(project, metrics).build()
+    builder = AssBuilder(project, metrics)
+    if not embed_fonts:
+        return builder.build()
+    embedded = chain_font_bytes(project.style.font_names, builder.rendered_charset())
+    return AssBuilder(project, metrics, embedded_fonts=embedded).build()
 
 
 # ---- POST /ass、GET /preview.ass ----
@@ -272,12 +286,20 @@ def generate_ass(body: AssRequest, request: Request) -> AssResponse:
 
 
 @router.get("/preview.ass", response_class=PlainTextResponse)
-def preview_ass(project_id: str, request: Request) -> PlainTextResponse:
+def preview_ass(
+    project_id: str, request: Request, embed_fonts: bool = False
+) -> PlainTextResponse:
     """与 `/ass` 等价，但以 `text/plain` 返回，便于前端直接把响应体喂给
     JASSUB 的 `subContent`（JASSUB 吃的是原始 ASS 文本，不是 JSON 包装）。
+
+    `embed_fonts=true` 返回**导出时那一份**（带 `[Fonts]` 内嵌字体，几 MB 起步）。
+    界面不该用它——预览每编辑一下都要重取一次，塞不起。留这个开关是为了让
+    "两端用的是不是同一批字体"这件事**可验证**：验证脚本拿它渲一帧，
+    与浏览器预览逐字比对（`frontend/scripts/verify-font-chain.mjs`）。
+    没有这个开关，导出侧的 ASS 只存在于烧录作业内部，验证只能靠跑完整出片。
     """
     dto = _get_project(request, project_id)
-    ass_text = _build_ass_text(dto)
+    ass_text = _build_ass_text(dto, embed_fonts=embed_fonts)
     return PlainTextResponse(content=ass_text, media_type="text/plain; charset=utf-8")
 
 
@@ -515,7 +537,7 @@ def _run_export(job_id: str, store: ProjectStore, dto: ProjectDTO, req: RenderRe
         ffmpeg = _get_ffmpeg()
 
         _set_job(job_id, message="生成 ASS…", progress=0.1)
-        ass_text = _build_ass_text(dto)
+        ass_text = _build_ass_text(dto, embed_fonts=True)
 
         out_dir = default_root().parent / "exports"
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -533,17 +555,23 @@ def _run_export(job_id: str, store: ProjectStore, dto: ProjectDTO, req: RenderRe
             if not dto.vocals_path:
                 msg = "工程未关联人声轨（vocals_path），无法合成引导声"
                 raise RuntimeError(msg)
-            vocals_path = Path(dto.vocals_path)
 
-            _set_job(job_id, message="合成引导声…", progress=0.25)
+            _set_job(job_id, message="准备引导声…", progress=0.25)
             if audio_track is None:
                 # 引导声要叠加在某条音轨上；未选伴奏时先从视频里抽出原始音轨作为底
                 audio_track = _extract_audio(
                     ffmpeg, video_path, out_dir / f"{dto.id}_{job_id}_src_audio.wav"
                 )
-            duration_s = req.duration_s if req.duration_s is not None else dto.duration_ms / 1000.0
-            guide_path = out_dir / f"{dto.id}_{job_id}_guide.wav"
-            build_guide_track(vocals_path, guide_path, duration_s)
+            # **一律按整曲时长**，即便这次只导一个片段：引导声的时间是绝对的，
+            # 而 `burn` 用的是 output seek（`-ss` 在输入之后）。按片段时长合成会得到
+            # 一条只覆盖 [0, duration_s] 的音轨，start_s 之后的片段里引导声整段消失。
+            duration_s = dto.duration_ms / 1000.0
+            # 优先复用素材页已经生成好的那一份——用户刚试听并认可的就是它，
+            # 既省掉一次 CREPE，也保证"听到的"与"导出的"是同一条音轨。
+            # 没有（或参数改过还没重新生成）时就地合成，不阻断导出（§2.5）。
+            guide_path = guide_module.resolve_for_export(
+                dto, out_dir / f"{dto.id}_{job_id}_guide.wav", duration_s
+            )
             mixed_path = out_dir / f"{dto.id}_{job_id}_audio_mixed.wav"
             audio_track = _mix_audio(ffmpeg, audio_track, guide_path, mixed_path)
 

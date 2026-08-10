@@ -125,14 +125,44 @@ const CROSSFADE_S = 0.06
  * 有 stem 时再装一份混音等于同一段音乐白占第三份内存（整曲立体声约 100MB），
  * 而且"原声"该长什么样已经由 D15 定死了。
  */
-type LayerId = 'mix' | 'vocals' | 'instrumental'
+type LayerId = 'mix' | 'vocals' | 'instrumental' | 'guide'
 
 /** 层 → 后端媒体 kind */
-const LAYER_KIND: Record<LayerId, 'audio' | 'vocals' | 'instrumental'> = {
+const LAYER_KIND: Record<LayerId, 'audio' | 'vocals' | 'instrumental' | 'guide'> = {
   mix: 'audio',
   vocals: 'vocals',
   instrumental: 'instrumental',
+  guide: 'guide',
 }
+
+/**
+ * 引导声是**叠加层**，不参与「原声 / 伴奏 / 仅人声」那组预设的互斥。
+ *
+ * 它能配原声也能配伴奏（日本卡拉OK 里两种都有），所以它不是第四个档，而是一个
+ * 独立开关——开关状态就是 store 的 `guideEnabled`，也就是导出设置里的「混入引导声」，
+ * 两者共用一份状态（与 ON/OFF VOCAL 同一条纪律）。
+ *
+ * 它的音量**不进分轨滑块**：文件里已经把生成时那个 `gain` 烧进去了，
+ * 预览按 1.0 播放才等于成片里的响度。在这里再给一个滑块，用户会以为拉低它
+ * 导出也会变轻——那是素材页的「音量」参数才管的事。
+ */
+const GUIDE_LAYER: LayerId = 'guide'
+
+/**
+ * 预览里引导声那一层的增益。**不是 1，这是实测校准过的。**
+ *
+ * 引导声文件是**单声道**，而导出时 ffmpeg 的 `amix` 会先把它上混成立体声，
+ * 上混矩阵为保持功率给每个声道乘 1/√2 —— 于是同一份文件在成片里比它自己的
+ * 文件电平低 3 dB。实测（赤春花，34s+8s 窗口）：引导声本身 −19.45 dBFS，
+ * 而"成片混音 − 伴奏"的残差是 −22.46 dBFS，两者相关系数 1.0000，差值恰好 3.01 dB。
+ *
+ * 预览若按 1.0 播放，用户就会照着一个比成片响 3 dB 的声音去调「音量」参数，
+ * 导出后又觉得轻——正是这块面板要消灭的那类"导完才发现"。
+ *
+ * **反过来不去改导出侧的上混**：§8.9 记的默认 `gain=0.11`（"约低于伴奏 5dB"）
+ * 就是在这条链路的末端量出来的，动它等于把那次校准作废。
+ */
+const GUIDE_EXPORT_GAIN = Math.SQRT1_2
 
 /**
  * 试听预设。**只是把各层增益整组写成某个组合的快捷方式**，不是可选项的全集
@@ -149,21 +179,37 @@ const MONITOR_PRESETS: readonly MonitorPreset[] = ['original', 'instrumental', '
  * 当前工程实际装了哪些层，不能写成常量表。
  */
 function presetLayers(preset: MonitorPreset, layers: readonly LayerId[]): LayerId[] {
+  const stems = layers.filter((l) => l !== GUIDE_LAYER)
   if (preset === 'original') {
-    return layers.includes('mix') ? ['mix'] : layers.filter((l) => l !== 'mix')
+    return stems.includes('mix') ? ['mix'] : stems.filter((l) => l !== 'mix')
   }
-  return layers.filter((l) => l === preset)
+  return stems.filter((l) => l === preset)
 }
 
-/** 按预设算出各层增益。已有的分轨音量（`trims`）要保住，切一圈档回来不该被复位成 100% */
+/**
+ * 按预设算出各层增益。已有的分轨音量（`trims`）要保住，切一圈档回来不该被复位成 100%。
+ *
+ * 引导声由 `guideOn` 单独决定，**不受预设摆布**：它是叠加层（见 `GUIDE_LAYER`），
+ * 切换 ON/OFF VOCAL 不该顺手把它关掉。
+ */
 function presetLevels(
   preset: MonitorPreset,
   layers: readonly LayerId[],
   trims: Partial<Record<LayerId, number>>,
+  guideOn: boolean,
 ): Partial<Record<LayerId, number>> {
   const on = new Set(presetLayers(preset, layers))
   const out: Partial<Record<LayerId, number>> = {}
-  for (const id of layers) out[id] = on.has(id) ? (trims[id] ?? 1) : 0
+  for (const id of layers) {
+    out[id] =
+      id === GUIDE_LAYER
+        ? guideOn
+          ? GUIDE_EXPORT_GAIN
+          : 0
+        : on.has(id)
+          ? (trims[id] ?? 1)
+          : 0
+  }
   return out
 }
 
@@ -342,11 +388,14 @@ class AudioEngine {
         warnings.push({
           level: 'warn',
           title: t('media.player.warn.trackFailed', { track: t(`media.player.track.${id}`) }),
-          detail: `${describeError(e)}。${
+          detail: `${describeError(e)}。${t(
             id === 'mix'
-              ? t('media.player.warn.trackFailedMix')
-              : t('media.player.warn.trackFailedStem')
-          }`,
+              ? 'media.player.warn.trackFailedMix'
+              : id === GUIDE_LAYER
+                ? // 引导声不是分离产物，让用户去"跑一次分离"是把人指向错的地方
+                  'media.player.warn.trackFailedGuide'
+                : 'media.player.warn.trackFailedStem',
+          )}`,
         })
       }
     }
@@ -492,9 +541,11 @@ export function Preview({ className }: PreviewProps) {
   const playing = useProject((s) => s.playing)
   const playbackRate = useProject((s) => s.playbackRate)
   const audioMode = useProject((s) => s.audioMode)
+  const guideEnabled = useProject((s) => s.guideEnabled)
   const setPlayhead = useProject((s) => s.setPlayhead)
   const setPlaying = useProject((s) => s.setPlaying)
   const setAudioMode = useProject((s) => s.setAudioMode)
+  const setGuideEnabled = useProject((s) => s.setGuideEnabled)
   const refreshProject = useProject((s) => s.refresh)
 
   const videoRef = useRef<HTMLVideoElement | null>(null)
@@ -584,12 +635,17 @@ export function Preview({ className }: PreviewProps) {
   const audioPath = project?.audio_path ?? null
   const vocalsPath = project?.vocals_path ?? null
   const instrumentalPath = project?.instrumental_path ?? null
+  const guidePath = project?.guide_audio_path ?? null
 
   /** 层 → 工程里对应的文件路径。为空 = 这条轨还不存在（多半是没分离过） */
   const layerPath = useCallback(
-    (id: LayerId): string | null =>
-      id === 'mix' ? audioPath : id === 'vocals' ? vocalsPath : instrumentalPath,
-    [audioPath, vocalsPath, instrumentalPath],
+    (id: LayerId): string | null => {
+      if (id === 'mix') return audioPath
+      if (id === 'vocals') return vocalsPath
+      if (id === 'instrumental') return instrumentalPath
+      return guidePath
+    },
+    [audioPath, vocalsPath, instrumentalPath, guidePath],
   )
 
   /**
@@ -604,8 +660,11 @@ export function Preview({ className }: PreviewProps) {
     if (audioPath && !(vocalsPath && instrumentalPath)) out.push('mix')
     if (vocalsPath) out.push('vocals')
     if (instrumentalPath) out.push('instrumental')
+    // 引导声已经生成才装。它是单声道、比 stem 小得多，而它换来的是**导出前
+    // 能真的听到成片里的引导声**——此前这块只能在界面上标注"预览不含引导声"。
+    if (guidePath) out.push(GUIDE_LAYER)
     return out
-  }, [audioPath, vocalsPath, instrumentalPath])
+  }, [audioPath, vocalsPath, instrumentalPath, guidePath])
 
   /**
    * 视频画面这条路是否还走得通。**播放的前提只有音频**，这个值只决定
@@ -714,7 +773,8 @@ export function Preview({ className }: PreviewProps) {
    * 去初始化各层增益节点，顺序反了的话首次起播会从静音斜坡淡进来。
    */
   useEffect(() => {
-    const next = presetLevels(useProject.getState().audioMode, layers, trimsRef.current)
+    const s = useProject.getState()
+    const next = presetLevels(s.audioMode, layers, trimsRef.current, s.guideEnabled)
     levelsRef.current = next
     setLevels(next)
   }, [layers])
@@ -771,8 +831,20 @@ export function Preview({ className }: PreviewProps) {
   useEffect(() => {
     if (lastAudioModeRef.current === audioMode) return
     lastAudioModeRef.current = audioMode
-    setLevels(presetLevels(audioMode, layers, trimsRef.current))
+    setLevels(
+      presetLevels(audioMode, layers, trimsRef.current, useProject.getState().guideEnabled),
+    )
   }, [audioMode, layers])
+
+  /**
+   * 引导声开关（导出设置里的「混入引导声」就是它）。
+   *
+   * **只动引导声那一层**，不重算整组预设：用户可能已经把人声压到两三成在试听，
+   * 顺手开一下引导声不该把那个调整按回预设值。
+   */
+  useEffect(() => {
+    setLevels((prev) => ({ ...prev, [GUIDE_LAYER]: guideEnabled ? GUIDE_EXPORT_GAIN : 0 }))
+  }, [guideEnabled])
 
   /**
    * 变速由这里统一执行：音频引擎与 <video> 必须同时改，否则视频会被纠偏逻辑
@@ -1035,10 +1107,10 @@ export function Preview({ className }: PreviewProps) {
    */
   const applyPreset = useCallback(
     (preset: MonitorPreset) => {
-      setLevels(presetLevels(preset, layers, trimsRef.current))
+      setLevels(presetLevels(preset, layers, trimsRef.current, guideEnabled))
       if (preset !== 'vocals') setAudioMode(preset)
     },
-    [layers, setAudioMode],
+    [layers, setAudioMode, guideEnabled],
   )
 
   /** 拖某一层的音量。**滑块直接就是该层的增益**，不是"预设之上的修正量" */
@@ -1053,7 +1125,10 @@ export function Preview({ className }: PreviewProps) {
    * 把人声拉到 0 之后耳朵里就只剩伴奏，此时高亮「伴奏」才是实话。
    * 一个都不匹配（例如两层都拉到 0）就谁都不高亮。
    */
-  const audible = layers.filter((id) => (levels[id] ?? 0) > AUDIBLE_EPS)
+  // 引导声不参与反推：它是叠加层，开着它不该让「原声」这一档失去高亮
+  const audible = layers.filter(
+    (id) => id !== GUIDE_LAYER && (levels[id] ?? 0) > AUDIBLE_EPS,
+  )
   const activePreset =
     MONITOR_PRESETS.find((p) => {
       const on = presetLayers(p, layers)
@@ -1088,8 +1163,18 @@ export function Preview({ className }: PreviewProps) {
     return null
   }
 
-  // 只有一层时"分轨音量"就是主音量，多一个入口只会让人以为它们是两回事
-  const mixerAvailable = layers.length > 1
+  // 只有一层时"分轨音量"就是主音量，多一个入口只会让人以为它们是两回事。
+  // 引导声不算在内：它没有分轨滑块（见 `GUIDE_LAYER`）
+  const stemLayers = layers.filter((id) => id !== GUIDE_LAYER)
+  const mixerAvailable = stemLayers.length > 1
+
+  /** 引导声这一层为什么不能开。返回 null 表示可开。 */
+  const guideBlockReason = (): string | null => {
+    if (!layers.includes(GUIDE_LAYER)) return t('media.player.mix.guideMissing')
+    if (audioState === 'loading') return t('media.player.mix.loading')
+    if (audioState !== 'webaudio') return t('media.player.mix.unavailable')
+    return layerBlockReason(GUIDE_LAYER)
+  }
 
   // --- 渲染 ------------------------------------------------------------------
 
@@ -1283,6 +1368,32 @@ export function Preview({ className }: PreviewProps) {
           })}
         </div>
 
+        {/*
+          引导声：**独立开关，不是第四档**。它能配原声也能配伴奏，与那三档正交。
+          按下去写的是 store 的 `guideEnabled`，也就是导出设置里的「混入引导声」
+          ——同一份状态，不可能出现"设置勾了、预览听不到"。
+        */}
+        {(() => {
+          const blocked = guideBlockReason()
+          return (
+            <button
+              type="button"
+              data-testid="mix-guide-toggle"
+              aria-pressed={guideEnabled && !blocked}
+              disabled={!!blocked}
+              title={blocked ?? undefined}
+              onClick={() => setGuideEnabled(!guideEnabled)}
+              style={{
+                ...styles.toggle,
+                ...(guideEnabled && !blocked ? styles.toggleActive : null),
+                ...(blocked ? styles.toggleDisabled : null),
+              }}
+            >
+              {t('media.player.mix.guide')}
+            </button>
+          )
+        })()}
+
         {mixerAvailable && (
           <button
             type="button"
@@ -1316,7 +1427,7 @@ export function Preview({ className }: PreviewProps) {
       */}
       {mixerAvailable && mixerOpen && (
         <div style={styles.mixer} data-testid="mix-tracks">
-          {layers.map((id) => {
+          {stemLayers.map((id) => {
             const blocked = layerBlockReason(id)
             const disabled = !!blocked
             return (

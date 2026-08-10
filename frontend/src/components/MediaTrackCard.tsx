@@ -24,7 +24,7 @@ import Waveform, { type WaveformStatus } from './Waveform'
  * 叠加成立的前提是**波形正好铺满容器宽度**，见下面 pxPerSec 的计算。
  */
 
-export type TrackKind = 'audio' | 'vocals' | 'instrumental' | 'drums'
+export type TrackKind = 'audio' | 'vocals' | 'instrumental' | 'drums' | 'guide'
 
 /** 工程里某条音轨的文件路径；没有则为 null。放这里是因为 TrackKind 也定义在本文件。 */
 export function trackPath(project: Project, kind: TrackKind): string | null {
@@ -37,6 +37,10 @@ export function trackPath(project: Project, kind: TrackKind): string | null {
       return project.instrumental_path
     case 'drums':
       return project.drums_path
+    // 合成的引导声。它是派生物而不是分离产物，但对这张卡片而言完全同类：
+    // 一条要靠耳朵验收的音轨，需要试听、波形与走带。
+    case 'guide':
+      return project.guide_audio_path
   }
 }
 
@@ -58,6 +62,7 @@ const EMPTY_HINT_KEY: Record<TrackKind, string> = {
   vocals: 'media.track.empty.vocals',
   instrumental: 'media.track.empty.instrumental',
   drums: 'media.track.empty.drums',
+  guide: 'media.track.empty.guide',
 }
 
 function formatDuration(sec: number): string {

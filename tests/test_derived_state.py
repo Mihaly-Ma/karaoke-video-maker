@@ -206,7 +206,16 @@ def test_stem_路径仍然可撤销(store: ProjectStore) -> None:
     不是"是不是自动产生的"。
     """
     assert "vocals_path" not in BACKEND_ONLY_FIELDS
-    assert set(BACKEND_ONLY_FIELDS) == {"proxy_video_path", "exports"}
+    # 名单钉死：往里加字段等于宣布"用户永远设不了它"，那是个需要论证的决定，
+    # 不该顺手改。引导声那一组正好摆出了判据的两侧——产物路径与指纹在名单里
+    # （用户设不了），而参数 `guide` 不在（用户拖滑块就是在设它）。
+    assert set(BACKEND_ONLY_FIELDS) == {
+        "proxy_video_path",
+        "exports",
+        "guide_audio_path",
+        "guide_signature",
+    }
+    assert "guide" not in BACKEND_ONLY_FIELDS
 
     created = store.create()
     store.mutate(created.id, lambda d: d.__setattr__("vocals_path", "/tmp/manual_vocals.wav"))

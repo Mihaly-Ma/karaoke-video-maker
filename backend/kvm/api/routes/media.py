@@ -17,6 +17,9 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from kvm.api.schemas import (
     DownloadRequest,
+    GuideParamsRequest,
+    GuideRequest,
+    GuideStatus,
     JobStatus,
     MediaProbeResponse,
     MediaTrackInfo,
@@ -31,6 +34,7 @@ from kvm.api.schemas import (
 from kvm.api.store import ProjectStore
 from kvm.jobs import job_manager
 from kvm.media import download as download_module
+from kvm.media import guide as guide_module
 from kvm.media import probe as probe_module
 from kvm.media import proxy as proxy_module
 from kvm.media import separate as separate_module
@@ -51,11 +55,17 @@ _MEDIA_FIELDS: dict[str, str] = {
     "instrumental": "instrumental_path",
     "vocals": "vocals_path",
     "drums": "drums_path",
+    # 合成的引导声（ガイドメロディ）。放进这张表就等于给了它一个可播放端点——
+    # 素材页要试听、导出预览要真的把它放出来，都靠这一条（见 kvm.media.guide）。
+    "guide": "guide_audio_path",
 }
 
-# 允许**手工导入**的 kind。比 `_MEDIA_FIELDS` 少一个 proxy：代理是本工具从原视频
-# 派生出来的中间产物，不是用户素材——放开导入只会让 proxy 与 video 对不上号。
-_IMPORT_FIELDS: dict[str, str] = {k: v for k, v in _MEDIA_FIELDS.items() if k != "proxy"}
+# 允许**手工导入**的 kind。比 `_MEDIA_FIELDS` 少 proxy 与 guide：这两者是本工具从
+# 别的素材派生出来的中间产物，不是用户素材——放开导入只会让它们与源对不上号
+# （代理与原视频、引导声与人声轨）。
+_IMPORT_FIELDS: dict[str, str] = {
+    k: v for k, v in _MEDIA_FIELDS.items() if k not in ("proxy", "guide")
+}
 
 # project_id → {kind: job_id}，该工程最近一次下载/分离任务。
 #
@@ -64,14 +74,17 @@ _IMPORT_FIELDS: dict[str, str] = {k: v for k, v in _MEDIA_FIELDS.items() if k !=
 # 分清这两者，否则只能把正常的中间状态报成故障。
 #
 # 记在这里而不是塞进 `JobStatus`：任务表本身与工程无关（导出任务就不属于任何一次
-# 素材准备），而"哪个工程正在准备素材"是路由层才有的知识。代理任务由
-# `kvm.media.proxy` 自己记着（它还会被后端在下载/导入之后自动发起），不重复登记。
+# 素材准备），而"哪个工程正在准备素材"是路由层才有的知识。代理与引导声任务各自
+# 由 `kvm.media.proxy` / `kvm.media.guide` 记着（它们各有一个"就绪状态"接口要用），
+# 这里不重复登记，否则 `/activity` 会把同一个任务列两遍。
 _LATEST_JOBS: dict[str, dict[str, str]] = {}
 
 # 允许算波形峰值的 kind：只有纯音频轨（CLAUDE.md §5.10）。video/proxy 是画面轨，
 # 波形调轴用的是分离产物或原始参考音轨，不对着视频容器里的音频流重新算一遍。
 _WAVEFORM_KINDS: dict[str, str] = {
-    k: v for k, v in _MEDIA_FIELDS.items() if k in ("audio", "vocals", "instrumental", "drums")
+    k: v
+    for k, v in _MEDIA_FIELDS.items()
+    if k in ("audio", "vocals", "instrumental", "drums", "guide")
 }
 
 # Python 的 `mimetypes` 默认不认识这几种常见容器/编码，显式补上，否则
@@ -239,11 +252,90 @@ def get_proxy_status(project_id: str, store: ProjectStore = Depends(get_store)) 
     return ProxyStatus(project_id=project_id, ready=ready, path=path, job=job, note=note)
 
 
+@router.post("/guide/params", response_model=ProjectDTO)
+def set_guide_params(
+    req: GuideParamsRequest, store: ProjectStore = Depends(get_store)
+) -> ProjectDTO:
+    """只改引导声参数，不触发合成。
+
+    **占一格撤销**（走 `store.mutate`）：参数是用户拖滑块表达的意图，撤销回去
+    理应回到上一组参数。产物路径则相反，由合成作业经 `update_derived` 登记，
+    不占撤销格（CLAUDE.md §8「后台产物不进撤销栈」）。
+
+    与合成分开成两个动作，是因为**不能每拖一下滑块就跑一次 CREPE**——整曲十几到
+    几十秒。所以这里只存，重新合成由用户显式按按钮触发，中间那段"参数已改、
+    产物还是旧的"由 `GET /guide/{project_id}` 的 `stale` 如实报出来。
+    """
+    _project_or_404(store, req.project_id)
+
+    def _apply(draft: ProjectDTO) -> None:
+        draft.guide = req.params
+
+    return store.mutate(req.project_id, _apply, label="调整引导声参数")
+
+
+@router.post("/guide", response_model=JobStatus)
+def start_guide(req: GuideRequest, store: ProjectStore = Depends(get_store)) -> JobStatus:
+    """合成引导声（ガイドメロディ）。提前校验人声轨存在，避免排上队才在后台报错。
+
+    带了 `params` 就先存进工程（与 `POST /guide/params` 同一条路径，同样占一格
+    撤销），再按存下来的那组参数合成——**界面上"改参数 + 重新生成"是一个动作**，
+    分成两次请求只会在中间留下一个两者不一致的窗口。
+    """
+    project = _project_or_404(store, req.project_id)
+    if not project.vocals_path:
+        raise HTTPException(
+            status_code=400,
+            detail="工程还没有人声轨，请先做人声分离（或手工导入一条人声轨）再合成引导声",
+        )
+    if req.params is not None:
+        set_guide_params(
+            GuideParamsRequest(project_id=req.project_id, params=req.params), store
+        )
+    # 不走 `_remember_job`：引导声任务由 `kvm.media.guide` 自己记着（`GET /guide/{id}`
+    # 要用），两处都登记会让 `/activity` 把同一个任务列两遍。
+    return guide_module.submit_guide_job(store, req)
+
+
+@router.get("/guide/{project_id}", response_model=GuideStatus)
+def get_guide_status(project_id: str, store: ProjectStore = Depends(get_store)) -> GuideStatus:
+    """引导声是否就绪、是不是旧参数产出的，以及最近一次合成任务的状态。
+
+    `stale` 存在的理由见 `GuideStatus`：合成太贵，"参数改了但还没重新生成"
+    是一个必然存在的中间态，不报出来用户会以为参数根本没生效。
+    """
+    project = _project_or_404(store, project_id)
+    job = guide_module.latest_job(project_id)
+    path = project.guide_audio_path
+    ready = bool(path) and Path(path or "").is_file()
+    current = guide_module.project_signature(project)
+    stale = ready and project.guide_signature != current
+
+    if not project.vocals_path:
+        note = "需要先分离出人声轨才能合成引导声"
+    elif job is not None and job.state in ("pending", "running"):
+        note = "正在合成引导声…"
+    elif job is not None and job.state == "failed":
+        note = f"引导声合成失败：{job.error}"
+    elif stale:
+        note = "参数改过了，重新生成才能听到当前设置"
+    elif ready:
+        note = "引导声已就绪，预览与导出都会用这一份"
+    elif path:
+        note = "引导声文件不见了（可能已被清理），请重新生成"
+    else:
+        note = "还没有引导声。生成后可以直接试听，导出时也会用这一份"
+
+    return GuideStatus(
+        project_id=project_id, ready=ready, stale=stale, path=path, job=job, note=note
+    )
+
+
 @router.get("/activity/{project_id}", response_model=list[JobStatus])
 def get_media_activity(
     project_id: str, store: ProjectStore = Depends(get_store)
 ) -> list[JobStatus]:
-    """该工程**此刻正在跑**的素材准备任务（下载 / 分离 / 代理），没有就是空数组。
+    """该工程**此刻正在跑**的素材准备任务（下载 / 分离 / 代理 / 引导声），没有就是空数组。
 
     预览区靠它把"素材还没准备好"和"真的降级了"分开：前者是正常的中间状态，
     用户什么都不用做，报成警告只会让人以为出了故障。工程 JSON 回答不了这个问题
@@ -265,9 +357,9 @@ def get_media_activity(
         if job.state in ("pending", "running"):
             active.append(job)
 
-    proxy_job = proxy_module.latest_job(project_id)
-    if proxy_job is not None and proxy_job.state in ("pending", "running"):
-        active.append(proxy_job)
+    for job in (proxy_module.latest_job(project_id), guide_module.latest_job(project_id)):
+        if job is not None and job.state in ("pending", "running"):
+            active.append(job)
 
     return active
 

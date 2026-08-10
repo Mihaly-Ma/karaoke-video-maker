@@ -48,9 +48,11 @@ import Preview from './Preview'
  *   人声的成片"。反过来在这里切 ON/OFF VOCAL 时预览会跟着切，那条同步保留。
  * - **字幕**：`Preview` 拉的 `/api/render/ass` 与导出走的是后端同一个
  *   `_build_ass_text`，样式、配色、注音、引导点完全一致。
- * - **引导声**：预览**放不出来**。引导声是导出时才由 vocals 现场合成
- *   （`build_guide_track`），没有可播放的媒体端点，所以界面上如实标注，
- *   不假装预览覆盖了它。
+ * - **引导声**：与 ON/OFF VOCAL 同一条纪律——这个勾选框**就是** store 的
+ *   `guideEnabled`，预览的音频引擎按它决定引导声那一层出不出声，不另存一份。
+ *   前提是素材页已经生成过引导声（`guide_audio_path`）；没有的话预览确实放不出来，
+ *   界面上如实标注一条提示，并指出去哪里生成——**而不是笼统地说"预览不含引导声"**，
+ *   那句话在能放出来之后就是错的。
  *
  * 预览画面用的是编辑用代理（540p H.264），导出一律烧在原始素材上
  * （CLAUDE.md §5.11.5），所以两者是**感知等价**而非像素一致（§5.12）——
@@ -140,13 +142,18 @@ export default function ExportPanel({ exportJobId, onExportStart, exportResult }
   const audioMode = useProject((s) => s.audioMode)
   const setAudioMode = useProject((s) => s.setAudioMode)
   const setPlayhead = useProject((s) => s.setPlayhead)
-  const [withGuide, setWithGuide] = useState(false)
+  // 引导声开关与 ON/OFF VOCAL 一样存在 store 里：设置与预览是同一个状态，
+  // 不是两份互相同步的副本，所以"勾了却听不到"在结构上不可能发生
+  const withGuide = useProject((s) => s.guideEnabled)
+  const setWithGuide = useProject((s) => s.setGuideEnabled)
   const [error, setError] = useState<string | null>(null)
 
   const projectId = project?.id ?? null
   const artifacts = project?.exports ?? []
   const hasInstrumental = !!project?.instrumental_path
   const hasVocals = !!project?.vocals_path
+  /** 素材页已经生成过引导声——决定预览听不听得到（导出没有它也能现场合成） */
+  const guideReady = !!project?.guide_audio_path
   const useInstrumental = audioMode === 'instrumental' && hasInstrumental
 
   const cues = useMemo(() => buildCues(project), [project])
@@ -176,7 +183,7 @@ export default function ExportPanel({ exportJobId, onExportStart, exportResult }
   /** 人声轨没了就把引导声一起关掉，理由同上：后端会直接 400 */
   useEffect(() => {
     if (!hasVocals) setWithGuide(false)
-  }, [hasVocals])
+  }, [hasVocals, setWithGuide])
 
   /**
    * 离开本舞台时停播（docs/ui-redesign.md §五：切换步骤时上一个舞台的播放
@@ -293,7 +300,25 @@ export default function ExportPanel({ exportJobId, onExportStart, exportResult }
           <span className="exp-head__spacer" />
           {/* 预览与成片的差异如实标出，不让用户以为看到的就是最终画面 */}
           {project.proxy_video_path && <span className="badge">{t('export.previewProxy')}</span>}
-          {withGuide && <span className="badge exp-tag--warn">{t('export.previewNoGuide')}</span>}
+          {/*
+            引导声：**生成过就真能听到**，此时不该再挂一条"预览不含引导声"的警告
+            ——那句话在有产物之后就是错的。只有勾了却还没生成时才提示，
+            并说明去哪里生成（§2.5：报错要说清出了什么事和怎么办）。
+          */}
+          {withGuide && !guideReady && (
+            <span
+              className="badge exp-tag--warn"
+              data-testid="export-guide-missing"
+              title={t('export.previewGuideMissingHint')}
+            >
+              {t('export.previewGuideMissing')}
+            </span>
+          )}
+          {withGuide && guideReady && (
+            <span className="badge" data-testid="export-guide-on">
+              {t('export.previewGuideOn')}
+            </span>
+          )}
           {/*
             第三处差异：预览字体是子集化产物，字符集比系统原字体小得多，
             这些字**只有预览缺、成片是好的**。不标出来的话用户会以为成片也坏了，

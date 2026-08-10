@@ -522,6 +522,9 @@ async function openPage(browser, { projectId, title, step, noWorklet, stripStems
       const body = await resp.json()
       body.vocals_path = null
       body.instrumental_path = null
+      // 引导声是**从人声轨派生**的，没分离过就不可能有它。不一起抹掉的话，
+      // 这个"没分离过的工程"会带着一条它本不该有的引导声轨，对照组自身就不成立。
+      body.guide_audio_path = null
       await route.fulfill({ response: resp, body: JSON.stringify(body) })
     })
   }
@@ -575,9 +578,13 @@ async function runEngine(name, projectId, title, durationSec) {
       '整页只有一个拉伸器（每条 stem 各一个 = 相加时相位抵消，且只在原声档听得出来）',
       JSON.stringify(diag.worklets),
     )
+    // 两条 stem 必须**排在前面且顺序固定**（下面的增益断言按输出序号 0/1 取），
+    // 之后可以再挂一条 `guide`——引导声是叠加层，工程生成过它才会出现，
+    // 它在不在都不影响 D15 那条"原声 = 人声 + 伴奏"的结构（见 Preview.tsx）。
+    const stems = (ts[0]?.layerIds ?? []).filter((id) => id !== 'guide')
     check(
-      ts[0] && ts[0].outputs === 2 && JSON.stringify(ts[0].layerIds) === '["vocals","instrumental"]',
-      '层结构收敛到 D15：vocals + instrumental 两条 stem',
+      ts[0] && JSON.stringify(stems) === '["vocals","instrumental"]' && ts[0].outputs === ts[0].layerIds.length,
+      '层结构收敛到 D15：vocals + instrumental 两条 stem（引导声若已生成则追加在后）',
       ts[0] ? `outputs=${ts[0].outputs} layers=${JSON.stringify(ts[0].layerIds)}` : '(无)',
     )
     check(

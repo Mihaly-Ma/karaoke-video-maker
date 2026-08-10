@@ -55,6 +55,21 @@ export interface Palette {
 }
 
 export interface Style {
+  /**
+   * 有序字体候选链：链首缺哪个字形，就落到后面那个。
+   *
+   * 没有一个日文字体覆盖得全，而缺字的后果两端不同——预览（JASSUB）手里只有
+   * 我们喂进去的字体，缺了就是空白；导出（ffmpeg）的系统回退**无法禁用**，
+   * 它会自己找个字体顶上。链把"缺字时用谁"变成工程里显式记着的一份数据，
+   * 两端照同一份走才谈得上所见即所得。
+   */
+  font_names: string[]
+  /**
+   * 主字体族名 = `font_names[0]`。**后端派生，不要往回写**（写了也会被忽略）。
+   *
+   * 改字体请发 `font_names`；只想换主字体、保留兜底链时可以发 `font_name`，
+   * 后端会把它提到链首（见 `routes/projects.py` 的 `update_style`）。
+   */
   font_name: string
   font_size: number
   bold: boolean
@@ -102,6 +117,43 @@ export interface ExportArtifact {
 }
 
 /**
+ * 引导声（ガイドメロディ）暴露给用户的参数（后端 `GuideParamsDTO`）。
+ *
+ * 后端 `GuideConfig` 有十几个字段，这里只有五个——其余是 f0 管线的标准步骤或按
+ * 实测间隙分布定死的阈值，用户没有判据去调。改这五个都能立刻听出差别。
+ */
+export interface GuideParams {
+  /** 音量（RMS 口径），0.02~0.40 */
+  gain: number
+  /** 音色。方波穿透力最好，正弦最干净但容易被编曲埋掉 */
+  timbre: 'sine' | 'triangle' | 'square' | 'saw'
+  /** 谐波数上限 = 明亮度，1~32。**`sine` 音色下无效**（它只有基波） */
+  max_harmonics: number
+  /** 发声判定门限（dB），−40~−12。越负越灵敏，弱唱也有引导声 */
+  voicing_drop_db: number
+  /** 短于此的间隙桥接成 legato（毫秒），0~500。越大越连贯 */
+  legato_gap_ms: number
+}
+
+/**
+ * 工程的引导声状态（`GET /api/media/guide/{project_id}`）。
+ *
+ * 比 `ProxyStatus` 多一个 `stale`：合成一次要十几到几十秒，不能每拖一下滑块就重跑，
+ * 所以"参数改了、产物还是旧的"是一个必然存在的中间态，必须报出来——
+ * 否则用户会以为参数根本没生效。
+ */
+export interface GuideStatus {
+  project_id: string
+  ready: boolean
+  /** 产物是旧参数（或旧人声轨）产出的，要重新生成才能听到当前设置 */
+  stale: boolean
+  path: string | null
+  job: JobStatus | null
+  /** 已是中文，可直接显示 */
+  note: string
+}
+
+/**
  * 一条无法重新绑定的手工修改（CLAUDE.md §4.4：重绑失败的锁定项不得静默丢弃，
  * 要浮到界面上让用户确认）。
  */
@@ -138,6 +190,15 @@ export interface Project {
   instrumental_path: string | null
   vocals_path: string | null
   drums_path: string | null
+  /**
+   * 合成好的引导声轨。由人声轨派生，与 stem 同属**后台产物，不进撤销栈**。
+   * 为 null 表示还没生成——此时预览听不到引导声，导出勾了会现场合成，不阻断。
+   */
+  guide_audio_path: string | null
+  /** 产出上面那份文件时的 `(人声轨, 参数, 版本)` 指纹，用于判断产物是不是旧的 */
+  guide_signature: string
+  /** 引导声参数。**这是用户意图，改它占一格撤销**——与上面两个派生字段相反 */
+  guide: GuideParams
   duration_ms: number
   /**
    * 实际使用的音频流标识。同一 YouTube 视频不同音频流原点可能相差数十毫秒，
@@ -279,6 +340,13 @@ export interface FontInfo {
   is_cjk: boolean
   /** 该 family 下观测到的全部字重（子族名，如 W3/W6/W8/Regular/Bold），已排序去重 */
   weights: string[]
+  /**
+   * 同一个字体在 name 表里的其它语言写法（`Hiragino Sans` ← `ヒラギノ角ゴシック`）。
+   *
+   * **搜索必须认这些名字**：日文字体普遍中英双名，`family` 是英文，
+   * 用户却多半会打「ヒラギノ」。只按 `family` 搜的话，界面上看得见的名字反而搜不到。
+   */
+  alt_names: string[]
 }
 
 /**
@@ -314,17 +382,39 @@ export interface FontPreset {
   pending: boolean
 }
 
-export interface FontCoverageResult {
+/** 链上一个字体实际承担了哪些字形（后端 `FontShare`） */
+export interface FontShare {
   family: string
-  /** 字体本身就没有的字形：**预览与成片都会缺**。为空即字体完全覆盖 */
+  count: number
+  /** 该字体**第一个**能提供的那些字形。各条互不重叠，加起来就是"有着落的字" */
+  chars: string
+}
+
+export interface FontCoverageResult {
+  /** 链首族名。老调用方只认这一个 */
+  family: string
+  /** 本次检查的整条链 */
+  families: string[]
+  /**
+   * **整条链都没有**的字形：预览与成片都会缺。为空即这条链完全覆盖。
+   *
+   * 链尾补上的字不算缺字——那正是配置链尾的目的。
+   */
   missing: string[]
   /**
-   * 字体有、但预览用的子集字体裁掉了的字形：**只有预览缺，成片是好的**。
+   * 链里有、但预览无论如何都拿不到的字形。
    *
-   * 预览走 `GET /api/fonts/subset`，产物按 ASCII + 假名 + JIS X 0208 第一/第二
-   * 水准裁剪，系统原字体的字符集远大于它。「鷗」「𠮷」「α」「①」这类字会命中，
-   * 症状与缺字相反——预览空白而成片正常，所以必须与 `missing` 分开显示。
+   * **现在恒为空**：子集会按本曲字符集加裁（`/subset` 的 `extra`），
+   * 凡是链里有的字预览就有。字段保留是因为它曾经非空，症状是
+   * "预览空白、成片正常"——与缺字相反的分叉，看成片根本发现不了。
    */
   preview_missing: string[]
+  /**
+   * 本曲用到、但落在默认子集之外的字（「鷗」「𠮷」「①」这类）。
+   * **不是问题清单**，只说明这首歌用到了生僻字，预览靠加裁把它们补上了。
+   */
+  extra_chars: string
+  /** 逐字体的承担情况，链序排列。回答"每个字实际由哪个字体画" */
+  shares: FontShare[]
   total_checked: number
 }

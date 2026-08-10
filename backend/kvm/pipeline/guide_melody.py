@@ -457,8 +457,13 @@ def energy_voicing(
     return (rel_db > drop_db) & (abs_db > floor_dbfs)
 
 
-def _pick_device(preferred: str | None) -> str:
-    """CUDA → MPS → CPU。CREPE 是小 CNN，CPU 也跑得动，只是慢几倍。"""
+def pick_device(preferred: str | None) -> str:
+    """CUDA → MPS → CPU。CREPE 是小 CNN，CPU 也跑得动，只是慢几倍。
+
+    公开而非私有：这一段要跑十几到几十秒，界面上得说清楚是谁在算——
+    "CPU 上慢五倍"和"卡住了"在一条静止的进度条上长得一模一样
+    （`kvm.media.guide` 的 worker 用它拼进度文案）。
+    """
     if preferred:
         return preferred
     import torch
@@ -497,7 +502,7 @@ def extract_notes(vocals_path: Path, config: GuideConfig | None = None) -> list[
         # 换成 argmax 会立刻退回 pYIN 那种次谐波误判
         decoder=torchcrepe.decode.viterbi,
         batch_size=512,
-        device=_pick_device(cfg.device),
+        device=pick_device(cfg.device),
     )[0].cpu().numpy()
 
     # 能量窗取 4 倍 hop：太短会被颤音的波峰波谷带得忽上忽下，太长会糊掉音符边界

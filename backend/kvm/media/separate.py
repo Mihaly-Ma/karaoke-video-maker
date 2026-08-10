@@ -36,8 +36,6 @@ import importlib.util
 import json
 import logging
 import re
-import shutil
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -45,6 +43,7 @@ from typing import Any
 from kvm.api.schemas import ProjectDTO, SeparateModelTier, SeparateRequest
 from kvm.api.store import ProjectStore
 from kvm.jobs import JobCancelled, JobHandle, run_cancelable
+from kvm.media import deps
 
 # 注意：`experiments.ffmpeg_locate` 与 `kvm.media.download` 故意不在模块顶层
 # import——本文件同时也是 `python -m kvm.media.separate --worker` 的子进程
@@ -365,97 +364,37 @@ class ModelResolutionError(RuntimeError):
 
 
 def _emit(event: dict[str, Any]) -> None:
-    print(json.dumps(event, ensure_ascii=False), flush=True)
+    deps.emit(event)
 
 
 # ---- 依赖自动获取（CLAUDE.md §2.6 的"获取 / 安装"两段） ----
-
-_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-
-
-def _installer_command(specs: list[str]) -> list[str]:
-    """挑一个可用的安装器。
-
-    优先 `uv`：本项目本来就用它管依赖，而且 uv 建的虚拟环境默认不带 pip，
-    直接 `python -m pip` 多半是找不到的。两个都没有就抛错让用户手工装，
-    不去猜别的安装方式。
-    """
-    uv_bin = shutil.which("uv")
-    if uv_bin:
-        return [uv_bin, "pip", "install", "--python", sys.executable, *specs]
-    if importlib.util.find_spec("pip") is not None:
-        return [sys.executable, "-m", "pip", "install", *specs]
-    msg = f"缺少分离依赖，且环境里既没有 uv 也没有 pip，无法自动安装。{_DEPENDENCY_HINT}"
-    raise RuntimeError(msg)
-
-
-def _run_installer(specs: list[str]) -> None:
-    """跑安装命令，把它的输出逐行转成进度事件（几百 MB 的下载必须有反馈）。
-
-    输出要先剥掉 ANSI 转义序列：uv 即便输出被重定向到管道也照样上色，
-    原样透传到前端就是一串 `\\u001b[2m` 乱码。
-    """
-    cmd = _installer_command(specs)
-    # 命令由 `_installer_command` 的白名单分支构造，不含用户输入
-    proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
-    )
-    tail: list[str] = []
-    if proc.stdout is not None:
-        with proc.stdout as stream:
-            for raw in stream:
-                line = _ANSI_ESCAPE_RE.sub("", raw).strip()
-                if not line:
-                    continue
-                tail.append(line)
-                del tail[:-20]  # 只留尾部若干行用于报错，不无限增长
-                _emit({"event": "progress", "progress": 0.04, "message": f"安装依赖：{line}"})
-    code = proc.wait()
-    if code != 0:
-        detail = " / ".join(tail[-5:]) or "安装器没有输出可用信息"
-        msg = f"自动安装分离依赖失败（退出码 {code}）：{detail}。{_DEPENDENCY_HINT}"
-        raise RuntimeError(msg)
+#
+# 通用部分（挑安装器、跑安装、判虚拟环境）在 `kvm.media.deps`：引导声 worker
+# 面对的是同一条纪律，两份实现必然漂移，尤其是"不是虚拟环境就放弃自动安装"
+# 这类安全判断。这里只保留分离特有的那几句文案。
 
 
 def _ensure_dependencies() -> None:
-    """确保 onnxruntime / audio-separator 可用，缺失就自动装（CLAUDE.md §2.6）。
+    """确保 onnxruntime / audio-separator 可用，缺失就自动装（CLAUDE.md §2.6）。"""
 
-    装到 `sys.executable` 所在的虚拟环境里——那就是应用私有目录，不需要 sudo，
-    也不会污染用户的系统 Python。当前解释器**不是**虚拟环境时直接放弃自动安装：
-    宁可给一条明确的手工命令，也不去改别人的系统环境（§2.6 的"安装"一段）。
-    任何失败都抛 `RuntimeError`，由调用方转成一行 JSON 错误事件，绝不静默失败。
-    """
-    missing = [
-        (module, spec)
-        for module, spec in _SEPARATE_REQUIREMENTS
-        if importlib.util.find_spec(module) is None
-    ]
-    if not missing:
-        return
-
-    names = "、".join(module for module, _ in missing)
-    if sys.prefix == sys.base_prefix:
-        msg = (
-            f"缺少分离依赖（{names}），而当前 Python 不是虚拟环境，"
-            f"自动安装会污染系统环境，已放弃。{_DEPENDENCY_HINT}"
+    def _announce(names: str) -> None:
+        _emit(
+            {
+                "event": "progress",
+                "progress": 0.02,
+                "message": (
+                    f"缺少分离依赖（{names}），正在自动安装到应用私有环境，"
+                    "首次可能需要下载数百 MB…"
+                ),
+            }
         )
-        raise RuntimeError(msg)
 
-    _emit(
-        {
-            "event": "progress",
-            "progress": 0.02,
-            "message": f"缺少分离依赖（{names}），正在自动安装到应用私有环境，首次可能需要下载数百 MB…",
-        }
+    already = all(
+        importlib.util.find_spec(module) is not None for module, _ in _SEPARATE_REQUIREMENTS
     )
-    _run_installer([spec for _, spec in missing])
-
-    importlib.invalidate_caches()  # 新装的包要让 import 系统重新扫一遍路径才可见
-    still_missing = [m for m, _ in missing if importlib.util.find_spec(m) is None]
-    if still_missing:
-        msg = f"自动安装已执行完毕，但依然找不到 {'、'.join(still_missing)}。{_DEPENDENCY_HINT}"
-        raise RuntimeError(msg)
-    _emit({"event": "progress", "progress": 0.08, "message": "分离依赖安装完成"})
+    deps.ensure_dependencies(_SEPARATE_REQUIREMENTS, _DEPENDENCY_HINT, on_missing=_announce)
+    if not already:
+        _emit({"event": "progress", "progress": 0.08, "message": "分离依赖安装完成"})
 
 
 # ---- 模型标识容错解析 ----

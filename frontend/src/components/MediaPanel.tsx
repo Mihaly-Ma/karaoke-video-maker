@@ -5,6 +5,7 @@ import * as api from '../api/client'
 import { t } from '../i18n'
 import { useProject } from '../state/projectStore'
 import type { Project } from '../api/types'
+import MediaGuideCard from './MediaGuideCard'
 import MediaProxyCard from './MediaProxyCard'
 import MediaTrackCard, { trackPath, type TrackKind } from './MediaTrackCard'
 import MediaVideoPreview from './MediaVideoPreview'
@@ -57,7 +58,8 @@ const TIER_SHORT_HINT: Record<string, string> = {
   best: 'media.tier.best',
 }
 
-const TRACK_ORDER: TrackKind[] = ['audio', 'vocals', 'instrumental', 'drums']
+// 引导声排在最后：它是人声轨的派生物，先有人声才谈得上它。
+const TRACK_ORDER: TrackKind[] = ['audio', 'vocals', 'instrumental', 'drums', 'guide']
 
 /**
  * 手工旁路：直接导入本地文件，绕开下载/分离。
@@ -427,6 +429,9 @@ export default function MediaPanel({
           {/* 代理排在最上：没有它 Safari 直接没画面，是本步骤的关键产物而不是
               可选加速项，理由见 MediaProxyCard 头部注释 */}
           <MediaProxyCard project={project} />
+          {/* 引导声：与代理并列的一件派生素材。生成入口在这里，试听走下面那张
+              「引导声」音轨卡片——判断它好不好用只能靠耳朵 */}
+          <MediaGuideCard project={project} />
           <MediaVideoPreview project={project} onPlayback={claimPlayback} />
 
           <div className="kvm-media-tracks">
@@ -628,6 +633,41 @@ const CSS = `
 }
 .kvm-media-proxy__dot--warn {
   color: var(--warn);
+}
+
+/* ---- 引导声：与代理同一张卡片的骨架（kvm-media-proxy），额外多一组参数 ---- */
+
+.kvm-guide-params {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding-top: var(--sp-2);
+  border-top: 1px dashed var(--stroke);
+}
+/* 每行：名称 / 控件 / 数值 / 说明。说明另起一行占满，短句不会被挤成省略号 */
+.kvm-guide-param {
+  display: grid;
+  grid-template-columns: 4.5em minmax(80px, 1fr) 3.5em;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+}
+.kvm-guide-param__name {
+  color: var(--fg);
+}
+.kvm-guide-param__value {
+  color: var(--fg-2);
+  text-align: right;
+}
+.kvm-guide-param__hint {
+  grid-column: 1 / -1;
+  color: var(--fg-3);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+}
+.kvm-guide-param input[type='range'] {
+  width: 100%;
+  min-width: 0;
 }
 
 /* ---- 画面预览 ---- */

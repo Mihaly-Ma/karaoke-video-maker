@@ -44,6 +44,38 @@ export const media: Record<string, string> = {
   'media.tier.best': '最高质量',
   'media.tier.generic': '',
 
+  // ---- 引导声（ガイドメロディ）----
+  //
+  // 每个参数都给一句"改它会怎样"，而不是字段名 + 滑块：滑块上写着
+  // `voicing_drop_db` 用户无从判断该往哪边拖。句子说的是**症状与方向**，
+  // 不解释原理（原理在 CLAUDE.md §8.9）。
+  'media.guide.title': '引导声',
+  'media.guide.build': '生成',
+  'media.guide.rebuild': '重新生成',
+  'media.guide.tune': '调参',
+  'media.guide.building': '合成引导声',
+  'media.guide.buildingState': '合成中',
+  'media.guide.missing': '未生成',
+  'media.guide.stale': '参数已变',
+  'media.guide.unsaved': '参数已改',
+  'media.guide.needVocals': '需要先分离人声',
+  'media.guide.needVocalsHint': '引导声由人声轨提取音高合成，请先做人声分离',
+  'media.guide.timbre': '音色',
+  'media.guide.timbre.hint': '方波最像卡拉OK 引导音；正弦最干净，但容易被编曲盖住',
+  'media.guide.timbre.sine': '正弦',
+  'media.guide.timbre.triangle': '三角',
+  'media.guide.timbre.square': '方波',
+  'media.guide.timbre.saw': '锯齿',
+  'media.guide.gain': '音量',
+  'media.guide.gain.hint': '相对伴奏的响度。默认约低 5dB，只引导不抢主体',
+  'media.guide.max_harmonics': '明亮度',
+  'media.guide.max_harmonics.hint': '谐波数上限。调大更亮更容易听清，调小更柔和',
+  'media.guide.max_harmonics.inert': '正弦只有基波，明亮度对它无效',
+  'media.guide.voicing_drop_db': '灵敏度',
+  'media.guide.voicing_drop_db.hint': '越负越灵敏：弱唱的尾音也会有引导声，但没人唱的地方也可能响',
+  'media.guide.legato_gap_ms': '连音',
+  'media.guide.legato_gap_ms.hint': '短于此的空档不断开。调大更连贯，调小更贴合换气',
+
   // ---- 播放器（Preview.tsx，对轴/导出舞台共用）----
   //
   // 这里的键分成两类，界线不能糊：
@@ -85,6 +117,7 @@ export const media: Record<string, string> = {
   'media.player.warn.trackFailed': '{track}轨加载失败',
   'media.player.warn.trackFailedMix': '请确认视频已下载并抽出了音频。',
   'media.player.warn.trackFailedStem': '这条轨要先跑一次人声分离，完成后会自动可用。',
+  'media.player.warn.trackFailedGuide': '请到「素材」步骤重新生成引导声。',
   // 保音高变速用不上时的降级说明。不是错误——播放照常，只是慢速试听会走调
   'media.player.warn.pitchFallbackTitle': '慢速试听会降调',
   'media.player.warn.pitchFallbackDetail':
@@ -99,6 +132,9 @@ export const media: Record<string, string> = {
   'media.player.mix.original': '原声',
   'media.player.mix.instrumental': '伴奏',
   'media.player.mix.vocals': '仅人声',
+  // 引导声是**叠加层**，不参与上面三档的互斥：它能配原声也能配伴奏
+  'media.player.mix.guide': '引导声',
+  'media.player.mix.guideMissing': '到「素材」步骤生成引导声',
   'media.player.mix.tracks': '分轨',
   'media.player.mix.tracksHint':
     '分别调整各条音轨的音量。「原声」= 人声 + 伴奏，把人声压到两三成就是ガイドボーカル入り那种试听方式。',
@@ -109,6 +145,7 @@ export const media: Record<string, string> = {
   'media.player.track.mix': '原曲',
   'media.player.track.vocals': '人声',
   'media.player.track.instrumental': '伴奏',
+  'media.player.track.guide': '引导声',
 
   // ---- 音轨卡片 ----
   'media.track.video': '视频',
@@ -116,10 +153,12 @@ export const media: Record<string, string> = {
   'media.track.vocals': '人声',
   'media.track.instrumental': '伴奏',
   'media.track.drums': '鼓声',
+  'media.track.guide': '引导声',
   'media.track.empty.audio': '还没有音频',
   'media.track.empty.vocals': '尚未分离',
   'media.track.empty.instrumental': '尚未分离',
   'media.track.empty.drums': '尚未分离',
+  'media.track.empty.guide': '尚未生成',
   'media.track.playError': '试听不可用',
   'media.track.seek': '拖动跳转',
   'media.track.waveLoading': '生成波形中…',

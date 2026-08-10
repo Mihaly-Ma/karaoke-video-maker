@@ -10,7 +10,8 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, computed_field
+from kvm.models.karaoke import DEFAULT_FONT_CHAIN, normalize_font_chain
+from pydantic import BaseModel, Field, computed_field, model_validator
 
 # ---- 工程 ----
 
@@ -122,7 +123,47 @@ class PaletteDTO(BaseModel):
 
 
 class StyleDTO(BaseModel):
-    font_name: str = "Noto Sans CJK JP"
+    font_names: list[str] = Field(default_factory=lambda: list(DEFAULT_FONT_CHAIN))
+    """有序字体候选链，首项即主字体。语义与取舍见 `models.karaoke.KaraokeStyle.font_names`。"""
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def font_name(self) -> str:
+        """主字体族名。**派生量，不是可写字段** —— 唯一真源是 `font_names[0]`。
+
+        保留它是为了两件事：一、老工程 JSON 里存的就是这个键（见
+        `_upgrade_legacy_font_name`）；二、界面上一批只关心主字体的地方
+        （歌词稿的字体预览、注音编辑器的纸面）读的就是它，不必为了一条链
+        把它们全改一遍。
+
+        写成 `computed_field` 而不是"再存一份并保持同步"，是因为同步这件事
+        总有一天会漏一处，而漏掉的那次表现为"改了字体但某个面板没跟着变"。
+        """
+        return self.font_names[0] if self.font_names else ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _upgrade_legacy_font_name(cls, data: object) -> object:
+        """老工程兼容：`font_name` 是字符串的工程要能照常打开。
+
+        这一层是**必须的**，不是保险：工程 JSON 是用户资产，落在磁盘上的
+        既有文件里只有 `font_name`。缺了这个升级，用户打开旧工程会静默拿到
+        默认字体——不报错、不提示，只是画面忽然换了个样子。
+
+        只在 `font_names` 缺失或为空时才认 `font_name`；两个都给且冲突时以链为准，
+        与 `KaraokeStyle.__post_init__` 的裁决规则保持一致（两处不一致的话，
+        同一份数据经不同路径读出来会不一样）。
+        """
+        if not isinstance(data, dict):
+            return data
+        legacy = data.get("font_name")
+        return {
+            **data,
+            "font_names": normalize_font_chain(
+                data.get("font_names") or [], legacy if isinstance(legacy, str) else None
+            ),
+        }
+
     font_size: int = 64
     bold: bool = True
     outline: float = 3.0
@@ -222,6 +263,47 @@ class ExportArtifactDTO(BaseModel):
         return " + ".join(parts)
 
 
+class GuideParamsDTO(BaseModel):
+    """引导声（ガイドメロディ）里**暴露给用户**的那几个参数。
+
+    `pipeline.guide_melody.GuideConfig` 有十几个字段，全摊到界面上是灾难：
+    大多数（`sr_analysis` / `hop_s` / `pitch_median_frames` / `cents_tolerance` …）
+    是 f0 管线的标准步骤或按实测间隙分布定死的内部阈值，用户既没有判据去调，
+    调了也只会把 §8.9 里用一整轮分析换来的结论推翻。
+
+    这里只留**改了能立刻听出差别、且对应得上一句用户抱怨**的五个：
+    太响/太轻、太尖或被埋掉、太亮或太闷、弱唱处没声音、一顿一顿。
+    其余一律保持 `GuideConfig` 的默认值。
+    """
+
+    gain: float = Field(default=0.11, ge=0.02, le=0.4)
+    """音量（RMS 口径）。默认 0.11 实测约低于伴奏 5dB——引导而不抢主体。"""
+
+    timbre: Literal["sine", "triangle", "square", "saw"] = "square"
+    """音色。方波中空、穿透力最好，最接近卡拉OK 引导音；正弦最干净但容易被编曲埋掉。"""
+
+    max_harmonics: int = Field(default=16, ge=1, le=32)
+    """谐波数上限，听感上就是明亮度。**`sine` 音色下无效**（它只有基波）。
+
+    真正的截断点取它与奈奎斯特限制中更严的那个，所以调大不会引入混叠噪声。
+    """
+
+    voicing_drop_db: float = Field(default=-24.0, ge=-40.0, le=-12.0)
+    """发声判定门限：帧能量低于演唱响度基准这么多分贝就算没在唱。
+
+    调低（更负）= 更灵敏，弱唱的尾音也会有引导声，但没人唱的地方也可能响；
+    调高 = 更保守。默认 −24 在四个 30 秒片段上实测响亮帧覆盖 99.7–100%、
+    静音帧误填 0–2.5%。
+    """
+
+    legato_gap_ms: int = Field(default=200, ge=0, le=500)
+    """短于此的音符间隙桥接成 legato（延长前一个音），只有更长的空档才算休止。
+
+    调大 = 更连贯，但该停的地方也会拖着；调小 = 更断续。默认 200ms 覆盖本曲
+    83% 的句内间隙（辅音与换气），余下的保留为真正的休止。
+    """
+
+
 class ProjectDTO(BaseModel):
     """完整工程。前端的唯一真源，编辑器所有操作都作用于它。"""
 
@@ -253,6 +335,27 @@ class ProjectDTO(BaseModel):
     instrumental_path: str | None = None
     vocals_path: str | None = None
     drums_path: str | None = None
+
+    guide_audio_path: str | None = None
+    """合成好的引导声轨（ガイドメロディ，见 `kvm.media.guide`）。
+
+    由人声轨派生，与 stem 一样是**后台作业的产物**，因此不进撤销栈
+    （在 `store.BACKEND_ONLY_FIELDS` 里）。为 None 表示还没生成过——
+    此时预览听不到引导声，导出勾了引导声会现场合成一份，**不阻断**（§2.5）。
+    """
+
+    guide_signature: str = ""
+    """产出上面那份文件时用的 `(人声轨, 参数, 实现版本)` 指纹。
+
+    与当前工程算出来的指纹不一致 = 用户改过参数（或换过人声轨）而还没重新生成，
+    `GuideStatus.stale` 由此判定。同为派生登记，不进撤销栈。
+    """
+
+    guide: GuideParamsDTO = Field(default_factory=GuideParamsDTO)
+    """引导声的可调参数。**这是用户意图，改它占一格撤销**（CLAUDE.md §8：
+    撤销栈是用户意图的模型）——与上面两个派生字段刚好相反。
+    """
+
     duration_ms: int = 0
 
     audio_format_id: str = ""
@@ -482,6 +585,51 @@ class ProxyStatus(BaseModel):
     path: str | None = None
     job: JobStatus | None = None
     """最近一次代理任务，用于展示进度/失败原因。后端重启后为 None。"""
+
+    note: str = ""
+    """给用户看的一句话中文说明。"""
+
+
+class GuideRequest(BaseModel):
+    """生成引导声（见 `kvm.media.guide`）。"""
+
+    project_id: str
+
+    params: GuideParamsDTO | None = None
+    """本次生成用的参数。给了就**先存进工程再生成**（那一步占一格撤销，
+    与 `POST /api/media/guide/params` 同一条路径）；不给则用工程里已存的那组。
+    """
+
+    force: bool = False
+    """True 表示忽略缓存强制重算。"""
+
+
+class GuideParamsRequest(BaseModel):
+    """只改参数、不触发生成。参数是用户意图，因此**占一格撤销**。"""
+
+    project_id: str
+    params: GuideParamsDTO
+
+
+class GuideStatus(BaseModel):
+    """工程的引导声状态。
+
+    与 `ProxyStatus` 同一形态，多一个 `stale`：引导声比代理多一个"参数改过了、
+    产物还是旧的"状态。代理的参数（分辨率）一改就重生成，而引导声一次要跑十几到
+    几十秒的 CREPE，**不能每拖一下滑块就重算**，所以这个中间态必然存在，
+    必须让用户看见——否则他会以为参数根本没生效。
+    """
+
+    project_id: str
+    ready: bool
+    """引导声文件已生成且确实存在。为 False 时预览听不到它。"""
+
+    stale: bool
+    """产物是用旧参数（或旧的人声轨）生成的，要重新生成才能听到当前设置。"""
+
+    path: str | None = None
+    job: JobStatus | None = None
+    """最近一次生成任务，用于展示进度/失败原因。后端重启后为 None。"""
 
     note: str = ""
     """给用户看的一句话中文说明。"""

@@ -55,6 +55,17 @@ interface ProjectState {
   /** 试听伴奏还是原声。调轴时切到伴奏更容易听清节拍。 */
   audioMode: 'original' | 'instrumental'
   /**
+   * 是否叠加引导声（ガイドメロディ）。
+   *
+   * 与 `audioMode` 同一性质：它**既是导出设置也是试听设置**，只存一份。
+   * 导出舞台那个「混入引导声」勾选框读写的就是它，预览的音频引擎也按它决定
+   * 引导声那一层出不出声——结构上不可能出现"设置勾了、预览却听不到"。
+   *
+   * 与 ON/OFF VOCAL 不同的是它是**叠加层**而不是二选一：引导声可以配原声，
+   * 也可以配伴奏，所以它不参与「原声 / 伴奏 / 仅人声」那组预设的互斥判断。
+   */
+  guideEnabled: boolean
+  /**
    * 时间轴波形**画**哪条轨。与 `audioMode`（耳朵听哪条轨）刻意分开：
    * 对着人声的波形能一眼看出每个字的起音在哪，而耳朵里放伴奏才不被原唱带着走，
    * 绑在一起就只能二选一。`audio` = 原曲混音。
@@ -89,6 +100,7 @@ interface ProjectState {
   setPlaybackRate: (v: number) => void
   select: (s: Selection) => void
   setAudioMode: (m: 'original' | 'instrumental') => void
+  setGuideEnabled: (v: boolean) => void
   setWaveSource: (m: 'audio' | 'instrumental' | 'vocals') => void
   setFollowPlayhead: (v: boolean) => void
 
@@ -160,6 +172,7 @@ export const useProject = create<ProjectState>((set, get) => {
     playbackRate: 1,
     selection: { kind: 'none' },
     audioMode: 'original',
+    guideEnabled: false,
     waveSource: 'audio',
     followPlayhead: true,
     canUndo: false,
@@ -211,6 +224,7 @@ export const useProject = create<ProjectState>((set, get) => {
     setPlaybackRate: (v) => set({ playbackRate: v }),
     select: (s) => set({ selection: s }),
     setAudioMode: (m) => set({ audioMode: m }),
+    setGuideEnabled: (v) => set({ guideEnabled: v }),
     setWaveSource: (m) => set({ waveSource: m }),
     setFollowPlayhead: (v) => set({ followPlayhead: v }),
 
