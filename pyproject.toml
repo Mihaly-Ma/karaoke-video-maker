@@ -69,6 +69,19 @@ dev = [
     "ruff>=0.8",
     "pyright>=1.1.380",
 ]
+# 打包工具链。单独一组而不是塞进 dev：日常开发、CI 的 lint/test 都不需要它，
+# 而 PyInstaller 只在出安装包时用一次。
+package = [
+    "pyinstaller>=6.11",
+]
+
+[tool.pytest.ini_options]
+# **必须显式限定收集范围。** 不限定时 pytest 会从仓库根往下走遍整棵树，
+# 把打包产物里第三方库自带的测试也收进来——PyInstaller 的 `dist-backend/` 里
+# 有一整份 PyTorch，它的 `torch/_dynamo/test_case.py` 之类依赖 `expecttest`
+# 这种我们没装也不该装的东西，于是 52 个 collection error，**一条自己的测试都跑不到**。
+# 那些目录已在 .gitignore 里，但 gitignore 不影响 pytest。
+testpaths = ["tests"]
 
 [tool.pyright]
 pythonVersion = "3.12"
