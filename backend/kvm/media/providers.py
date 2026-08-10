@@ -617,11 +617,17 @@ class VideoProvider(ABC):
         }
         # yt-dlp 只认 PATH，看不见应用私有目录里的 ffmpeg（§2.6），不告诉它就会在
         # 合并音视频流那步以 "ffmpeg is not installed" 失败，而启动自检还是通过的。
-        # 传目录而非文件：ffmpeg 与 ffprobe 要同源。探测不到就不设，让 yt-dlp 自己
-        # 报错，不在这里抛（§2.5 失败要降级）。
+        # **传文件路径而不是它所在的目录。** 传目录会让 yt-dlp 自己在里面找名叫
+        # `ffmpeg` 的文件，而 macOS 上我们选中的那份通常是 `ffmpeg-full`——带
+        # libass 的是它，主线 `ffmpeg` 不带、甚至可能没装。那样 yt-dlp 会判定
+        # 该位置没有 ffmpeg，警告一句后继续，合并流时照样失败。
+        # 传文件则两个平台都对：yt-dlp 按 basename 子串匹配（`ffmpeg` 同时是
+        # `ffmpeg-full` 和 `ffmpeg.exe` 的子串），再到同目录找 ffprobe——两者
+        # 同源正是 §2.6 的要求。
+        # 探测不到就不设，让 yt-dlp 自己报错，不在这里抛（§2.5 失败要降级）。
         ffmpeg = probe_ffmpeg()
         if ffmpeg.path is not None:
-            opts["ffmpeg_location"] = str(Path(ffmpeg.path).parent)
+            opts["ffmpeg_location"] = ffmpeg.path
         opts.update(extra or {})
         return opts
 
