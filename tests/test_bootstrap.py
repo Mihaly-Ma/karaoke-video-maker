@@ -221,6 +221,10 @@ def test_extract_only_named_members(tmp_path: Path) -> None:
     assert not (out / "other").exists()
 
 
+@pytest.mark.skipif(
+    sys.platform.startswith("win"),
+    reason="Windows 没有 POSIX 可执行位，chmod 只认只读标志；那边靠扩展名决定能否执行",
+)
 def test_extract_sets_executable_bit(tmp_path: Path) -> None:
     data = _zip_bytes({"tool": b"binary"})
     archive = tmp_path / "a.zip"

@@ -71,9 +71,16 @@ jobs:
       # 而且 runner 上装什么与用户机器上装什么是两码事）。
       # 这里只是让 doctor 的 ffmpeg 检查有东西可查。
       # 注意 doctor 的判据是 **ass 滤镜注册没注册**，不是版本号。
+      #
+      # **macOS 必须装 ffmpeg-full，不能装主线 ffmpeg**——CLAUDE.md §2.4/§6.4 写着
+      # 主线 formula 不含 libass，这条已由本 CI 亲自证实：runner 上装好 ffmpeg 8.1.2
+      # 之后，一批依赖 `find_ffmpeg_with_libass()` 的用例全线报"找不到带 libass 的
+      # ffmpeg"，brew 自己也在安装完成时提示 ffmpeg-full 才带全套。
+      # ffmpeg-full 是 keg-only（不进 /opt/homebrew/bin），但 kvm.media.ffmpeg 的
+      # CANDIDATES 里有 /opt/homebrew/opt/ffmpeg-full/bin/ffmpeg，探测得到。
       - name: 安装 ffmpeg（macOS）
         if: runner.os == 'macOS'
-        run: brew install ffmpeg
+        run: brew install ffmpeg-full
       - name: 安装 ffmpeg（Windows）
         if: runner.os == 'Windows'
         run: choco install ffmpeg-full --no-progress -y
