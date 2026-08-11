@@ -34,8 +34,8 @@ failed to bundle project: `Failed to bundle app with makensis`
 
 ```python
 if not args.backend_only:
-    build_shell()      # ← NSIS 在这里炸，直接 SystemExit
-report()               # ← _check_installer_limit() 在这里面，轮不到执行
+    build_shell()  # ← NSIS 在这里炸，直接 SystemExit
+report()  # ← _check_installer_limit() 在这里面，轮不到执行
 ```
 
 它读的是 `bundle/` 里**已经产出**的 `.exe`/`.msi`——而撞穿上限时那个文件根本不会产出。
