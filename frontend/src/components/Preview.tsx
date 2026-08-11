@@ -1301,10 +1301,24 @@ export function Preview({ className }: PreviewProps) {
     return { title: t('media.player.noAssets'), hint: t('media.player.noAssetsHint') }
   })()
 
+  /**
+   * 画面区的比例跟着工程走，与「样式」舞台的 `--sty-aspect` 同一个道理：
+   * 编辑器里看到的形状必须是成片的形状。1:1 的 MV 塞进写死的 16:9 盒子里，
+   * 画面只占中间 56%，两侧一大片黑——那不是这支片子的样子。
+   *
+   * 尺寸未知时（工程还没有画面）退回 16:9。**JASSUB 不受这里影响**：它按
+   * `<video>` 的实际内容区定位自己的 canvas（`_getElementBoundingBox`），
+   * 盒子比例不对时字幕仍贴着画面，只是画面被摆在了一个错误形状的框里。
+   */
+  const filmAspect =
+    project.video_width > 0 && project.video_height > 0
+      ? `${project.video_width} / ${project.video_height}`
+      : '16 / 9'
+
   return (
     <div className={className} style={styles.root}>
       {/* JASSUB 会把它的 canvas 绝对定位插在 <video> 之后，所以这里必须 relative */}
-      <div style={styles.stage}>
+      <div style={{ ...styles.stage, aspectRatio: filmAspect }}>
         {hasVideo && (
           <video
             ref={videoRef}
@@ -1507,6 +1521,9 @@ const styles = {
     color: '#888',
     fontSize: 13,
   },
+  // aspectRatio 由工程的画面尺寸逐次覆盖（见 `filmAspect`）；这里的 16/9 只是
+  // 还没有画面时的兜底。写死 16/9 会让 1:1 / 4:3 的片子被塞进一个横长的盒子里，
+  // 画面缩在中间、两侧一大片黑，编辑时看到的形状根本不是成片的形状。
   stage: { position: 'relative', background: '#000', aspectRatio: '16 / 9', overflow: 'hidden' },
   video: { width: '100%', height: '100%', objectFit: 'contain', display: 'block' },
   noVideo: {

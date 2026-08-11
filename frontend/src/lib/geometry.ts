@@ -10,16 +10,29 @@
 /** 版面基准画幅。CLAUDE.md §8.5 的全部数值都是在它上面校准的。 */
 export const REFERENCE_ASPECT = 16 / 9
 
+/** 字号占版面锚点高度的比例（CLAUDE.md §8.5）。 */
+const FONT_SIZE_RATIO = 0.075
+/** 全角字符 advance ÷ Fontsize，已实测（§5.7：字号 72 时 CJK advance 50px）。 */
+const CJK_ADVANCE_RATIO = 0.694
+/** 一行按多少个全角字预留宽度。取 §5.8「12–20 全角字符」的上端。 */
+const REFERENCE_LINE_CHARS = 20
+/** 推荐左右边距占宽度的比例（§8.5），左右各一份。 */
+const MARGIN_H_RATIO = 0.045
+
+const WIDTH_CAP_RATIO =
+  (1 - 2 * MARGIN_H_RATIO) / (REFERENCE_LINE_CHARS * CJK_ADVANCE_RATIO * FONT_SIZE_RATIO)
+
 /**
- * 版面锚点高度 = 画面内接的最大 16:9 框的高度 = `min(h, w × 9/16)`。
+ * 版面锚点高度：**以画面高度为准，但受"一行放得下"封顶**。
  *
  * 字号同时决定"读起来多大"（看高度）和"一行放得下几个字"（看宽度）。
- * 16:9 上这两者被画幅绑死，换个画幅就分家——只锚高度的话，4:3 上字相对宽度大
- * 33%、竖屏大 3.16 倍，一行放不下就被 `\fscx` 压扁，那是字真的变形。
+ * 16:9 上这两者被画幅绑死，换个画幅就分家——只锚高度的话，窄画面上一行放不下
+ * 就被 `\fscx` 压扁，那是字真的变形。
  *
- * 16:9 时返回值恒等于画面高度，所以 16:9 工程的推荐值一个像素都不变。
+ * **封顶只在真的放不下时才生效**：16:9 与 4:3 都不受影响（4:3 一行本来就能放
+ * 23 个全角字），1:1 与竖屏才会压。
  */
 export function layoutRefHeight(width: number, height: number): number {
   if (!(width > 0) || !(height > 0)) return 0
-  return Math.max(1, Math.min(Math.round(height), Math.round((width * 9) / 16)))
+  return Math.max(1, Math.min(Math.round(height), Math.round(width * WIDTH_CAP_RATIO)))
 }

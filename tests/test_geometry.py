@@ -51,10 +51,22 @@ def test_ref_height_is_identity_on_16_9(width: int, height: int) -> None:
     assert layout_ref_height(width, height) == height
 
 
-def test_ref_height_shrinks_on_narrow_frames() -> None:
-    """比 16:9 窄的画面按宽度收敛，字才放得下一行。"""
-    assert layout_ref_height(1440, 1080) == 810  # 4:3
-    assert layout_ref_height(1080, 1920) == 608  # 竖屏 9:16
+def test_ref_height_leaves_4_3_alone() -> None:
+    """4:3 一行本来就放得下 23 个全角字，不该被压。
+
+    这是"按容量封顶"与"取内接 16:9 框高度"的分水岭：后者会把 4:3 白白缩掉
+    25%，字小了而问题（PlayRes 对不上）根本不在这儿。
+    """
+    assert layout_ref_height(1440, 1080) == 1080
+
+
+def test_ref_height_caps_square_and_portrait() -> None:
+    """1:1 与竖屏才真的放不下，此时按宽度封顶。
+
+    1080 宽的画面上：ref=944 → 字号 70px，占画面高 6.5%，一行 20 个全角字。
+    """
+    assert layout_ref_height(1080, 1080) == 944
+    assert layout_ref_height(1080, 1920) == 944
 
 
 def test_ref_height_caps_at_height_on_ultrawide() -> None:
