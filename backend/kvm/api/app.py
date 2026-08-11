@@ -62,7 +62,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="karaoke-video-maker API",
-    version="0.2.0",
+    version="0.2.1",
     lifespan=lifespan,
 )
 
