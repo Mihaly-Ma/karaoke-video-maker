@@ -46,6 +46,17 @@ NSIS 侧确实有绕过 2 GB 的分支（nsisbi）与插件（CABSetup），但 
 
 **免安装形态的代价**：没有安装器就没人负责 WebView2 Runtime。Win11 与打过近年
 更新的 Win10 自带，老机器上要用户自己装一次——这条写在包里的「使用说明.txt」。
+
+## 分卷：同一堵墙的第二次
+
+v0.2.1 出包全过，却红在**上传**：GitHub Release 的单个 asset 上限也是 2 GiB
+（`HTTP 422: size must be less than 2147483648`），而免安装 zip 是 2.1 GB。
+两个 2 GB 是巧合而非同源——一个是 makensis 的整数溢出，一个是 GitHub 的上传策略。
+
+换更狠的压缩救不了这件事：solid LZMA2 实测比 0.53，换算下来约 1.9-2.0 GB，
+过线但余量近乎为零，torch 下次一涨就是原地重演。**Release 的总大小与文件数不限**，
+所以出路是分卷——`build_portable_zip()` 按写出的实际字节滚动切，每卷都是自成一体
+的普通 zip（不是 `.7z.001` 那种分卷，用户不需要第三方工具）。
 """
 
 from __future__ import annotations
@@ -346,6 +357,15 @@ _PORTABLE_README = """Karaoke Video Maker（GPU 版 · 免安装）
   别直接在压缩软件的预览窗口里双击运行——那只是把 exe 单独解压到临时
   目录，后端在它旁边找不到自己的文件，应用会停在启动页上。
 
+如果下载到的是「1of2 / 2of2」这样的多个 zip
+  **每一个都要下，并且解压到同一个位置**，让它们合并成同一个
+  「Karaoke Video Maker」文件夹（资源管理器会问要不要合并，选是）。
+  它们是普通 zip，不是分卷压缩包，不需要 7-Zip 之类的工具，但少解压一个
+  就会缺文件——最典型的症状是应用停在启动页、日志里报某个 .dll 找不到。
+
+  之所以拆开，是 GitHub 的单个发布文件不能超过 2 GiB，而 CUDA 版
+  PyTorch 的运行时本身就比这个大。
+
 需要 WebView2 Runtime
   这是免安装形态唯一的额外要求：没有安装器，就没人替你装它。
   Windows 11、以及打过近年更新的 Windows 10 都自带，通常无需理会。
@@ -361,13 +381,45 @@ _PORTABLE_README = """Karaoke Video Maker（GPU 版 · 免安装）
 """
 
 
-def build_portable_zip(bundle: Path) -> Path:
-    """把外壳 exe 与后端 onedir 直接写进一个 zip。
+# GitHub Release **单个 asset** 的上限：2 GiB。超了 uploads.github.com 直接回
+# `HTTP 422: size must be less than 2147483648`，而这一步发生在整条链路的最后
+# 一秒——包已经出完、Rust 也编译完了。**Release 总大小与 asset 数量都不限**，
+# 官方明确支持一个 release 挂多个文件，所以出路是分卷而不是压得更狠。
+#
+# 这个数字和 NSIS 那个 2 GB 上限是巧合，不是同一件事：一个是 makensis 的有符号
+# 整数溢出，一个是 GitHub 的上传策略。**别把两个常量合并成一个**——它们各自会变，
+# 合了之后哪天动一个就会静默改掉另一个的判据。
+_RELEASE_ASSET_LIMIT = 2 * 1024**3
+
+# 每卷的目标大小。取 1.5 GB 而不是贴着 1.9 GB：余量要肉眼可见（本项目已经因为
+# "只剩 375 MB"被咬过一次）。多一卷的代价只是用户多点一次下载，而贴边的代价是
+# 某次 torch 升版之后整条发布链路在最后一秒红掉。
+_PORTABLE_PART_TARGET = 1500 * 1024**2
+
+
+def build_portable_zip(bundle: Path) -> list[Path]:
+    """把外壳 exe 与后端 onedir 直接写进 zip；超过每卷目标就换下一卷。
 
     **不先摊一份目录再压**：GPU 版 onedir 就 3 GB 上下，runner 上 CUDA venv
     （约 3.5 GB）+ onedir + Rust target 已经十几 GB，多一份完整拷贝很可能把盘
     撑爆——而磁盘满的报错通常出现在某个无关的步骤里（ci.yml 里那步「磁盘余量」
-    就是为这个加的）。zipfile 逐条写入，峰值只多出一个 zip 的大小。
+    就是为这个加的）。zipfile 逐条写入，峰值只多出一卷的大小。
+
+    ## 为什么是"多个独立 zip"而不是分卷压缩包
+
+    每一卷都是**自成一体的普通 zip**，资源管理器双击就能开；用户把几卷都解压到
+    同一个位置、合并成同一个文件夹即可。7z/zip 的分卷（`.7z.001`）压缩率更高，
+    但要第三方工具才合得起来——而这是个免安装形态，它存在的理由就是少一道安装
+    门槛，再加一道解压门槛等于白做。
+
+    ## 为什么按**实际写出的字节**切，而不是按内容规则切
+
+    "把 `_internal/torch/lib` 单独拿出来"这类规则今天成立，明天 torch 换个目录
+    就悄悄失效，而失效的表现是某一卷又超限——正是这次故障的重演。按输出大小滚动
+    切分不依赖任何上游布局：torch 再涨，只是多出一卷。
+
+    代价是单个文件不能跨卷，所以有兜底：任何单文件本身超上限就直接失败。当前最大
+    的 DLL 在 1 GB 量级，离得还远，但这条判据要写出来，不能靠"应该不会"。
 
     目录布局必须与 NSIS 装出来的一致，否则壳找不到后端：`lib.rs` 的
     `bundled_backend()` 解析的是 `resource_dir()/backend/kvm-backend.exe`，
@@ -382,26 +434,81 @@ def build_portable_zip(bundle: Path) -> Path:
     shell_exe = REPO_ROOT / "src-tauri" / "target" / "release" / exe_name
     if not shell_exe.is_file():
         raise SystemExit(f"外壳可执行文件不存在（--no-bundle 也该产出它）：{shell_exe}")
+    for doc in ("LICENSE", "THIRD-PARTY-NOTICES.md"):
+        if not (REPO_ROOT / doc).is_file():
+            raise SystemExit(f"许可证文件缺失，免安装包不能这样出：{REPO_ROOT / doc}")
 
     DIST_PORTABLE.mkdir(parents=True, exist_ok=True)
-    out = DIST_PORTABLE / f"{PRODUCT_NAME}-portable.zip"
-    out.unlink(missing_ok=True)
+    for stale in DIST_PORTABLE.glob("*.zip"):
+        # 上次可能分了更多卷，残留的旧卷会被 CI 的收拢步骤一并捡走，
+        # 于是发布里混进一个属于上个版本的分卷——比缺一卷更难查。
+        stale.unlink()
 
-    log(f"写免安装 zip（zip64；onedir {human(dir_size(bundle))}，要压几分钟）")
-    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
-        zf.write(shell_exe, f"{PRODUCT_NAME}/{PRODUCT_NAME}{shell_exe.suffix}")
-        for src in sorted(bundle.rglob("*")):
-            if src.is_file():
-                arc = src.relative_to(bundle).as_posix()
-                zf.write(src, f"{PRODUCT_NAME}/backend/{arc}")
-        # 许可证跟安装包那份走同一条规矩：免安装包也是一份副本，MIT 要求带声明。
-        for doc in ("LICENSE", "THIRD-PARTY-NOTICES.md"):
-            src = REPO_ROOT / doc
-            if not src.is_file():
-                raise SystemExit(f"许可证文件缺失，免安装包不能这样出：{src}")
-            zf.write(src, f"{PRODUCT_NAME}/{doc}")
+    log(
+        f"写免安装 zip（zip64，每卷约 {human(_PORTABLE_PART_TARGET)}；"
+        f"onedir {human(dir_size(bundle))}，要压几分钟）"
+    )
+
+    parts: list[Path] = []
+    zf: zipfile.ZipFile | None = None
+    written = 0
+
+    def rotate() -> None:
+        """开新一卷。说明文件每卷都放一份——只解压到第二卷的人也得看得到怎么用。"""
+        nonlocal zf, written
+        if zf is not None:
+            zf.close()
+        path = DIST_PORTABLE / f"portable-part{len(parts) + 1}.zip"
+        parts.append(path)
+        zf = zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED, allowZip64=True)
         zf.writestr(f"{PRODUCT_NAME}/使用说明.txt", _PORTABLE_README)
-    return out
+        written = 0
+
+    def put(src: Path, arc: str) -> None:
+        nonlocal written
+        if src.stat().st_size >= _RELEASE_ASSET_LIMIT:
+            raise SystemExit(
+                f"单个文件就超过 {human(_RELEASE_ASSET_LIMIT)}，分卷救不了：{src}\n"
+                "    分卷是按文件切的，一个文件不能跨卷。"
+            )
+        if written >= _PORTABLE_PART_TARGET:
+            rotate()
+        assert zf is not None
+        zf.write(src, arc)
+        written += zf.infolist()[-1].compress_size
+
+    rotate()
+    # 外壳与许可证放第一卷开头：第一卷是用户最可能先解压的那个。
+    # 许可证跟安装包那份走同一条规矩——免安装包也是一份副本，MIT 要求带声明。
+    put(shell_exe, f"{PRODUCT_NAME}/{PRODUCT_NAME}{shell_exe.suffix}")
+    for doc in ("LICENSE", "THIRD-PARTY-NOTICES.md"):
+        put(REPO_ROOT / doc, f"{PRODUCT_NAME}/{doc}")
+    for src in sorted(bundle.rglob("*")):
+        if src.is_file():
+            put(src, f"{PRODUCT_NAME}/backend/{src.relative_to(bundle).as_posix()}")
+    if zf is not None:
+        zf.close()
+
+    # 定稿名字：单卷不带序号，多卷带 `-1of2`。总数要等切完才知道，所以先写
+    # partN 再改名——同目录 rename，不产生额外拷贝。
+    total = len(parts)
+    final: list[Path] = []
+    for i, path in enumerate(parts, start=1):
+        target = path.with_name("portable.zip" if total == 1 else f"portable-{i}of{total}.zip")
+        target.unlink(missing_ok=True)
+        path.rename(target)
+        final.append(target)
+
+    for path in final:
+        size = path.stat().st_size
+        if size >= _RELEASE_ASSET_LIMIT:
+            # 正常不该越界（切分按压缩后字节滚动算）；留这道闸门是因为越界的后果
+            # 要到整条链路的最后一秒才以 HTTP 422 的形式出现。
+            raise SystemExit(
+                f"[失败] {path.name} 有 {human(size)}，超过 GitHub Release 单文件上限"
+                f" {human(_RELEASE_ASSET_LIMIT)}。把 _PORTABLE_PART_TARGET 调小再出一次。"
+            )
+    return final
 
 
 # NSIS 与 WiX 都在**安装包超过 2 GB** 时失败（tauri-apps/tauri#7372，至今 open），
@@ -521,8 +628,8 @@ def main(argv: list[str] | None = None) -> int:
     if not args.backend_only:
         if args.portable:
             build_shell(portable=True)
-            archive = build_portable_zip(bundle)
-            log(f"免安装包 {archive.name}  {human(archive.stat().st_size)}")
+            for archive in build_portable_zip(bundle):
+                log(f"免安装包 {archive.name}  {human(archive.stat().st_size)}")
         else:
             # 这一步必须在 build_shell() **之前**：NSIS 撞穿 2 GB 时自己先炸，
             # report() 里那道事后闸门根本轮不到执行（见 preflight 的注释）。

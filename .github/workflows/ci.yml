@@ -271,13 +271,19 @@ jobs:
           mkdir -p artifacts
           shopt -s nullglob
           n=0
-          # dist-portable/*.zip 是 GPU 版的形态（--portable），与安装包同等对待：
-          # 下面那条 n -eq 0 的兜底对两条路都成立。
+          # 安装包每个平台只有一个，按扩展名重命名即可。
           for f in src-tauri/target/release/bundle/dmg/*.dmg \
                    src-tauri/target/release/bundle/nsis/*.exe \
-                   src-tauri/target/release/bundle/msi/*.msi \
-                   dist-portable/*.zip; do
+                   src-tauri/target/release/bundle/msi/*.msi; do
             cp "$f" "artifacts/kvm-${ver}-${{ matrix.plat }}.${f##*.}"
+            n=$((n + 1))
+          done
+          # 免安装包（--portable）**可能不止一卷**——GitHub Release 单文件上限
+          # 2 GiB，GPU 版超了。所以这里保留原始文件名（portable-1of2.zip 之类），
+          # 只加平台与版本前缀。**别改回按扩展名重命名**：那样两卷会同名，
+          # 后一卷直接盖掉前一卷，而发布里少一卷的症状是用户解压完缺 dll。
+          for f in dist-portable/*.zip; do
+            cp "$f" "artifacts/kvm-${ver}-${{ matrix.plat }}-$(basename "$f")"
             n=$((n + 1))
           done
           if [[ $n -eq 0 ]]; then
