@@ -9,6 +9,7 @@ import argparse
 import json
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent))
@@ -18,6 +19,7 @@ from kvm.models.karaoke import VoicePalette
 from kvm.pipeline.guide_melody import TIMBRES, GuideConfig  # 只取配置与常量，不触发 torch
 from kvm.pipeline.qrc_import import load_project
 from kvm.render.ass_builder import AssBuilder
+from kvm.render.geometry import layout_ref_height, plan_canvas
 from kvm.render.text_metrics import LibassMetrics
 
 
@@ -36,7 +38,7 @@ def probe_video(ffmpeg: str, path: Path) -> dict:
         "-select_streams",
         "v:0",
         "-show_entries",
-        "stream=width,height,r_frame_rate:format=duration,start_time",
+        "stream=width,height,sample_aspect_ratio,r_frame_rate:format=duration,start_time",
         "-of",
         "json",
         str(path),
@@ -54,6 +56,9 @@ def probe_video(ffmpeg: str, path: Path) -> dict:
     return {
         "width": int(st.get("width", 1920)),
         "height": int(st.get("height", 1080)),
+        # 非方形像素的源（DVD/TV 转录的 1440×1080 SAR 4:3 是典型）照编码尺寸排版，
+        # 播放器会把字连同画面一起横向拉伸。见 `render.geometry`。
+        "sar": str(st.get("sample_aspect_ratio") or ""),
         "fps": st.get("r_frame_rate", "0/1"),
         "duration": float(fmt.get("duration", 0.0)),
         "start_time": float(fmt.get("start_time", 0.0)),
@@ -70,13 +75,19 @@ def burn(
     start_s: float | None = None,
     duration_s: float | None = None,
     crf: int = 18,
+    video_filters: Sequence[str] = (),
 ) -> None:
     """把 ASS 烧进视频。
 
     字幕滤镜路径需转义（Windows 盘符的冒号、以及滤镜图的分隔符）。
     音轨可替换为分离出的伴奏以产出 OFF VOCAL 版本。
+
+    `video_filters` 是画布变换（像素归方 / 补边到 16:9），由
+    `render.geometry.plan_canvas` 产出，**一律接在 `ass=` 之前**：字幕要烧在最终
+    画布上。放到后面就成了"先烧字、再缩放补边"，字会跟着画面一起被缩进黑边里。
     """
     esc = escape_filter_path(ass)
+    chain = ",".join([*video_filters, f"ass={esc}"])
     cmd = [ffmpeg, "-hide_banner", "-y", "-i", str(video)]
     if audio is not None:
         cmd += ["-i", str(audio)]
@@ -89,7 +100,7 @@ def burn(
         cmd += ["-t", f"{duration_s}"]
     cmd += [
         "-vf",
-        f"ass={esc}",
+        chain,
         "-c:v",
         "libx264",
         "-crf",
@@ -260,35 +271,48 @@ def main() -> int:
     ap.add_argument("--start", type=float, default=None, help="截取起点秒（用于试渲染）")
     ap.add_argument("--duration", type=float, default=None, help="截取时长秒")
     ap.add_argument("--ass-only", action="store_true", help="只生成 ASS，不烧录")
+    ap.add_argument(
+        "--pad-16-9",
+        action="store_true",
+        help="把非 16:9 的画面补黑边到 16:9 再烧字幕（歌词落进黑边，不遮画面）",
+    )
     args = ap.parse_args()
 
     ffmpeg = _find_ffmpeg()
     info = probe_video(ffmpeg, args.video)
+    canvas = plan_canvas(info["width"], info["height"], sar=info["sar"], pad_to_16_9=args.pad_16_9)
     print(f"ffmpeg   : {ffmpeg}")
     print(
         f"视频     : {info['width']}x{info['height']}  "
         f"{info['duration']:.3f}s  start_time={info['start_time']}"
     )
+    if canvas.note:
+        print(f"画布     : {canvas.width}x{canvas.height}（{canvas.note}）")
     if abs(info["start_time"]) > 1e-6:
         print(f"⚠️ 容器起始 PTS 非零（{info['start_time']}s），ASS 绝对时间需核算")
 
     proj = load_project(
         args.parsed,
         args.kana,
-        video_width=info["width"],
-        video_height=info["height"],
+        video_width=canvas.width,
+        video_height=canvas.height,
         global_offset_ms=args.offset_ms,
     )
     st = proj.style
     st.font_name = args.font
-    st.font_size = args.font_size or max(36, int(info["height"] * 0.075))
+    # 字号锚在**内接 16:9 框的高度**上，不是画面高度：字号同时决定"读起来多大"
+    # 和"一行放得下几个字"，前者看高度、后者看宽度，只有 16:9 上两者才是一回事。
+    # 16:9 时 ref == 高度，这一行的结果与改动前逐像素相同（`render.geometry`）。
+    ref = layout_ref_height(canvas.width, canvas.height)
+    st.font_size = args.font_size or max(36, int(ref * 0.075))
     # 描边/阴影按字号自适应：固定 3px 在 4K 下细到几乎看不见，
     # 而卡拉OK 字幕要压在任意画面上都清晰可读，粗描边是刚需
     st.bold = True
     st.outline = round(st.font_size * 0.055, 1)
     st.shadow = round(st.font_size * 0.022, 1)
-    st.margin_h = int(info["width"] * 0.045)
-    st.margin_v = int(info["height"] * 0.055)
+    # 边距是方向性的量：左右按宽度、上下按高度，各自取自己那一维，不掺 ref
+    st.margin_h = int(canvas.width * 0.045)
+    st.margin_v = int(canvas.height * 0.055)
     st.line_gap = int(st.font_size * 0.18)
 
     # nicokara 经典配色：未唱白底黑边，已唱亮蓝。ASS 是 &HAABBGGRR（BGR 序）
@@ -373,6 +397,7 @@ def main() -> int:
         audio=audio_track,
         start_s=args.start,
         duration_s=args.duration,
+        video_filters=canvas.filters,
     )
     size_mb = args.out.stat().st_size / 1024 / 1024
     print(f"完成     : {args.out}  ({size_mb:.1f} MB)")

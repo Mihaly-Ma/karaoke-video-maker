@@ -102,15 +102,18 @@ export function Check({
 
 export interface StyleControlsProps {
   draft: Style
-  videoHeight: number
+  refHeight: number
+  /** 版面锚点高度（`lib/geometry.layoutRefHeight`），16:9 上等于画面高度。
+      字号的滑块上限与"字号偏小"警告线都以它为准——与「推荐值」同一把尺子，
+      否则非 16:9 工程上推荐值会落进自己的警告区。 */
   set: <K extends keyof Style>(key: K, value: Style[K]) => void
   setNow: <K extends keyof Style>(key: K, value: Style[K]) => void
   commit: () => void
 }
 
 /** 排版：字号 / 描边 / 注音 / 边距 / 上下行错开 */
-export function LayoutControls({ draft, videoHeight, set, setNow, commit }: StyleControlsProps) {
-  const fontRatio = videoHeight > 0 ? draft.font_size / videoHeight : null
+export function LayoutControls({ draft, refHeight, set, setNow, commit }: StyleControlsProps) {
+  const fontRatio = refHeight > 0 ? draft.font_size / refHeight : null
   const fontWarn =
     fontRatio !== null && fontRatio < 0.06
       ? t('style.warn.fontSize', { pct: (fontRatio * 100).toFixed(1) })
@@ -120,7 +123,7 @@ export function LayoutControls({ draft, videoHeight, set, setNow, commit }: Styl
     outlineRatio !== null && outlineRatio < 0.03
       ? t('style.warn.outline', { pct: (outlineRatio * 100).toFixed(1) })
       : null
-  const fontMax = videoHeight > 0 ? Math.max(200, Math.round(videoHeight * 0.25)) : 300
+  const fontMax = refHeight > 0 ? Math.max(200, Math.round(refHeight * 0.25)) : 300
 
   return (
     <>

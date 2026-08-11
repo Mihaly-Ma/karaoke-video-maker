@@ -56,6 +56,7 @@ from kvm.api.store import ProjectStore, default_root
 from kvm.media import guide as guide_module
 from kvm.media.download import _ffprobe_bin, _probe_duration
 from kvm.media.ffmpeg import find_ffmpeg_with_libass
+from kvm.media.probe import probe_track
 from kvm.models.karaoke import (
     ExportArtifact,
     KaraokeProject,
@@ -70,6 +71,7 @@ from kvm.models.karaoke import (
 from kvm.pipeline.beat_detect import BeatGrid, detect_beats
 from kvm.pipeline.make_video import _extract_audio, _mix_audio, burn
 from kvm.render.ass_builder import AssBuilder
+from kvm.render.geometry import CanvasPlan, plan_canvas
 from kvm.render.text_metrics import LibassMetrics
 from pydantic import BaseModel
 
@@ -237,7 +239,9 @@ def _load_beat_grid(dto: ProjectDTO) -> BeatGrid | None:
     return grid
 
 
-def _build_ass_text(dto: ProjectDTO, *, embed_fonts: bool = False) -> str:
+def _build_ass_text(
+    dto: ProjectDTO, *, embed_fonts: bool = False, canvas: tuple[int, int] | None = None
+) -> str:
     """DTO → ASS 文本。`POST /ass` 与 `GET /preview.ass` 共用同一条路径，
     保证两个接口所见完全一致。
 
@@ -249,8 +253,15 @@ def _build_ass_text(dto: ProjectDTO, *, embed_fonts: bool = False) -> str:
     导出侧非嵌不可：ffmpeg 用 `ASS_FONTPROVIDER_AUTODETECT`，系统字体回退
     **无法禁用**，不把字节摆在它面前就控制不住缺字时它选谁——
     同一个生僻字预览用链尾、成片用系统某个字体，正是 §5.12 要杜绝的分叉。
+
+    `canvas` 覆盖排版用的画面尺寸（也就是 ASS 的 `PlayRes`）。**只有导出会给它**，
+    因为只有导出会改动画布：补边到 16:9、或把非方形像素归方
+    （`render.geometry.plan_canvas`）。PlayRes 与实际帧尺寸必须相等，否则 libass
+    会用两个不等的比例分别缩字号和坐标。
     """
     project = project_dto_to_domain(dto)
+    if canvas is not None:
+        project.video_width, project.video_height = canvas
     project.beat_grid = _load_beat_grid(dto)
     try:
         metrics = _get_metrics()
@@ -526,6 +537,26 @@ def _export_duration_ms(ffmpeg: str, out_path: Path, dto: ProjectDTO, req: Rende
         return dto.duration_ms
 
 
+def _plan_export_canvas(
+    ffmpeg: str, video_path: Path, dto: ProjectDTO, req: RenderRequest
+) -> CanvasPlan:
+    """这次导出的画布：像素归方 + 可选的补边到 16:9。
+
+    探测走 `probe_track`（不带缓存）——缓存键是 `(路径, mtime, size)`，源文件不会
+    在导出途中变，但缓存里可能还躺着 v1 时代那条**没有 SAR 字段**的记录；
+    导出是"错了就要重烧几分钟"的地方，多花几十毫秒换个确定的答案划算。
+
+    探测拿不到尺寸时退回工程记的值：**不能因为探测失败就不出片**（§2.5）。
+    """
+    try:
+        probe = probe_track(_ffprobe_bin(ffmpeg), video_path)
+    except (subprocess.SubprocessError, OSError, ValueError):
+        probe = None
+    if probe is None or not probe.width or not probe.height:
+        return CanvasPlan(width=dto.video_width, height=dto.video_height)
+    return plan_canvas(probe.width, probe.height, sar=probe.sar, pad_to_16_9=req.pad_to_16_9)
+
+
 def _run_export(job_id: str, store: ProjectStore, dto: ProjectDTO, req: RenderRequest) -> None:
     """后台线程实际执行的烧录流程，复用 `pipeline.make_video` 的烧录逻辑
     （`burn` / `_extract_audio` / `_mix_audio`），不重新实现一遍 ffmpeg 调用。
@@ -545,8 +576,15 @@ def _run_export(job_id: str, store: ProjectStore, dto: ProjectDTO, req: RenderRe
         _set_job(job_id, state="running", message="正在探测 ffmpeg…", progress=0.02)
         ffmpeg = _get_ffmpeg()
 
+        # 画布按**源文件当场探测的结果**算，不照搬工程里记的尺寸：那两个数是导入
+        # 时写下的，而"补边"这个开关本来就要在导出这一刻才知道。探测失败就退回
+        # 工程记的尺寸继续烧——画布对不上顶多版面偏一点，比整次导出失败强（§2.5）。
+        canvas = _plan_export_canvas(ffmpeg, video_path, dto, req)
+        if canvas.note:
+            _set_job(job_id, message=canvas.note, progress=0.06)
+
         _set_job(job_id, message="正在生成 ASS…", progress=0.1)
-        ass_text = _build_ass_text(dto, embed_fonts=True)
+        ass_text = _build_ass_text(dto, embed_fonts=True, canvas=(canvas.width, canvas.height))
 
         out_dir = default_root().parent / "exports"
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -594,6 +632,7 @@ def _run_export(job_id: str, store: ProjectStore, dto: ProjectDTO, req: RenderRe
             audio=audio_track,
             start_s=req.start_s,
             duration_s=req.duration_s,
+            video_filters=canvas.filters,
         )
 
         _set_job(job_id, message="正在登记成片…", progress=0.98)

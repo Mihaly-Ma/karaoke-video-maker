@@ -645,6 +645,16 @@ class RenderRequest(BaseModel):
     with_guide: bool = False
     use_instrumental: bool = False
 
+    pad_to_16_9: bool = False
+    """把非 16:9 的画面补黑边到 16:9，字幕烧在补齐后的画布上。
+
+    这是**画幅选择**而不是修正：不补边的路径（默认）同样是对的——版面参数会按
+    实际画幅自适应（`render.geometry.layout_ref_height`）。补边解决的是另一件事：
+    4:3 / 竖屏的源上，歌词可以落进黑边而不压在画面上，那是不少 ニコカラ 的做法。
+
+    已经是 16:9 的源上这个开关是空操作（含 1920×1088 这类 mod-16 尺寸）。
+    """
+
 
 class AssResponse(BaseModel):
     ass: str

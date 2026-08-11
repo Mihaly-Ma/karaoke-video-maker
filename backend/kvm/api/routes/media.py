@@ -462,7 +462,41 @@ def probe_all_media(
         if not path_str:
             continue
         tracks[kind] = _track_info(ffprobe_bin, media_dir, kind, path_str)
+    _heal_video_size(store, project, ffprobe_bin, media_dir)
     return MediaProbeResponse(project_id=project_id, tracks=tracks)
+
+
+def _heal_video_size(
+    store: ProjectStore, project: ProjectDTO, ffprobe_bin: str, media_dir: Path
+) -> None:
+    """工程记的画面尺寸与实际视频对不上时就地纠正。
+
+    需要它是因为**存量工程**：下载路径曾经根本不回写尺寸，那些工程停在默认的
+    1920×1080 上，而 ASS 的 PlayRes 就是这两个数——非 16:9 的源上 libass 会按
+    `帧高/1080` 缩字号、按 `帧宽/1920` 缩坐标，两个比例不等，字当场变形
+    （`render.geometry` 模块文档）。光修下载路径救不了已经建好的工程。
+
+    尺寸是文件的既成事实、不是用户意图，所以走 `update_derived` **不占撤销格**
+    （CLAUDE.md §8）：用户按 Cmd+Z 时撤掉的应该是自己那次编辑，不是"工程终于
+    知道了视频有多大"。写进去的是**显示尺寸**（方形像素），与 ASS PlayRes、
+    前端 `<video>.videoWidth` 同一口径。
+
+    探测失败不做任何事：这是顺手纠正，不该让素材面板的一次刷新失败（§2.5）。
+    """
+    if not project.video_path:
+        return
+    info = probe_module.probe_track_cached(ffprobe_bin, media_dir, Path(project.video_path))
+    width, height = info.display_width, info.display_height
+    if not width or not height:
+        return
+    if (project.video_width, project.video_height) == (width, height):
+        return
+
+    def _apply(p: ProjectDTO) -> None:
+        p.video_width = width
+        p.video_height = height
+
+    store.update_derived(project.id, _apply, label="纠正画面尺寸")
 
 
 @router.get("/probe/{project_id}/{kind}", response_model=MediaTrackInfo)

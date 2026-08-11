@@ -9,6 +9,12 @@ export const exportStage: Record<string, string> = {
   'export.instrumentalMissing': '还没有伴奏轨，需要先完成人声分离',
   'export.withGuide': '混入引导声',
   'export.withGuideMissing': '还没有人声轨，需要先完成人声分离',
+  // 补边：非 16:9 的源可选。不补也是对的（版面会按实际画幅自适应），
+  // 所以提示写"能得到什么"而不是"不勾会出错"。
+  // 也不说"歌词落进黑边"——那只在宽画面（上下补边）时成立，4:3 是左右补边
+  'export.pad169': '补黑边到 16:9',
+  'export.padHint': '画面居中补黑边，歌词按 16:9 版面排',
+  'export.padAlready': '画面已经是 16:9',
   'export.start': '导出',
   'export.running': '导出中',
   // 字形预检：只警告不阻断，所以第二句要给出可操作的下一步

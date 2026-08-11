@@ -59,6 +59,7 @@ from kvm.media.providers import (
     YtDlpManager,
     build_registry,
 )
+from kvm.render.geometry import display_size
 
 # 借用 `kvm.media.providers` 的 `VideoProvider._with_retry()` 里对 "已失效"
 # 关键字的 fatal 判定（见 `FATAL_ERROR_KEYWORDS`），让取消请求立刻终止重试
@@ -118,9 +119,33 @@ def _probe_container_timing(ffprobe_bin: str, path: Path) -> dict[str, Any]:
         "audio_codec": audio.get("codec_name"),
         "audio_sample_rate_hz": int(audio["sample_rate"]) if audio.get("sample_rate") else None,
         "audio_channels": audio.get("channels"),
-        # 本地导入（`import_local_media`）要回写工程的分辨率，下载路径目前不用这两项。
-        "video_width": int(video["width"]) if video.get("width") else None,
-        "video_height": int(video["height"]) if video.get("height") else None,
+        # 下载与本地导入**都**要回写工程的画面尺寸。曾经只有本地导入回写，
+        # 于是下载来的片子把工程留在默认的 1920×1080 上——16:9 的源靠"比例
+        # 恰好相同"蒙混过关（PlayRes 与帧尺寸等比，libass 均匀缩放），
+        # 非 16:9 的源则字号按高度缩、坐标按宽度缩，两个比例不等，字当场变形。
+        **_video_geometry(video),
+    }
+
+
+def _video_geometry(video: dict[str, Any]) -> dict[str, Any]:
+    """视频流的编码尺寸 / SAR / **方形像素显示尺寸**。
+
+    工程里记的 `video_width / video_height` 一律是显示尺寸——它要与 ASS 的
+    PlayRes、前端 `<video>.videoWidth` 说同一件事（`render.geometry` 模块文档）。
+    编码尺寸另存一份，只为排查时看得出源本来是什么样。
+    """
+    coded_w = int(video["width"]) if video.get("width") else None
+    coded_h = int(video["height"]) if video.get("height") else None
+    sar = str(video.get("sample_aspect_ratio") or "")
+    if not coded_w or not coded_h:
+        return {"video_width": None, "video_height": None, "video_sar": sar}
+    disp_w, disp_h = display_size(coded_w, coded_h, sar)
+    return {
+        "video_width": disp_w,
+        "video_height": disp_h,
+        "video_sar": sar,
+        "video_coded_width": coded_w,
+        "video_coded_height": coded_h,
     }
 
 
@@ -365,6 +390,12 @@ def run_download(handle: JobHandle, store: ProjectStore, req: DownloadRequest) -
         )
         if global_offset_ms:
             p.global_offset_ms = global_offset_ms
+        # 画面尺寸必须跟着下载一起落进工程。缺了它工程停在默认 1920×1080，
+        # 而 ASS 的 PlayRes 就是这两个数——非 16:9 的源上 libass 会用两个不等的
+        # 比例分别缩字号与坐标，字直接变形（`render.geometry` 模块文档的第一行表格）。
+        if timing.get("video_width") and timing.get("video_height"):
+            p.video_width = int(timing["video_width"])
+            p.video_height = int(timing["video_height"])
 
     updated_project = store.mutate(project.id, _mutate, label="下载媒体")
 

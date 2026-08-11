@@ -424,6 +424,8 @@ export const exportVideo = (body: {
   project_id: string
   with_guide: boolean
   use_instrumental: boolean
+  /** 把非 16:9 的画面补黑边到 16:9 再烧字幕；已经是 16:9 的源上是空操作。 */
+  pad_to_16_9?: boolean
   start_s?: number
   duration_s?: number
 }) => post<JobStatus>('/render/export', body)

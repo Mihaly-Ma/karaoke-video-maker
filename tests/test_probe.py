@@ -213,3 +213,55 @@ def test_probe_批量接口只返回已有路径的kind(client_and_project) -> N
     assert set(tracks) == {"audio", "vocals"}  # 没有 video/proxy/instrumental/drums
     assert tracks["audio"]["exists"] is True
     assert tracks["vocals"]["exists"] is False  # 路径记着但文件不在，仍然出现在列表里
+
+
+# ---- 存量工程的画面尺寸自愈 ----
+
+
+def _write_test_video(ffmpeg_bin: str, path: Path, *, size: str, aspect: str | None = None) -> None:
+    """用 lavfi 合成一小段视频。`aspect` 给的是容器 DAR，用来造非方形像素的源。"""
+    import subprocess
+
+    cmd = [ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error"]
+    cmd += ["-f", "lavfi", "-i", f"testsrc=size={size}:rate=25:duration=1"]
+    if aspect:
+        cmd += ["-aspect", aspect]
+    cmd += ["-c:v", "libx264", "-pix_fmt", "yuv420p", str(path)]
+    subprocess.run(cmd, check=True, timeout=120)
+
+
+@pytest.mark.parametrize(
+    ("size", "aspect", "expected"),
+    [
+        # 4:3 方形像素：曾经工程停在默认 1920×1080，PlayRes 与帧尺寸比例不等，字变形
+        ("640x480", None, (640, 480)),
+        # 非方形像素：编码 640×480 但 DAR 16:9，排版必须按显示尺寸 853→854（取偶）
+        ("640x480", "16:9", (854, 480)),
+    ],
+)
+def test_probe_批量接口纠正存量工程的画面尺寸(
+    client_and_project, tmp_path: Path, size: str, aspect: str | None, expected: tuple[int, int]
+) -> None:
+    """光修下载路径救不了已经建好的工程——那些工程停在默认 1920×1080 上。
+
+    尺寸是文件的既成事实，所以纠正走 `update_derived` **不占撤销格**：用户按
+    Cmd+Z 撤掉的应该是自己那次编辑，不是"工程终于知道了视频有多大"。
+    """
+    from kvm.api.app import app
+    from kvm.api.store import ProjectStore
+
+    client, project_id = client_and_project
+    video = tmp_path / f"v_{size}_{aspect or 'sq'}.mp4"
+    _write_test_video(find_ffmpeg_with_libass(), video, size=size, aspect=aspect)
+
+    store: ProjectStore = app.state.store
+    store.mutate(project_id, lambda p: setattr(p, "video_path", str(video)))
+    before = store.get(project_id)
+    assert (before.video_width, before.video_height) == (1920, 1080)  # 默认值，与实际不符
+    undo_depth = store.history_depth(project_id)
+
+    assert client.get(f"/api/media/probe/{project_id}").status_code == 200
+
+    after = store.get(project_id)
+    assert (after.video_width, after.video_height) == expected
+    assert store.history_depth(project_id) == undo_depth, "纠正尺寸不该占一格撤销"

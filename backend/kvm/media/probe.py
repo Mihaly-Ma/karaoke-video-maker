@@ -31,7 +31,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-PROBE_VERSION = "1"
+from kvm.render.geometry import display_size
+
+PROBE_VERSION = "2"
+"""缓存版本。**加字段就要 +1**：落盘的旧条目缺新键，照样能被
+`TrackProbe(**entry["probe"])` 复原（新字段都有默认值），于是会安安静静地
+报出"SAR 未知"——一个只在旧工程上发作、且不报错的假阴性。v2 加的是
+`sar` / `display_width` / `display_height`。
+"""
 
 
 @dataclass(frozen=True)
@@ -59,6 +66,17 @@ class TrackProbe:
     height: int | None = None
     fps: float | None = None
     video_codec: str = ""
+
+    sar: str = ""
+    """像素宽高比（ffprobe 的 `sample_aspect_ratio`，如 `"4:3"`）。空串 = 未知。"""
+
+    display_width: int | None = None
+    display_height: int | None = None
+    """**方形像素下的**显示尺寸，由 `width/height` 与 `sar` 推出。
+
+    排版一律用这一对，不用编码尺寸：1440×1080 配 SAR 4:3 的源实际显示是 16:9，
+    照编码尺寸摆字会被播放器横向拉 1.333 倍（`render.geometry` 模块文档）。
+    """
 
 
 # 进程内内存缓存：覆盖"同一进程生命周期内反复探测同一条轨"这一多数情形，
@@ -126,6 +144,11 @@ def probe_track(ffprobe_bin: str, path: Path) -> TrackProbe:
     except OSError:
         size_bytes = 0
 
+    coded_w = int(video["width"]) if video and video.get("width") else None
+    coded_h = int(video["height"]) if video and video.get("height") else None
+    sar = str((video or {}).get("sample_aspect_ratio") or "") if video else ""
+    disp_w, disp_h = display_size(coded_w, coded_h, sar) if coded_w and coded_h else (None, None)
+
     return TrackProbe(
         exists=True,
         duration_ms=round(float(duration_raw) * 1000) if duration_raw else 0,
@@ -133,8 +156,11 @@ def probe_track(ffprobe_bin: str, path: Path) -> TrackProbe:
         sample_rate_hz=int(audio["sample_rate"]) if audio and audio.get("sample_rate") else None,
         channels=int(audio["channels"]) if audio and audio.get("channels") else None,
         audio_codec=str(audio.get("codec_name") or "") if audio else "",
-        width=int(video["width"]) if video and video.get("width") else None,
-        height=int(video["height"]) if video and video.get("height") else None,
+        width=coded_w,
+        height=coded_h,
+        sar=sar,
+        display_width=disp_w,
+        display_height=disp_h,
         fps=_parse_fraction(
             (video or {}).get("avg_frame_rate") or (video or {}).get("r_frame_rate")
         )

@@ -40,6 +40,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Palette, Style } from '../api/types'
 import { t } from '../i18n'
 import { renderedCharset } from '../lib/fontCoverage'
+import { layoutRefHeight } from '../lib/geometry'
 import { useProject } from '../state/projectStore'
 import PalettePicker, {
   effectivePalette,
@@ -160,16 +161,24 @@ export default function StylePanel() {
   )
 
   /**
-   * 推荐默认值：字号取画面高度 7.5%、描边取字号 5.5%、阴影取字号 2.2%
+   * 推荐默认值：字号取**版面锚点高度**的 7.5%、描边取字号 5.5%、阴影取字号 2.2%
    * （CLAUDE.md §8.5）。这些是**比例**不是固定像素——固定 3px 描边在 4K 下细到看不见。
+   *
+   * 锚点不是画面高度而是 `layoutRefHeight`（内接 16:9 框的高度）：字号同时决定
+   * 读起来多大与一行放几个字，前者看高度、后者看宽度，只有 16:9 上两者才是
+   * 一回事。16:9 工程上两者相等，推荐值一个像素都不变。
+   *
+   * 边距仍各取自己那一维：左右按宽度、上下按高度，不掺锚点。
    */
   const applyRecommended = () => {
     if (!project || project.video_height <= 0) return
-    const fontSize = Math.max(36, Math.round(project.video_height * 0.075))
+    const ref = layoutRefHeight(project.video_width, project.video_height)
+    const fontSize = Math.max(36, Math.round(ref * 0.075))
     const patch: Partial<Style> = {
       font_size: fontSize,
       outline: Math.round(fontSize * 0.055 * 10) / 10,
       shadow: Math.round(fontSize * 0.022 * 10) / 10,
+      margin_h: Math.round(project.video_width * 0.045),
       margin_v: Math.round(project.video_height * 0.055),
       line_gap: Math.round(fontSize * 0.18),
       stagger: true,
@@ -320,7 +329,15 @@ export default function StylePanel() {
     )
   }
 
-  const controls = { draft, videoHeight: project.video_height, set, setNow, commit: flushStyle }
+  // 字号相关的滑块范围与警告线都以**版面锚点高度**为准，与推荐值同一把尺子；
+  // 传画面高度的话，非 16:9 工程上"推荐值"会落在"字号偏小"的警告区里自相矛盾。
+  const controls = {
+    draft,
+    refHeight: layoutRefHeight(project.video_width, project.video_height),
+    set,
+    setNow,
+    commit: flushStyle,
+  }
 
   return (
     <div className="sty-stage">

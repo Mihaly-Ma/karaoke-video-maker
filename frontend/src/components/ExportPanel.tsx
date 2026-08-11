@@ -13,6 +13,7 @@ import * as api from '../api/client'
 import type { ExportArtifact } from '../api/types'
 import { getLocale, t } from '../i18n'
 import { formatMissing, renderedCharset, useFontCoverage } from '../lib/fontCoverage'
+import { REFERENCE_ASPECT } from '../lib/geometry'
 import { formatMs } from '../lib/timeScale'
 import { useProject } from '../state/projectStore'
 import ExportCueRail, { buildCues } from './ExportCueRail'
@@ -151,6 +152,11 @@ export default function ExportPanel({ exportJobId, onExportStart, exportResult }
   const withGuide = useProject((s) => s.guideEnabled)
   const setWithGuide = useProject((s) => s.setGuideEnabled)
   const [error, setError] = useState<string | null>(null)
+  /**
+   * 补边到 16:9。**本地 state 而非 store**：它只影响这一次烧录出来的文件，
+   * 不影响预览，也不该跟着工程存盘——与 `withGuide`（预览也要听得到）不同。
+   */
+  const [padTo169, setPadTo169] = useState(false)
 
   const projectId = project?.id ?? null
   const artifacts = project?.exports ?? []
@@ -159,6 +165,14 @@ export default function ExportPanel({ exportJobId, onExportStart, exportResult }
   /** 素材页已经生成过引导声——决定预览听不听得到（导出没有它也能现场合成） */
   const guideReady = !!project?.guide_audio_path
   const useInstrumental = audioMode === 'instrumental' && hasInstrumental
+  /**
+   * 判据与后端 `render.geometry.ASPECT_TOLERANCE` 相同的 1.5% 相对容差：
+   * 1920×1088 这类 mod-16 尺寸只差 0.74%，不该被当成"需要补边"。
+   */
+  const isWidescreen =
+    !project?.video_width ||
+    !project?.video_height ||
+    Math.abs(project.video_width / project.video_height / REFERENCE_ASPECT - 1) <= 0.015
 
   const cues = useMemo(() => buildCues(project), [project])
 
@@ -209,6 +223,7 @@ export default function ExportPanel({ exportJobId, onExportStart, exportResult }
         project_id: project.id,
         with_guide: withGuide,
         use_instrumental: useInstrumental,
+        pad_to_16_9: padTo169,
       })
       onExportStart(job.job_id)
     } catch (e) {
@@ -258,6 +273,23 @@ export default function ExportPanel({ exportJobId, onExportStart, exportResult }
               onChange={(e) => setWithGuide(e.target.checked)}
             />
             {t('export.withGuide')}
+          </label>
+
+          {/*
+            补边只对非 16:9 的源有意义，所以已经是 16:9 时禁用并说明原因——
+            摆一个勾了没有任何效果的开关，比不摆更让人怀疑功能坏了。
+          */}
+          <label
+            className="checkbox-row"
+            title={isWidescreen ? t('export.padAlready') : t('export.padHint')}
+          >
+            <input
+              type="checkbox"
+              checked={padTo169 && !isWidescreen}
+              disabled={isWidescreen}
+              onChange={(e) => setPadTo169(e.target.checked)}
+            />
+            {t('export.pad169')}
           </label>
 
           {/*
