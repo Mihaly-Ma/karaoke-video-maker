@@ -179,6 +179,14 @@ jobs:
           - os: windows-latest
             plat: windows-x64-cuda
             cuda: true
+            # GPU 版**不出安装器**：CUDA 版 torch 一进 NSIS 必然撞穿 2 GB 硬上限
+            # （tauri-apps/tauri#7372），而它报的是一句与体积毫无关系的
+            # `error mmapping file is out of range`。v0.2.0 那次 tag 就是这么红的。
+            # 改出免安装 zip（zip64 无此限制），也是同类项目的通行形态。
+            #
+            # **别把这条删了**：scripts/package.py 的 docstring 与这里是同一份
+            # 契约的两半，上次红就是因为口径只写在那一半里，没写进这一半。
+            portable: true
 
     steps:
       - uses: actions/checkout@v4
@@ -218,18 +226,27 @@ jobs:
         shell: bash
         run: uv run python scripts/setup.py --install-cuda-torch
 
-      # GPU 包很吃盘：CUDA venv 约 3.5 GB + onedir 3.1 GB + Rust target + NSIS
-      # 的临时文件，估计 10 GB 上下，而 runner 只有十几 GB。磁盘满了的报错通常
-      # 出现在某个无关的步骤里（PyInstaller 写一半、或者 NSIS 压缩失败），
-      # 所以先把余量打出来——真撞上时才不用从头猜。
-      - name: 磁盘余量
+      # GPU 包很吃盘：CUDA venv 约 3.5 GB + onedir 3.1 GB + Rust target + 免安装
+      # zip 约 1.9 GB，12 GB 上下，而 runner 只有十几 GB。磁盘满了的报错通常出现
+      # 在某个无关的步骤里（PyInstaller 写一半、或者 zip 写一半），所以先把余量
+      # 打出来——真撞上时才不用从头猜。
+      - name: 磁盘余量（出包前）
         if: matrix.cuda
         shell: pwsh
         run: Get-PSDrive C | Select-Object Used, Free
 
       - name: 出包
         # 跨平台一条命令：脚本内部处理 npm.cmd / 路径分隔符等差异。
-        run: uv run python scripts/package.py
+        # GPU 版加 --portable 出免安装 zip，理由见 matrix 里 portable 那条注释。
+        shell: bash
+        run: uv run python scripts/package.py ${{ matrix.portable && '--portable' || '' }}
+
+      # 出包之后再打一次：撞盘时这两个数一比就知道是哪一段吃掉的。
+      # `always()` 是故意的——出包失败时这个数字才最值钱。
+      - name: 磁盘余量（出包后）
+        if: always() && matrix.cuda
+        shell: pwsh
+        run: Get-PSDrive C | Select-Object Used, Free
 
       # 产物名要能一眼看出**平台与版本**。Tauri 出来的文件名只带 productName +
       # Cargo 版本号，认不出是哪台机器、哪个 tag 出的，所以在这里重命名一次。
@@ -254,15 +271,18 @@ jobs:
           mkdir -p artifacts
           shopt -s nullglob
           n=0
+          # dist-portable/*.zip 是 GPU 版的形态（--portable），与安装包同等对待：
+          # 下面那条 n -eq 0 的兜底对两条路都成立。
           for f in src-tauri/target/release/bundle/dmg/*.dmg \
                    src-tauri/target/release/bundle/nsis/*.exe \
-                   src-tauri/target/release/bundle/msi/*.msi; do
+                   src-tauri/target/release/bundle/msi/*.msi \
+                   dist-portable/*.zip; do
             cp "$f" "artifacts/kvm-${ver}-${{ matrix.plat }}.${f##*.}"
             n=$((n + 1))
           done
           if [[ $n -eq 0 ]]; then
-            echo "::error::没有找到任何安装包，package.py 可能没走到出包这一步"
-            ls -R src-tauri/target/release/bundle || true
+            echo "::error::没有找到任何产物，package.py 可能没走到出包这一步"
+            ls -R src-tauri/target/release/bundle dist-portable || true
             exit 1
           fi
           ls -lh artifacts
