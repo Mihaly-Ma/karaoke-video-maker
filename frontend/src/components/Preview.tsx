@@ -87,6 +87,7 @@ import {
   checkPreviewEnvironment,
   describeError,
   hasFrameCallback,
+  parsePlayRes,
   requestFrameLoop,
   SubtitleOverlay,
   type FrameMeta,
@@ -554,8 +555,24 @@ export function Preview({ className }: PreviewProps) {
   const setAudioMode = useProject((s) => s.setAudioMode)
   const setGuideEnabled = useProject((s) => s.setGuideEnabled)
   const refreshProject = useProject((s) => s.refresh)
+  const padTo169 = useProject((s) => s.padTo169)
+  /** 画面区的实际画布尺寸，取自 ASS 的 PlayRes（补边后与工程记的尺寸不同） */
+  const [canvasSize, setCanvasSize] = useState<{ width: number; height: number } | null>(null)
+  /** 补边开关的 ref 镜像：`refreshAss` 是空依赖的 useCallback，只能这样读到当前值 */
+  const padTo169Ref = useRef(padTo169)
+  padTo169Ref.current = padTo169
 
   const videoRef = useRef<HTMLVideoElement | null>(null)
+  /**
+   * 字幕画布的宿主。React 不往里放任何子节点，画布由字幕层独占——与
+   * `StyleFilmPreview` 同一形态。
+   *
+   * **为什么不再用 JASSUB 的视频模式**：视频模式下它按 `<video>` 的**内容矩形**
+   * 定位自己的画布（`_getElementBoundingBox`），也就是说字幕永远画不进黑边。
+   * 勾了「补黑边到 16:9」之后预览纹丝不动，根子就在这里。画布模式把画布铺满整个
+   * 画面区，画布尺寸直接取 ASS 的 PlayRes，补边与不补边走同一条路。
+   */
+  const overlayHostRef = useRef<HTMLDivElement | null>(null)
   const overlayRef = useRef<SubtitleOverlay | null>(null)
   const audioRef = useRef<AudioEngine | null>(null)
   const seekBarRef = useRef<HTMLInputElement | null>(null)
@@ -877,19 +894,42 @@ export function Preview({ className }: PreviewProps) {
   // --- 字幕层：工程 / 视频 / 字体变化时重建 ---------------------------------
 
   useEffect(() => {
-    const video = videoRef.current
-    if (!video || !projectId || !videoActive || blocked) return
+    const host = overlayHostRef.current
+    if (!host || !projectId || !videoActive || blocked) return
 
     let disposed = false
     let created: SubtitleOverlay | null = null
+    const canvas = document.createElement('canvas')
+    Object.assign(canvas.style, {
+      position: 'absolute',
+      inset: '0',
+      width: '100%',
+      height: '100%',
+      display: 'block',
+    })
+    host.appendChild(canvas)
+
     setOverlayError(null)
     setOverlayLoading(true)
 
     void (async () => {
       try {
-        const { ass } = await api.buildAss(projectId)
+        const { ass } = await api.buildAss(projectId, padTo169)
         if (disposed) return
-        created = await SubtitleOverlay.create({ video, ass, fontFamily: fontName })
+        // 画布尺寸取这份 ASS 自己声明的 PlayRes：补边与否的规则只在后端
+        // `render.geometry.plan_canvas` 里有一份，前端再算一遍必然漂移。
+        // 宽高比与 PlayRes 对不上时 JASSUB 会做信箱式内缩，字幕被拉伸（§5.12）。
+        const res = parsePlayRes(ass)
+        if (res) setCanvasSize(res)
+        created = await SubtitleOverlay.create({
+          canvas,
+          // 兜底尺寸从 store 现取，不进依赖数组：它只在"ASS 里没有 PlayRes"
+          // 这条降级路径上有用，为它重建整个字幕层不值得
+          width: res?.width ?? (useProject.getState().project?.video_width || 1920),
+          height: res?.height ?? (useProject.getState().project?.video_height || 1080),
+          ass,
+          fontFamily: fontName,
+        })
         if (disposed) {
           void created.destroy()
           created = null
@@ -911,8 +951,10 @@ export function Preview({ className }: PreviewProps) {
       // disposed 不再复位 loading —— 不在这里清掉，「字幕渲染器加载中…」会一直挂着
       setOverlayLoading(false)
       void created?.destroy()
+      // 创建失败时 JASSUB 没接管这块画布，得自己收
+      canvas.remove()
     }
-  }, [projectId, videoActive, fontName, blocked])
+  }, [projectId, videoActive, fontName, padTo169, blocked])
 
   // --- ASS 刷新：工程一变就重新拉 -------------------------------------------
 
@@ -925,7 +967,7 @@ export function Preview({ className }: PreviewProps) {
     try {
       do {
         assDirtyRef.current = false
-        const { ass } = await api.buildAss(id)
+        const { ass } = await api.buildAss(id, padTo169Ref.current)
         overlayRef.current?.update(ass)
         setOverlayError(null)
       } while (assDirtyRef.current)
@@ -970,7 +1012,9 @@ export function Preview({ className }: PreviewProps) {
     setRvfcMissing(!hasFrameCallback(video))
 
     return requestFrameLoop(video, (meta: FrameMeta) => {
-      overlayRef.current?.noteFrame(meta)
+      // 画布模式没有 rVFC 自动重绘，时钟只能由这里推——`renderAt` 是它唯一的入口。
+      // 内部自己排队（只保留最后一次），逐帧调用不会把 IPC 排成长队。
+      void overlayRef.current?.renderAt(meta.mediaTime * 1000)
 
       emitPlayhead(Math.round(meta.mediaTime * 1000))
 
@@ -1310,10 +1354,9 @@ export function Preview({ className }: PreviewProps) {
    * `<video>` 的实际内容区定位自己的 canvas（`_getElementBoundingBox`），
    * 盒子比例不对时字幕仍贴着画面，只是画面被摆在了一个错误形状的框里。
    */
-  const filmAspect =
-    project.video_width > 0 && project.video_height > 0
-      ? `${project.video_width} / ${project.video_height}`
-      : '16 / 9'
+  const filmW = canvasSize?.width ?? project.video_width
+  const filmH = canvasSize?.height ?? project.video_height
+  const filmAspect = filmW > 0 && filmH > 0 ? `${filmW} / ${filmH}` : '16 / 9'
 
   return (
     <div className={className} style={styles.root}>
@@ -1336,6 +1379,8 @@ export function Preview({ className }: PreviewProps) {
             style={styles.video}
           />
         )}
+        {/* 字幕画布的宿主：铺满整个画面区，字幕因此能画进补边的黑边里 */}
+        <div ref={overlayHostRef} style={styles.overlayHost} />
         {stageNote && (
           <div style={styles.noVideo}>
             <span style={styles.noVideoTitle}>{stageNote.title}</span>
@@ -1526,6 +1571,8 @@ const styles = {
   // 画面缩在中间、两侧一大片黑，编辑时看到的形状根本不是成片的形状。
   stage: { position: 'relative', background: '#000', aspectRatio: '16 / 9', overflow: 'hidden' },
   video: { width: '100%', height: '100%', objectFit: 'contain', display: 'block' },
+  // 铺满画面区、不吃鼠标事件（走带与徽章仍要可点）
+  overlayHost: { position: 'absolute', inset: 0, pointerEvents: 'none' },
   noVideo: {
     position: 'absolute',
     inset: 0,

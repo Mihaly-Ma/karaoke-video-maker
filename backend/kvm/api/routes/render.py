@@ -285,14 +285,29 @@ def _build_ass_text(
 # ---- POST /ass、GET /preview.ass ----
 
 
+def _preview_canvas(dto: ProjectDTO, *, pad_to_16_9: bool) -> tuple[int, int]:
+    """预览用的画布尺寸。
+
+    工程里的 `video_width/height` 已经是方形像素的显示尺寸（`heal_video_size`
+    保证），所以这里不必再探一次 SAR；补边则要与导出走**同一个** `plan_canvas`，
+    否则预览与成片的版面会分叉——而这正是 §5.12 要杜绝的那种"到成片里才暴露"
+    的差异。
+    """
+    plan = plan_canvas(dto.video_width, dto.video_height, pad_to_16_9=pad_to_16_9)
+    return plan.width, plan.height
+
+
 class AssRequest(BaseModel):
     """生成 ASS 预览的请求体。
 
-    只需要工程 id——引导声/伴奏开关只影响导出时选用的音轨，不影响字幕文本本身，
-    因此不复用 `RenderRequest`，避免调用方误以为这些字段对预览有意义。
+    引导声/伴奏开关不在这里——它们只影响导出选用的音轨，不影响字幕文本本身。
+    `pad_to_16_9` 则**必须在**：补边改的是画布尺寸，也就是 ASS 的 PlayRes，
+    字号相对画面的大小、边距、上下行错开、一行放几个字全都跟着变。
+    预览看不到这些变化就等于没有预览（§5.12 WYSIWYG）。
     """
 
     project_id: str
+    pad_to_16_9: bool = False
 
 
 @router.post("/ass", response_model=AssResponse)
@@ -303,12 +318,17 @@ def generate_ass(body: AssRequest, request: Request) -> AssResponse:
     `_get_metrics()` 复用的 `LibassMetrics` 单例上。
     """
     dto = _get_project(request, body.project_id)
-    ass_text = _build_ass_text(dto)
+    ass_text = _build_ass_text(dto, canvas=_preview_canvas(dto, pad_to_16_9=body.pad_to_16_9))
     return AssResponse(ass=ass_text, event_count=ass_text.count("Dialogue:"))
 
 
 @router.get("/preview.ass", response_class=PlainTextResponse)
-def preview_ass(project_id: str, request: Request, embed_fonts: bool = False) -> PlainTextResponse:
+def preview_ass(
+    project_id: str,
+    request: Request,
+    embed_fonts: bool = False,
+    pad_to_16_9: bool = False,
+) -> PlainTextResponse:
     """与 `/ass` 等价，但以 `text/plain` 返回，便于前端直接把响应体喂给
     JASSUB 的 `subContent`（JASSUB 吃的是原始 ASS 文本，不是 JSON 包装）。
 
@@ -319,7 +339,9 @@ def preview_ass(project_id: str, request: Request, embed_fonts: bool = False) ->
     没有这个开关，导出侧的 ASS 只存在于烧录作业内部，验证只能靠跑完整出片。
     """
     dto = _get_project(request, project_id)
-    ass_text = _build_ass_text(dto, embed_fonts=embed_fonts)
+    ass_text = _build_ass_text(
+        dto, embed_fonts=embed_fonts, canvas=_preview_canvas(dto, pad_to_16_9=pad_to_16_9)
+    )
     return PlainTextResponse(content=ass_text, media_type="text/plain; charset=utf-8")
 
 

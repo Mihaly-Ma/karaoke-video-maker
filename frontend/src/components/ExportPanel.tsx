@@ -153,10 +153,14 @@ export default function ExportPanel({ exportJobId, onExportStart, exportResult }
   const setWithGuide = useProject((s) => s.setGuideEnabled)
   const [error, setError] = useState<string | null>(null)
   /**
-   * 补边到 16:9。**本地 state 而非 store**：它只影响这一次烧录出来的文件，
-   * 不影响预览，也不该跟着工程存盘——与 `withGuide`（预览也要听得到）不同。
+   * 补边到 16:9。**存在 store 里，和 `withGuide` 一样**：它既是导出设置也是预览
+   * 设置。第一版把它做成了本组件的本地 state，理由是"只影响这一次烧录"——那是错的：
+   * 补边改的是画布尺寸（ASS 的 PlayRes），字号相对画面的大小、边距、上下行错开、
+   * 一行放几个字全都跟着变。勾了却看不到，用户只能靠导出成片来确认版面，
+   * 而那正是这个工具要消灭的东西（§5.12）。
    */
-  const [padTo169, setPadTo169] = useState(false)
+  const padTo169 = useProject((s) => s.padTo169)
+  const setPadTo169 = useProject((s) => s.setPadTo169)
 
   const projectId = project?.id ?? null
   const artifacts = project?.exports ?? []

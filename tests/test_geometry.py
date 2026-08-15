@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -231,3 +232,41 @@ def test_download_geometry_survives_missing_stream() -> None:
     geo = _video_geometry({})
     assert geo["video_width"] is None
     assert geo["video_height"] is None
+
+
+# ---- 预览与导出必须按同一个画布排版 ----
+
+
+def test_预览ass的playres跟随补边开关(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """勾了「补黑边到 16:9」，预览拿到的 ASS 必须换画布。
+
+    守的是一条**接线**而不是一段算法：补边规则本身由上面那组 `plan_canvas` 测试
+    覆盖，这里验的是"路由参数真的走到了 `_build_ass_text` 的画布上"。
+
+    第一版把补边做成了纯导出选项，预览纹丝不动——用户只能靠导出成片来确认版面，
+    而那正是这个工具要消灭的东西（CLAUDE.md §5.12 WYSIWYG）。这类"存在但没接上"
+    的缺陷不会被任何算法测试发现，只有打在契约上的断言才拦得住（§2.6）。
+    """
+    monkeypatch.setenv("KVM_DATA_DIR", str(tmp_path / "projects"))
+    from fastapi.testclient import TestClient
+    from kvm.api.app import app
+
+    with TestClient(app) as client:
+        pid = client.post("/api/projects/", json={"title": "方画幅"}).json()["id"]
+
+        def _square(p: object) -> None:
+            p.video_width = 1080  # type: ignore[attr-defined]
+            p.video_height = 1080  # type: ignore[attr-defined]
+
+        app.state.store.mutate(pid, _square)
+
+        def playres(pad: bool) -> tuple[int, int]:
+            r = client.post("/api/render/ass", json={"project_id": pid, "pad_to_16_9": pad})
+            assert r.status_code == 200, r.text
+            ass = r.json()["ass"]
+            x = int(re.search(r"PlayResX:\s*(\d+)", ass).group(1))  # type: ignore[union-attr]
+            y = int(re.search(r"PlayResY:\s*(\d+)", ass).group(1))  # type: ignore[union-attr]
+            return x, y
+
+        assert playres(False) == (1080, 1080)
+        assert playres(True) == (1920, 1080)

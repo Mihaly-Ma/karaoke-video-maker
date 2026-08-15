@@ -27,6 +27,7 @@ from kvm.api.schemas import (
 )
 from kvm.api.store import ProjectStore
 from kvm.editing import ops
+from kvm.media.download import heal_video_size
 from kvm.models.karaoke import normalize_font_chain
 from pydantic import BaseModel
 
@@ -110,10 +111,15 @@ def create_project(body: ProjectCreateRequest, request: Request) -> ProjectDTO:
 
 @projects_router.get("/{project_id}", response_model=ProjectDTO)
 def get_project(project_id: str, request: Request) -> ProjectDTO:
+    store = _store(request)
     try:
-        return _store(request).get(project_id)
+        project = store.get(project_id)
     except KeyError as exc:
         raise _not_found(exc) from exc
+    # 顺手纠正存量工程记错的画面尺寸（那两个数就是 ASS 的 PlayRes，记错了字会
+    # 变形）。挂在这里而不是媒体探测端点上，是因为**这条路径每次打开工程必走**——
+    # 详见 `heal_video_size` 的文档字符串。探测不到就原样返回，不阻断打开工程。
+    return heal_video_size(store, project)
 
 
 @projects_router.delete("/{project_id}")

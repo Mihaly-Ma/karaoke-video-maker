@@ -386,6 +386,37 @@ export interface PreviewFontSource {
   url: string
 }
 
+/**
+ * 从 ASS 头部读出这份字幕的画布尺寸（`PlayResX/PlayResY`）。
+ *
+ * ## 为什么画布也要从 ASS 里读
+ *
+ * 与字体链（`parseFontSpec`）同一个理由，而且更硬：**画布尺寸就是排版坐标系**。
+ * 预览画布的宽高比一旦与 ASS 的 PlayRes 不一致，JASSUB 会按自己那个比例做信箱式
+ * 内缩，字幕当场被拉伸——这不是"难看"，是所见与所得直接分叉（§5.12）。
+ *
+ * 它还随「补黑边到 16:9」变化：补边把 1080×1080 变成 1920×1080，字号相对画面、
+ * 边距、上下行错开全都跟着变。让前端自己再算一遍补边规则，就等于把
+ * `render.geometry.plan_canvas` 抄成两份——本仓已经吃过"同一规则两份实现漂移"
+ * 的亏。从 ASS 读则**由构造保证一致**：这份 ASS 按哪个画布排的，预览就按哪个画。
+ *
+ * 读不到时返回 null，调用方退回工程记的尺寸（§2.5 降级不终止）。
+ */
+export function parsePlayRes(ass: string): { width: number; height: number } | null {
+  let width = 0
+  let height = 0
+  for (const raw of ass.split('\n')) {
+    const line = raw.trim()
+    if (line.startsWith('[Events]')) break
+    const m = /^PlayRes([XY]):\s*(\d+)/.exec(line)
+    if (!m) continue
+    if (m[1] === 'X') width = Number(m[2])
+    else height = Number(m[2])
+    if (width > 0 && height > 0) return { width, height }
+  }
+  return width > 0 && height > 0 ? { width, height } : null
+}
+
 /** ASS 头部声明的预览字体契约，见后端 `render.ass_builder.PREVIEW_FONTS_TAG` */
 export interface PreviewFontSpec {
   /** 有序字体候选链，首项即主字体 */

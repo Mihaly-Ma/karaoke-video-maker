@@ -239,10 +239,15 @@ def _write_test_video(ffmpeg_bin: str, path: Path, *, size: str, aspect: str | N
         ("640x480", "16:9", (854, 480)),
     ],
 )
-def test_probe_批量接口纠正存量工程的画面尺寸(
+def test_打开工程时纠正存量工程的画面尺寸(
     client_and_project, tmp_path: Path, size: str, aspect: str | None, expected: tuple[int, int]
 ) -> None:
     """光修下载路径救不了已经建好的工程——那些工程停在默认 1920×1080 上。
+
+    **验的是 `GET /api/projects/{id}`，不是媒体探测端点。** 第一版挂在
+    `GET /api/media/probe/{id}` 上，而前端压根没有调用点，自愈成了死代码——
+    测试当时照样是绿的，因为它自己去调了那个没人调的端点。这就是 §2.6 说的
+    "检查存在与检查生效是两回事"：断言必须打在**产品真的会走的那条路径**上。
 
     尺寸是文件的既成事实，所以纠正走 `update_derived` **不占撤销格**：用户按
     Cmd+Z 撤掉的应该是自己那次编辑，不是"工程终于知道了视频有多大"。
@@ -260,7 +265,7 @@ def test_probe_批量接口纠正存量工程的画面尺寸(
     assert (before.video_width, before.video_height) == (1920, 1080)  # 默认值，与实际不符
     undo_depth = store.history_depth(project_id)
 
-    assert client.get(f"/api/media/probe/{project_id}").status_code == 200
+    assert client.get(f"/api/projects/{project_id}").status_code == 200
 
     after = store.get(project_id)
     assert (after.video_width, after.video_height) == expected

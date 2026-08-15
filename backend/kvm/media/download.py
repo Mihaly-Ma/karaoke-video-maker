@@ -149,6 +149,51 @@ def _video_geometry(video: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def heal_video_size(store: ProjectStore, project: ProjectDTO) -> ProjectDTO:
+    """工程记的画面尺寸与实际视频对不上时就地纠正，返回（可能已更新的）工程。
+
+    需要它是因为**存量工程**：下载路径曾经根本不回写尺寸，那些工程停在默认的
+    1920×1080 上，而 ASS 的 PlayRes 就是这两个数——非 16:9 的源上 libass 会按
+    `帧高/1080` 缩字号、按 `帧宽/1920` 缩坐标，两个比例不等，字当场变形
+    （`render.geometry` 模块文档）。光修下载路径救不了已经建好的工程。
+
+    **挂在工程加载路径上，不是挂在媒体探测端点上。** 第一版挂在
+    `GET /api/media/probe/{id}` 上，看着是最自然的位置——结果前端压根没有调用点
+    （轨道信息仍走 `MediaTrackCard` 自己的客户端解析），自愈成了死代码，用户打开
+    素材步骤看到的还是 1920。这正是 CLAUDE.md §2.6 记着的那条：**检查存在与
+    检查生效是两回事，加接口时要连调用点一起验。**
+
+    尺寸是文件的既成事实、不是用户意图，所以走 `update_derived` **不占撤销格**
+    （§8）：用户按 Cmd+Z 时撤掉的应该是自己那次编辑，不是"工程终于知道了视频
+    有多大"。写进去的是**显示尺寸**（方形像素），与 ASS PlayRes、前端
+    `<video>.videoWidth` 同一口径。
+
+    探测不到就原样返回：这是顺手纠正，不该让"打开工程"这件事失败（§2.5）。
+    本机没装 ffmpeg 时尤其如此——那时用户更需要能打开工程看看自己的数据还在。
+    """
+    if not project.video_path:
+        return project
+    try:
+        from kvm.media.probe import probe_track_cached
+
+        ffprobe_bin = _ffprobe_bin(find_ffmpeg_with_libass())
+        info = probe_track_cached(
+            ffprobe_bin, project_media_dir(project.id), Path(project.video_path)
+        )
+    except (RuntimeError, OSError, subprocess.SubprocessError, ValueError):
+        return project
+
+    width, height = info.display_width, info.display_height
+    if not width or not height or (project.video_width, project.video_height) == (width, height):
+        return project
+
+    def _apply(p: ProjectDTO) -> None:
+        p.video_width = width
+        p.video_height = height
+
+    return store.update_derived(project.id, _apply, label="纠正画面尺寸")
+
+
 def _probe_duration(ffprobe_bin: str, path: Path) -> float:
     return float(_ffprobe_json(ffprobe_bin, path)["format"]["duration"])
 

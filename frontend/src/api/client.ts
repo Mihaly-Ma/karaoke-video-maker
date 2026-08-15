@@ -416,8 +416,16 @@ export const checkFontCoverage = (
 
 // ---- 渲染 ----
 
-export const buildAss = (projectId: string) =>
-  post<{ ass: string; event_count: number }>('/render/ass', { project_id: projectId })
+/**
+ * 生成预览用 ASS。`padTo169` 必须一路传到后端：补边改的是画布尺寸，也就是 ASS 的
+ * PlayRes——字号相对画面的大小、边距、上下行错开、一行放几个字全跟着变。
+ * 预览拿一份没补边的 ASS 去显示，勾选框就等于没生效（§5.12）。
+ */
+export const buildAss = (projectId: string, padTo169 = false) =>
+  post<{ ass: string; event_count: number }>('/render/ass', {
+    project_id: projectId,
+    pad_to_16_9: padTo169,
+  })
 
 /** 启动烧录。`start_s` / `duration_s` 给了就是片段试渲染，产物会被标成 `is_excerpt`。 */
 export const exportVideo = (body: {

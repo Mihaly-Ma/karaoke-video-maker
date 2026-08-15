@@ -66,6 +66,16 @@ interface ProjectState {
    */
   guideEnabled: boolean
   /**
+   * 补黑边到 16:9。**既是导出设置也是预览设置，只存一份**——与 `guideEnabled`
+   * 同一性质，理由也一样：补边改的是画布尺寸（ASS 的 PlayRes），字号相对画面的
+   * 大小、边距、上下行错开、一行放几个字全都跟着变。它一旦只作用于导出，
+   * 用户就只能靠导出成片来确认版面，而那正是这个工具要消灭的东西（§5.12）。
+   *
+   * 放在 store 而不是工程 JSON：它是"这次想输出成什么画幅"，不是歌词数据的一部分，
+   * 也不该占撤销格。已经是 16:9 的工程上它是空操作（后端 `plan_canvas` 判定）。
+   */
+  padTo169: boolean
+  /**
    * 时间轴波形**画**哪条轨。与 `audioMode`（耳朵听哪条轨）刻意分开：
    * 对着人声的波形能一眼看出每个字的起音在哪，而耳朵里放伴奏才不被原唱带着走，
    * 绑在一起就只能二选一。`audio` = 原曲混音。
@@ -101,6 +111,7 @@ interface ProjectState {
   select: (s: Selection) => void
   setAudioMode: (m: 'original' | 'instrumental') => void
   setGuideEnabled: (v: boolean) => void
+  setPadTo169: (v: boolean) => void
   setWaveSource: (m: 'audio' | 'instrumental' | 'vocals') => void
   setFollowPlayhead: (v: boolean) => void
 
@@ -173,6 +184,7 @@ export const useProject = create<ProjectState>((set, get) => {
     selection: { kind: 'none' },
     audioMode: 'original',
     guideEnabled: false,
+    padTo169: false,
     waveSource: 'audio',
     followPlayhead: true,
     canUndo: false,
@@ -225,6 +237,7 @@ export const useProject = create<ProjectState>((set, get) => {
     select: (s) => set({ selection: s }),
     setAudioMode: (m) => set({ audioMode: m }),
     setGuideEnabled: (v) => set({ guideEnabled: v }),
+    setPadTo169: (v) => set({ padTo169: v }),
     setWaveSource: (m) => set({ waveSource: m }),
     setFollowPlayhead: (v) => set({ followPlayhead: v }),
 
