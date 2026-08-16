@@ -764,29 +764,52 @@ function usePickedWords(paperRef: RefObject<HTMLDivElement>): PickBox[] {
        * 而同一视觉行的字底边永远齐平，差得远的那才是真的换了行。
        */
       /*
-       * 同一视觉行的容差。带注音的字与不带的，基线落点差几个像素——容差太小
-       * 会把一行拆成两块，而两块的边框贴在一起就是一道竖线（在「ゆらゆら」
-       * 与下一个词之间最容易看到）。真正的换行差着一整个行高（约 54px），
-       * 所以 16px 既吃得下同行的抖动，又不会把两行并进一块。
+       * 先按**行**分组，再在行内按基线聚类。
+       *
+       * 只按基线聚类是不够的：同一行里带注音的字与不带的、以及词间那些几像素
+       * 宽的空格，基线能差出十几个像素（实测 17px）。差得超过容差就裂成两块，
+       * 于是「ゆらゆら｜ゆらゆら」中间冒出一道竖线，有时还是一小块 6px 宽的
+       * 独立方框。容差因此跟着字高走（0.6 倍），行内怎么抖都并得回来，
+       * 而真正的换行差着一整个行高，并不进来。
        */
-      const LINE_EPS = 16
+      const byLine = new Map<Element, HTMLElement[]>()
+      for (const ch of picked) {
+        const lineEl = ch.closest('.kvm-ruby__line')
+        if (!lineEl) continue
+        const cur = byLine.get(lineEl)
+        if (cur) cur.push(ch)
+        else byLine.set(lineEl, [ch])
+      }
       const rows: { l: number; r: number; t: number; b: number }[] = []
-      const items = picked
-        .map((ch) => ({
-          r: ch.getBoundingClientRect(),
-          // 注音挂在词上，框要连注音一起罩住，所以纵向取所属词的范围
-          own: ch.closest<HTMLElement>('.kvm-ruby__unit')?.getBoundingClientRect() ?? null,
-        }))
-        .sort((a, b) => a.r.bottom - b.r.bottom || a.r.left - b.r.left)
-      for (const it of items) {
-        const top = Math.min(it.own?.top ?? it.r.top, it.r.top)
-        const last = rows[rows.length - 1]
-        if (last && Math.abs(it.r.bottom - last.b) <= LINE_EPS) {
-          last.l = Math.min(last.l, it.r.left)
-          last.r = Math.max(last.r, it.r.right)
-          last.t = Math.min(last.t, top)
-        } else {
-          rows.push({ l: it.r.left, r: it.r.right, t: top, b: it.r.bottom })
+      for (const chs of byLine.values()) {
+        const items = chs
+          .map((ch) => ({
+            r: ch.getBoundingClientRect(),
+            // 注音挂在词上，框要连注音一起罩住，所以纵向取所属词的范围
+            own: ch.closest<HTMLElement>('.kvm-ruby__unit')?.getBoundingClientRect() ?? null,
+          }))
+          .sort((a, b) => a.r.bottom - b.r.bottom || a.r.left - b.r.left)
+        /*
+         * 容差按**行内最高的那个字**算，不按第一个——第一个可能是词间那种
+         * 几像素高的空格，拿它当尺子会算出一个比真实抖动还小的容差，
+         * 于是同一行照样裂成两块（实测差 17px，而按空格算出来只有 12px）。
+         * 一行内的抖动来自"有没有注音"，最多就是一个字高的量级；
+         * 真正的换行差着一整个行高（约 1.9 倍字高），半个字高卡在两者中间。
+         */
+        const maxH = items.reduce((m, it) => Math.max(m, it.r.height), 0)
+        const eps = Math.max(24, maxH * 0.5)
+        let last: { l: number; r: number; t: number; b: number } | null = null
+        for (const it of items) {
+          const top = Math.min(it.own?.top ?? it.r.top, it.r.top)
+          if (last && Math.abs(it.r.bottom - last.b) <= eps) {
+            last.l = Math.min(last.l, it.r.left)
+            last.r = Math.max(last.r, it.r.right)
+            last.t = Math.min(last.t, top)
+            last.b = Math.max(last.b, it.r.bottom)
+          } else {
+            last = { l: it.r.left, r: it.r.right, t: top, b: it.r.bottom }
+            rows.push(last)
+          }
         }
       }
       /*
@@ -794,14 +817,19 @@ function usePickedWords(paperRef: RefObject<HTMLDivElement>): PickBox[] {
        * 现在框是整块画的，外扩不会再像逐字那样在接缝处叠出竖线。
        */
       const PAD_X = 3
-      // 上下同样留一口气：框顶原本正压在注音的顶边上，看着像把假名切了一刀
-      const PAD_Y = 3
+      /*
+       * 上下留白不对称：上边挨着的是注音那行小字，贴太近会读成"把假名圈了一半"；
+       * 下边只是字的底，给一点就够。两边都按 7px 给的话，跨行划选时上下两块
+       * 会碰在一起（行距本来就不宽）。
+       */
+      const PAD_TOP = 6
+      const PAD_BOTTOM = 2
       setBoxes(
         rows.map((v) => ({
           x: v.l - base.left + paper.scrollLeft - PAD_X,
-          y: v.t - base.top + paper.scrollTop - PAD_Y,
+          y: v.t - base.top + paper.scrollTop - PAD_TOP,
           w: v.r - v.l + PAD_X * 2,
-          h: v.b - v.t + PAD_Y * 2,
+          h: v.b - v.t + PAD_TOP + PAD_BOTTOM,
         })),
       )
     }
@@ -1329,6 +1357,11 @@ const CSS = `
   align-items: flex-end;
   gap: var(--sp-3);
   padding: var(--sp-1) var(--sp-2);
+  /*
+   * 行间留一道缝：划词高亮要连注音一起罩住，框比字高出一截，
+   * 行距不够时跨行划选的上下两块会贴在一起，读不出是两行。
+   */
+  margin-bottom: var(--sp-1);
   border-radius: var(--r-md);
 }
 .kvm-ruby__line[data-active] { background: var(--accent-weak); }
@@ -1513,21 +1546,51 @@ const CSS = `
   position: relative;
   display: inline-block;
   cursor: pointer;
-  border-bottom: 0.09em solid transparent;
 }
-.kvm-ruby__unit[data-src=provider] { border-bottom-color: var(--src-provider); }
-.kvm-ruby__unit[data-src=dict] { border-bottom-color: var(--src-aligned); }
-.kvm-ruby__unit[data-src=guess] { border-bottom-color: var(--src-interp); }
-.kvm-ruby__unit[data-src=manual] { border-bottom-color: var(--src-manual); }
+/*
+ * 来源那条线画在伪元素上、抬到**字底附近**。
+ *
+ * 用 border-bottom 时它落在 inline-block 的盒底，而盒底比字底低着大半个行距，
+ * 于是线离字远得像是画给下一行的。抬起来之后一眼就能对上是哪个字的来源。
+ */
+.kvm-ruby__unit::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0.28em;
+  height: 0.09em;
+  background: transparent;
+  pointer-events: none;
+}
+.kvm-ruby__unit[data-src=provider]::after { background: var(--src-provider); }
+.kvm-ruby__unit[data-src=dict]::after { background: var(--src-aligned); }
+.kvm-ruby__unit[data-src=guess]::after { background: var(--src-interp); }
+.kvm-ruby__unit[data-src=manual]::after { background: var(--src-manual); }
 /* 有汉字却没读音：虚线 + 危险色，它比"猜错了"更需要先被看到 */
-.kvm-ruby__unit[data-src=missing] {
-  border-bottom-style: dotted;
-  border-bottom-color: var(--danger);
+.kvm-ruby__unit[data-src=missing]::after {
+  background: none;
+  border-bottom: 0.09em dotted var(--danger);
 }
 .kvm-ruby__unit:hover { background: var(--accent-weak); }
 .kvm-ruby__unit[data-selected] {
   background: var(--accent-weak);
   outline: var(--hairline-strong);
+}
+/*
+ * 正在划词时，**选中词与 hover 的装饰全部让位**。
+ *
+ * 三样东西画在同一块地方：划选底、选中词的底色 + 灰色外框、鼠标底下的 hover 底。
+ * 叠起来的结果是划选带里凭空出现一道竖线（选中词外框的边）和一段更深的色块
+ * （hover），看着像划选被切成了几块。此刻用户关心的只有"划到哪儿"，
+ * 不是上一次点中过谁、鼠标正压着谁。
+ */
+.kvm-ruby__paper:has(.kvm-ruby__pickbox) .kvm-ruby__unit[data-selected] {
+  background: transparent;
+  outline: none;
+}
+.kvm-ruby__paper:has(.kvm-ruby__pickbox) .kvm-ruby__unit:hover {
+  background: transparent;
 }
 .kvm-ruby__unit:focus-visible { outline: 2px solid var(--accent); }
 .kvm-ruby__rt {
