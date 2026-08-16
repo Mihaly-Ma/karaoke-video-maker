@@ -40,6 +40,7 @@ import { useEffect, useState } from 'react'
 
 import { useProject } from '../state/projectStore'
 import EditInspector from './EditInspector'
+import EditReading from './EditReading'
 import EditVoice from './EditVoice'
 import Preview from './Preview'
 import { RubyPaper, RubyStyles, useRubyEditing } from './RubyEditor'
@@ -153,10 +154,15 @@ export default function EditStage() {
                   onToggleReview={() => setReviewOpen((v) => !v)}
                 />
                 {/*
-                  声部指派贴在正文下方，而不是底栏检查器里：声部是行/token 的属性，
-                  而"选中哪一行、哪个字"这个动作就发生在上面这块正文里。
-                  见 EditVoice 的文件头。
+                  正文下方贴两条：先注音、后声部。**顺序按频次排**——
+                  逐条核对机器猜的读音是这一步最长的一段活，它要离正文最近；
+                  声部一首歌只指派几次。
+
+                  两条都在这儿而不在底栏检查器里，是同一条判据：控件跟操作对象
+                  待在一起（各自文件头有详述）。底栏因此只剩时间，而时间的操作
+                  对象——逐字轴——就在它正上方。
                 */}
+                <EditReading editing={editing} />
                 <EditVoice />
               </>
             }

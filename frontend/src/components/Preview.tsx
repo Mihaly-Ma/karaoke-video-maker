@@ -80,6 +80,17 @@ import {
   type ChangeEvent,
   type CSSProperties,
 } from 'react'
+import {
+  AudioOutlined,
+  CaretRightOutlined,
+  LineChartOutlined,
+  MutedOutlined,
+  PauseOutlined,
+  SlidersOutlined,
+  SoundOutlined,
+} from '@ant-design/icons'
+import type { ComponentType } from 'react'
+
 import * as api from '../api/client'
 import type { JobStatus } from '../api/types'
 import { t } from '../i18n'
@@ -171,7 +182,31 @@ const GUIDE_EXPORT_GAIN = Math.SQRT1_2
  */
 type MonitorPreset = 'original' | 'instrumental' | 'vocals'
 
-const MONITOR_PRESETS: readonly MonitorPreset[] = ['original', 'instrumental', 'vocals']
+/**
+ * 走带条上的三个层开关：**音乐 / 人声 / 引导声，各自独立开关**。
+ *
+ * 这里此前是「原曲 / 伴奏 / 仅人声」三档互斥单选，外加一个正交的引导声开关——
+ * 四个按钮，而且要在脑子里把"档位"和"叠加层"两套模型并着用。
+ * 但真实模型本来就只有一套：**层 × 增益**（§8.7 的导出混音台是同一个模型）。
+ * 三个开关是它的最小形态，原来那三档只是它的三种组合：
+ *
+ * | 音乐 | 人声 | 听到的 |
+ * |---|---|---|
+ * | 开 | 开 | 原曲 |
+ * | 开 | 关 | 伴奏（OFF VOCAL） |
+ * | 关 | 开 | 只有人声 |
+ *
+ * 图标各自独立、不靠"猜它代表哪个词"：音乐是喇叭、人声是话筒、
+ * 引导声是折线（它就是从 f0 曲线合成出来的那条旋律，§8.9）。
+ * 文字改由 `title` / `aria-label` 承担——读屏软件读到的仍是「人声」而不是图标名。
+ */
+const TOGGLE_LAYERS: readonly LayerId[] = ['instrumental', 'vocals', GUIDE_LAYER]
+
+const LAYER_ICON: Partial<Record<LayerId, ComponentType>> = {
+  instrumental: SoundOutlined,
+  vocals: AudioOutlined,
+  guide: LineChartOutlined,
+}
 
 /**
  * 某个预设要让哪些层出声。
@@ -622,8 +657,16 @@ export function Preview({ className }: PreviewProps) {
   const [readyLayers, setReadyLayers] = useState<readonly LayerId[]>([])
   /** 各层增益 = 混音台本身。预设只是把它整组写成某个组合 */
   const [levels, setLevels] = useState<Partial<Record<LayerId, number>>>({})
-  /** 分轨音量那一排是否展开。默认收起：绝大多数时候三个预设就够了 */
-  const [mixerOpen, setMixerOpen] = useState(false)
+  /**
+   * 总音量的浮层是否打开。
+   *
+   * 音量此前是一条常驻的滑块 + 一个「音量」文字标签，占掉走带条上一大截宽度，
+   * 而它是**设一次就不再动**的东西——真正高频的是播放、试听档位、逐帧步进。
+   * 收成一个图标，点开才给滑块。
+   */
+  const [volOpen, setVolOpen] = useState(false)
+  /** 浮层与它的触发按钮共用这个容器，点到容器之外就关掉 */
+  const volRef = useRef<HTMLDivElement | null>(null)
   const [rvfcMissing, setRvfcMissing] = useState(false)
   /** 当前正在跑的素材准备任务（下载 / 分离 / 代理）。见下方轮询 effect */
   const [activity, setActivity] = useState<JobStatus[]>([])
@@ -880,6 +923,28 @@ export function Preview({ className }: PreviewProps) {
     const video = videoRef.current
     if (video) video.playbackRate = playbackRate
   }, [playbackRate])
+
+  /**
+   * 音量浮层：点到别处就收起。
+   *
+   * 用 pointerdown 而不是 click——滑块拖到浮层外面松手也会冒一个 click，
+   * 那一下会把正在用的浮层关掉。
+   */
+  useEffect(() => {
+    if (!volOpen) return
+    const onDown = (e: PointerEvent) => {
+      if (!volRef.current?.contains(e.target as Node)) setVolOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setVolOpen(false)
+    }
+    document.addEventListener('pointerdown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('pointerdown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [volOpen])
 
   /**
    * <video> 永远静音，除非 Web Audio 完全不可用。
@@ -1148,22 +1213,6 @@ export function Preview({ className }: PreviewProps) {
 
   // --- 试听混音台 -------------------------------------------------------------
 
-  /**
-   * 套用一个预设。
-   *
-   * 「原声 / 伴奏」与导出的 ON/OFF VOCAL 一一对应，所以**写回 `audioMode`**：
-   * 导出舞台上那个设置就是它，不写回的话同屏两个控件会各说各的。
-   * 「仅人声」没有对应的导出变体，**绝不写** —— 这就是"编辑期 solo 人声"
-   * 不可能变成"导出一条只有人声的成片"的结构性保证。
-   */
-  const applyPreset = useCallback(
-    (preset: MonitorPreset) => {
-      setLevels(presetLevels(preset, layers, trimsRef.current, guideEnabled))
-      if (preset !== 'vocals') setAudioMode(preset)
-    },
-    [layers, setAudioMode, guideEnabled],
-  )
-
   /** 拖某一层的音量。**滑块直接就是该层的增益**，不是"预设之上的修正量" */
   const setLayerLevel = useCallback((id: LayerId, value: number) => {
     // 只记非零值：拉到 0 是"暂时不要这层"，预设切回来时该还原成拉到 0 之前的音量
@@ -1172,19 +1221,31 @@ export function Preview({ className }: PreviewProps) {
   }, [])
 
   /**
-   * 当前落在哪个预设上。**由"实际听得见哪几层"反推**，而不是记一个独立的选中态：
-   * 把人声拉到 0 之后耳朵里就只剩伴奏，此时高亮「伴奏」才是实话。
-   * 一个都不匹配（例如两层都拉到 0）就谁都不高亮。
+   * 开关某一层。关 = 增益归零，开 = 还原成上次拖到的音量（没拖过就满格）。
+   *
+   * 顺带把 ON/OFF VOCAL 写回 `audioMode`：导出舞台上那个设置就是它，
+   * 不写回的话同屏两个控件会各说各的。**「只有人声」这一种组合绝不写**——
+   * 它没有对应的导出变体，这就是"编辑期 solo 人声"不可能变成
+   * "导出一条只有人声的成片"的结构性保证。
    */
-  // 引导声不参与反推：它是叠加层，开着它不该让「原声」这一档失去高亮
-  const audible = layers.filter(
-    (id) => id !== GUIDE_LAYER && (levels[id] ?? 0) > AUDIBLE_EPS,
+  const toggleLayer = useCallback(
+    (id: LayerId) => {
+      const on = (levels[id] ?? 0) > AUDIBLE_EPS
+      const value = on ? 0 : (trimsRef.current[id] ?? 1)
+      setLayerLevel(id, value)
+      if (id === GUIDE_LAYER) {
+        // 引导声的开关同时是导出设置里的「混入引导声」——同一份状态
+        setGuideEnabled(!on)
+        return
+      }
+      const next = { ...levels, [id]: value }
+      const lv = (k: LayerId) => (next[k] ?? 0) > AUDIBLE_EPS
+      const music = lv('instrumental') || lv('mix')
+      if (music && lv('vocals')) setAudioMode('original')
+      else if (music) setAudioMode('instrumental')
+    },
+    [levels, setLayerLevel, setAudioMode, setGuideEnabled],
   )
-  const activePreset =
-    MONITOR_PRESETS.find((p) => {
-      const on = presetLayers(p, layers)
-      return on.length > 0 && on.length === audible.length && on.every((id) => audible.includes(id))
-    }) ?? null
 
   const ready = new Set(readyLayers)
 
@@ -1201,26 +1262,12 @@ export function Preview({ className }: PreviewProps) {
     return layerPath(id) ? t('media.player.mix.loadFailed') : t('media.player.mix.needSeparate')
   }
 
-  /** 某个预设为什么不能选。返回 null 表示可选 */
-  const presetBlockReason = (preset: MonitorPreset): string | null => {
-    if (audioState === 'loading') return t('media.player.mix.loading')
-    // 一条轨都没有时，原因是"工程还没有音轨"，不是"音频引擎不可用"——
-    // 后者会把"你还没导入素材"说成"你的浏览器有毛病"。
-    if (layers.length === 0) return t('media.player.mix.noAudio')
-    if (audioState !== 'webaudio') return t('media.player.mix.unavailable')
-    const need = presetLayers(preset, layers)
-    if (need.length === 0) return t('media.player.mix.needSeparate')
-    for (const id of need) {
-      const reason = layerBlockReason(id)
-      if (reason) return reason
-    }
-    return null
-  }
-
   // 只有一层时"分轨音量"就是主音量，多一个入口只会让人以为它们是两回事。
   // 引导声不算在内：它没有分轨滑块（见 `GUIDE_LAYER`）
   const stemLayers = layers.filter((id) => id !== GUIDE_LAYER)
   const mixerAvailable = stemLayers.length > 1
+  /** 还没分离：只有一条原始混音，音乐与人声分不开（走带条上那两个开关按不动） */
+  const mixOnly = !mixerAvailable && layers.includes('mix')
 
   /** 引导声这一层为什么不能开。返回 null 表示可开。 */
   const guideBlockReason = (): string | null => {
@@ -1418,9 +1465,26 @@ export function Preview({ className }: PreviewProps) {
         </div>
       </div>
 
+      {/*
+        走带条。**高频动作用图标、低频动作收起来、只有说不清的才留文字。**
+
+        播放、分轨、音量都是有公认图形的动作，写成文字按钮既占宽度又要人读一遍；
+        而试听三档（原曲 / 伴奏 / 仅人声）和引导声没有能一眼认出的图标——
+        画个耳朵也说不清是哪一档，所以它们保留文字，改成分段控件的形态。
+
+        选中态此前只加粗字重，在一排同样大小的按钮里几乎看不出来（尤其"仅人声"
+        与"伴奏"这种一眼扫过去的选择）。现在按下的那一档是 accent 实底。
+      */}
       <div style={styles.controls}>
-        <button type="button" onClick={() => setPlaying(!playing)} style={styles.button}>
-          {playing ? t('media.player.pause') : t('media.player.play')}
+        <button
+          type="button"
+          className="iconbtn"
+          data-testid="play-toggle"
+          title={playing ? t('media.player.pause') : t('media.player.play')}
+          aria-label={playing ? t('media.player.pause') : t('media.player.play')}
+          onClick={() => setPlaying(!playing)}
+        >
+          {playing ? <PauseOutlined /> : <CaretRightOutlined />}
         </button>
 
         <span ref={clockRef} style={styles.clock}>
@@ -1438,113 +1502,118 @@ export function Preview({ className }: PreviewProps) {
           style={styles.seek}
         />
 
-        <span style={styles.dim}>{t('media.player.mix.label')}</span>
-        <div style={styles.group} role="group" aria-label={t('media.player.mix.label')}>
-          {MONITOR_PRESETS.map((preset) => {
-            const blocked = presetBlockReason(preset)
+        <div style={styles.seg} role="group" aria-label={t('media.player.mix.label')}>
+          {TOGGLE_LAYERS.map((id) => {
+            const blocked = id === GUIDE_LAYER ? guideBlockReason() : layerBlockReason(id)
+            const Icon = LAYER_ICON[id] ?? SoundOutlined
+            const label = t(`media.player.track.${id}`)
+            /*
+              还没分离时**两个开关一起亮着**（但按不动）。
+              那时工程里只有一条原始混音，音乐与人声混在同一条轨里正一起响——
+              这正是"原曲"。全灰会让人以为什么都没在放，而"原曲"这一档在三开关
+              模型里本来就不是一个按钮，是"两个都开"这个状态，所以它得看得见。
+              按不动的原因写在 title 里（「需要先完成人声分离」）。
+            */
+            const asMix = mixOnly && id !== GUIDE_LAYER && (levels.mix ?? 0) > AUDIBLE_EPS
+            const on = asMix || ((levels[id] ?? 0) > AUDIBLE_EPS && !blocked)
             return (
               <button
-                key={preset}
+                key={id}
                 type="button"
-                data-testid={`mix-preset-${preset}`}
-                aria-pressed={activePreset === preset}
+                data-testid={`mix-layer-${id}`}
+                aria-pressed={on}
+                aria-label={label}
                 disabled={!!blocked}
-                title={blocked ?? undefined}
-                onClick={() => applyPreset(preset)}
+                title={blocked ?? label}
+                onClick={() => toggleLayer(id)}
                 style={{
-                  ...styles.toggle,
-                  ...(activePreset === preset ? styles.toggleActive : null),
+                  ...styles.segBtn,
+                  ...(on ? styles.segBtnOn : null),
                   ...(blocked ? styles.toggleDisabled : null),
                 }}
               >
-                {t(`media.player.mix.${preset}`)}
+                <Icon />
               </button>
             )
           })}
         </div>
 
         {/*
-          引导声：**独立开关，不是第四档**。它能配原声也能配伴奏，与那三档正交。
-          按下去写的是 store 的 `guideEnabled`，也就是导出设置里的「混入引导声」
-          ——同一份状态，不可能出现"设置勾了、预览听不到"。
+          音量与分轨**合成一个浮层**。它们本来就是一件事——分轨滑块就是各层增益，
+          只有一层时那条滑块就是主音量（分轨入口此前也正是按这个条件显示的）。
+          分成"音量滑块常驻 + 分轨按钮再开一块"占掉走带条一大截，而这两样都是
+          设一次就不再动的东西。
         */}
-        {(() => {
-          const blocked = guideBlockReason()
-          return (
-            <button
-              type="button"
-              data-testid="mix-guide-toggle"
-              aria-pressed={guideEnabled && !blocked}
-              disabled={!!blocked}
-              title={blocked ?? undefined}
-              onClick={() => setGuideEnabled(!guideEnabled)}
-              style={{
-                ...styles.toggle,
-                ...(guideEnabled && !blocked ? styles.toggleActive : null),
-                ...(blocked ? styles.toggleDisabled : null),
-              }}
-            >
-              {t('media.player.mix.guide')}
-            </button>
-          )
-        })()}
-
-        {mixerAvailable && (
+        <div ref={volRef} style={styles.volWrap}>
           <button
             type="button"
-            data-testid="mix-tracks-toggle"
-            aria-expanded={mixerOpen}
-            title={t('media.player.mix.tracksHint')}
-            onClick={() => setMixerOpen((v) => !v)}
-            style={{ ...styles.toggle, ...(mixerOpen ? styles.toggleActive : null) }}
+            className="iconbtn"
+            data-testid="volume-toggle"
+            aria-expanded={volOpen}
+            aria-label={t('media.player.volume')}
+            title={`${t('media.player.volume')} ${Math.round(volume * 100)}%`}
+            onClick={() => setVolOpen((v) => !v)}
+            style={volOpen ? styles.iconBtnOn : undefined}
           >
-            {t('media.player.mix.tracks')}
+            {volume === 0 ? <MutedOutlined /> : <SlidersOutlined />}
           </button>
-        )}
-
-        <label style={styles.volume}>
-          {t('media.player.volume')}
-          <input
-            type="range"
-            min={0}
-            max={1}
-            step={0.01}
-            value={volume}
-            onChange={(e) => setVolume(Number(e.target.value))}
-          />
-        </label>
-      </div>
-
-      {/*
-        分轨音量。滑块直接就是各层增益——「原声」档把人声压到 20~30%
-        就是日本卡拉OK 那种ガイドボーカル入り的试听方式，而这正是
-        "原声/伴奏"两个固定档覆盖不到的中间地带（§8.7）。
-      */}
-      {mixerAvailable && mixerOpen && (
-        <div style={styles.mixer} data-testid="mix-tracks">
-          {stemLayers.map((id) => {
-            const blocked = layerBlockReason(id)
-            const disabled = !!blocked
-            return (
-              <label key={id} style={styles.mixerRow} title={blocked ?? undefined}>
-                <span style={styles.mixerName}>{t(`media.player.track.${id}`)}</span>
+          {volOpen && (
+            /*
+              竖推子并排，就是一台小调音台：几条轨的相对高低一眼可比，
+              而横滑块摞成几行时，"人声比伴奏低多少"要逐行读百分比才知道。
+              总音量排在最左边并用一道分隔线隔开——它是总的那一个，不是又一条轨。
+            */
+            <div style={styles.volPop} data-testid="mix-tracks">
+              <label style={styles.faderCol}>
+                <span style={styles.faderName}>{t('media.player.volume')}</span>
                 <input
                   type="range"
                   min={0}
                   max={1}
                   step={0.01}
-                  disabled={disabled}
-                  data-testid={`mix-level-${id}`}
-                  value={levels[id] ?? 0}
-                  onChange={(e) => setLayerLevel(id, Number(e.target.value))}
-                  style={styles.mixerSlider}
+                  autoFocus
+                  data-testid="volume-level"
+                  aria-label={t('media.player.volume')}
+                  value={volume}
+                  onChange={(e) => setVolume(Number(e.target.value))}
+                  style={styles.fader}
                 />
-                <span style={styles.mixerValue}>{Math.round((levels[id] ?? 0) * 100)}%</span>
+                <span style={styles.mixerValue}>{Math.round(volume * 100)}%</span>
               </label>
-            )
-          })}
+
+              {/*
+                分轨。滑块直接就是各层增益——「原声」档把人声压到 20~30%
+                就是日本卡拉OK 那种ガイドボーカル入り的试听方式，而这正是
+                "原声/伴奏"两个固定档覆盖不到的中间地带（§8.7）。
+                引导声也在这里：它是一条真实存在的层，音量该和别的层一起调。
+              */}
+              {mixerAvailable && <span style={styles.faderSep} />}
+              {mixerAvailable &&
+                layers.map((id) => {
+                  const blocked = layerBlockReason(id)
+                  return (
+                    <label key={id} style={styles.faderCol} title={blocked ?? undefined}>
+                      <span style={styles.faderName}>{t(`media.player.track.${id}`)}</span>
+                      <input
+                        type="range"
+                        min={0}
+                        max={1}
+                        step={0.01}
+                        disabled={!!blocked}
+                        data-testid={`mix-level-${id}`}
+                        aria-label={t(`media.player.track.${id}`)}
+                        value={levels[id] ?? 0}
+                        onChange={(e) => setLayerLevel(id, Number(e.target.value))}
+                        style={{ ...styles.fader, ...(blocked ? styles.toggleDisabled : null) }}
+                      />
+                      <span style={styles.mixerValue}>{Math.round((levels[id] ?? 0) * 100)}%</span>
+                    </label>
+                  )
+                })}
+            </div>
+          )}
         </div>
-      )}
+      </div>
 
       {(overlayError ?? playbackError) && (
         <IssueList
@@ -1652,21 +1721,67 @@ const styles = {
     fontSize: 12,
   },
   controls: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
-  button: { padding: '4px 14px', cursor: 'pointer' },
   clock: { fontVariantNumeric: 'tabular-nums', fontSize: 13, minWidth: 64 },
   duration: { fontVariantNumeric: 'tabular-nums', fontSize: 13, color: '#888' },
   seek: { flex: 1, minWidth: 120 },
-  group: { display: 'flex' },
-  dim: { fontSize: 12, color: '#888' },
-  toggle: { padding: '4px 12px', cursor: 'pointer' },
-  toggleActive: { fontWeight: 700 },
+  /*
+   * 试听档位的分段控件。取值一律走全局 token（styles.css 的 :root），
+   * 本文件是内联样式，但没有理由为此另开一套颜色。
+   */
+  seg: { display: 'inline-flex', alignItems: 'center', gap: 2 },
+  segBtn: {
+    padding: '3px 10px',
+    fontSize: 12,
+    lineHeight: 1.6,
+    background: 'transparent',
+    border: '1px solid var(--stroke)',
+    borderRadius: 'var(--r-sm)',
+    color: 'var(--fg-2)',
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
+  },
+  /*
+   * 选中态：实底 + 反色。此前只加粗字重，一排同样大小的按钮里几乎认不出来——
+   * 而"现在听的是伴奏还是原曲"是这条上最需要一眼确认的事。
+   */
+  segBtnOn: {
+    background: 'var(--accent)',
+    borderColor: 'var(--accent)',
+    color: 'var(--accent-ink)',
+    fontWeight: 600,
+  },
   toggleDisabled: { cursor: 'not-allowed', opacity: 0.5 },
-  volume: { display: 'flex', alignItems: 'center', gap: 4, fontSize: 12 },
-  // 分轨那一排单独占一行：挤进走带行会把进度条压没，而它本来就是"展开才看"的东西
-  mixer: { display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap', fontSize: 12 },
-  mixerRow: { display: 'flex', alignItems: 'center', gap: 6 },
-  mixerName: { color: '#aab', minWidth: 28 },
-  mixerSlider: { width: 96 },
+  /* 图标按钮按下态：与分段选中同一套语义色，不另发明一种"按下" */
+  iconBtnOn: { background: 'var(--accent-weak)', color: 'var(--accent)' },
+  volWrap: { position: 'relative', display: 'inline-flex' },
+  /*
+   * 音量浮层往**上**弹：走带条下方是待检查清单与时间轴，往下弹会盖住它们，
+   * 而画面区那一侧本来就是空的。
+   */
+  volPop: {
+    position: 'absolute',
+    bottom: 'calc(100% + 6px)',
+    right: 0,
+    zIndex: 20,
+    display: 'flex',
+    alignItems: 'flex-end',
+    gap: 10,
+    padding: '10px 12px',
+    background: 'var(--bg-surface)',
+    border: 'var(--hairline)',
+    borderRadius: 'var(--r-md)',
+    boxShadow: 'var(--shadow-2)',
+  },
+  /*
+   * 竖推子。`writing-mode: vertical-lr` + `direction: rtl` 是当前把原生 range
+   * 立起来的正规写法（Chrome 111+ / Safari 15.4+ 都支持），比 rotate 变换好——
+   * 变换只是把画面转过去，命中区域仍是横的，拖起来手感是错的。
+   */
+  fader: { writingMode: 'vertical-lr', direction: 'rtl', width: 20, height: 92 },
+  faderCol: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 },
+  faderName: { color: 'var(--fg-2)', fontSize: 11, whiteSpace: 'nowrap' },
+  /* 总音量与分轨之间的那道线：它是总的那一个，不是又一条轨 */
+  faderSep: { alignSelf: 'stretch', width: 1, background: 'var(--stroke)' },
   mixerValue: { color: '#888', fontVariantNumeric: 'tabular-nums', minWidth: 34, textAlign: 'right' },
   issues: {
     listStyle: 'none',

@@ -663,6 +663,64 @@ label.checkbox-row {
   border-color: var(--src-manual);
 }
 
+/* ---- 注音编辑条：贴在歌词正文下方（见 EditReading 的文件头） ---- */
+
+/*
+ * 与声部条同一形态：一条、只吃自己那点高度、不与正文抢横向空间。
+ * 它排在声部条**上面**——逐条核对读音是这一步最长的一段活，离正文越近越好。
+ */
+.edit-reading {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  padding: var(--sp-1) var(--sp-2);
+  background: var(--bg-panel);
+  border: var(--hairline);
+  border-radius: var(--r-md);
+  /* 候选一多就换行，但绝不许把正文顶没了 */
+  max-height: 22vh;
+  overflow-y: auto;
+}
+/* 选中词在这条里是"标题"，给它自己的一格，不跟着后面的字段一起被挤散 */
+.edit-reading .kvm-ruby__word {
+  flex: 0 0 auto;
+  padding-right: var(--sp-2);
+  border-right: var(--hairline);
+}
+.edit-reading .kvm-ruby__wordtext {
+  font-size: var(--fs-lg);
+}
+/*
+ * 换行只允许发生在**组与组之间**：读法输入框和它的「应用/あ/ア」是一组，
+ * 锁定/拆分/删除是一组。组内 nowrap，否则「应用」会单独掉到下一行，
+ * 看起来像是它属于下面那组。
+ */
+.edit-reading .kvm-ruby__row {
+  flex-wrap: nowrap;
+}
+/*
+ * 字段横排：标签在左、输入框在右。
+ *
+ * 竖排（标签压在输入框上方）是竖栏形态的写法，搬到这条横带上就成了两行高——
+ * 而这条贴在歌词正文下方，每多一行就少一行歌词。
+ */
+.edit-reading .kvm-ruby__field {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: 0 1 auto;
+}
+.edit-reading .kvm-ruby__field .kvm-ruby__label {
+  flex: 0 0 auto;
+}
+.edit-reading .kvm-ruby__field input {
+  width: 132px;
+}
+/* 候选那一组不参与抢空间：有几个 chip 就占多宽 */
+.edit-reading .kvm-ruby__cands {
+  flex: 0 0 auto;
+}
+
 /* ---- 声部指派（§2.5：自动没有可靠方案，手工旁路就是唯一入口） ---- */
 
 /*
@@ -673,9 +731,8 @@ label.checkbox-row {
 .edit-voice {
   flex: 0 0 auto;
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: var(--sp-1);
-  flex-wrap: wrap;
   padding: var(--sp-1) var(--sp-2);
   background: var(--bg-panel);
   border: var(--hairline);
@@ -683,6 +740,31 @@ label.checkbox-row {
   /* 窄窗口下换行会让它长高，但绝不许把正文顶没了 */
   max-height: 22vh;
   overflow-y: auto;
+}
+/*
+ * 固定两行：上行是"改哪儿"，下行是"改成谁"。
+ * 曾经是一条会换行的 flex，切到「本字起」多出四个控件、整条长度跳一截，
+ * 于是某些窗口宽度下换行、另一些不换，声部按钮跟着上下跳。
+ */
+.edit-voice__row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  flex-wrap: wrap;
+}
+/*
+ * 范围那一格（「本行」/「划选 3 行」）。
+ *
+ * **不写死宽度**：三档作用域拆掉之后这里只剩一句短话，两种措辞差不了几个字，
+ * 写死只会在它旁边留一片没有任何东西的空地。
+ */
+.edit-voice__slot {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  color: var(--fg-2);
+  font-size: var(--fs-sm);
+  white-space: nowrap;
 }
 /*
  * 当前行的声部，读起来是"现在是什么"，与右边那排"改成什么"分开。
@@ -761,12 +843,19 @@ label.checkbox-row {
 .edit-voice__new {
   width: 132px;
 }
-/* 影响范围要显眼：改错声部会连带改掉一片颜色，而退回去要一行行来 */
+/*
+ * 影响范围要显眼：改错声部会连带改掉一片颜色，而退回去要一行行来。
+ * 贴右端 —— 这一行左边是"改哪儿"、右端是"改多少"，中间那段空白因此是有意义的，
+ * 而不是某个控件写死宽度留下的空地。
+ */
 .edit-voice__count {
+  margin-left: auto;
   color: var(--warn);
   font-size: var(--fs-sm);
 }
+/* 完成提示同理贴右，别夹在声部按钮中间把它们挤散 */
 .edit-voice__done {
+  margin-left: auto;
   color: var(--src-manual);
   font-size: var(--fs-sm);
 }

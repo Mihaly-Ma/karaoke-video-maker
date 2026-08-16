@@ -73,6 +73,16 @@ export function RubyInspector({
   const saved = unit?.span?.text ?? ''
   const [draft, setDraft] = useState(saved)
   const [phonetic, setPhonetic] = useState('')
+  /**
+   * 发音形那一格在**横条形态下默认收起**（竖栏空间够，一直摊开）。
+   *
+   * 横条贴在歌词正文下方，多一个输入框就少一截正文。而这一格的使用频率远低于
+   * 表记读法：它只在"写的和唱的不一样"时才需要动（助词「は」读 ワ），
+   * 而且后端还没有这个字段（CLAUDE.md §4.5），眼下是前端本地暂存的过渡措施。
+   *
+   * 已经改过的词自动展开——存了值却看不见，等于把用户自己设的东西藏起来。
+   */
+  const [phoneticOpen, setPhoneticOpen] = useState(false)
 
   // 换词或后端回写新值时重置草稿。依赖里带上 saved，是为了让「应用」之后
   // 输入框显示后端真正落库的那个值，而不是用户敲进去的那一版
@@ -85,7 +95,13 @@ export function RubyInspector({
     setPhonetic(phoneticOverride || derivePhonetic(saved || (unit?.kind === 'kana' ? unit.text : '')))
   }, [key, saved, phoneticOverride, unit])
 
-  const boxClass = `kvm-ruby__box${layout === 'bar' ? ' kvm-ruby__box--bar' : ''}`
+  // 换词时重新决定这一格开不开：这个词有覆盖就展开，没有就收回去
+  useEffect(() => {
+    setPhoneticOpen(!!phoneticOverride)
+  }, [key, phoneticOverride])
+
+  const bar = layout === 'bar'
+  const boxClass = `kvm-ruby__box${bar ? ' kvm-ruby__box--bar' : ''}`
 
   if (!unit) {
     return (
@@ -169,26 +185,39 @@ export function RubyInspector({
       </div>
 
       {/* 发音形：喂对齐器的形态。后端还没有这个字段，见 RubyModel 的说明 */}
-      <label className="kvm-ruby__field">
-        <span className="kvm-ruby__label">
-          {t('ruby.field.phonetic')}
-          <span className="kvm-ruby__badge" title={t('ruby.field.localHint')}>
-            {t('ruby.field.local')}
-          </span>
-        </span>
-        <input
-          type="text"
-          data-field="phonetic"
-          value={phonetic}
+      {bar && !phoneticOpen ? (
+        <button
+          type="button"
+          className="small"
+          data-role="phonetic-open"
           disabled={busy}
-          placeholder={t('ruby.field.derived')}
-          onChange={(e) => setPhonetic(e.target.value)}
-          onBlur={() => onPhonetic(unit, phonetic)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') onPhonetic(unit, phonetic)
-          }}
-        />
-      </label>
+          onClick={() => setPhoneticOpen(true)}
+        >
+          {t('ruby.field.phonetic')}
+        </button>
+      ) : (
+        <label className="kvm-ruby__field">
+          <span className="kvm-ruby__label">
+            {t('ruby.field.phonetic')}
+            {/* 「本地」= 这份值只存在本机，不随工程走（RubyModel 里有来龙去脉）。
+                徽章本身就是那句话的全部——把解释塞进 title 只会让界面变啰嗦 */}
+            <span className="kvm-ruby__badge">{t('ruby.field.local')}</span>
+          </span>
+          <input
+            type="text"
+            data-field="phonetic"
+            value={phonetic}
+            disabled={busy}
+            autoFocus={bar}
+            placeholder={t('ruby.field.derived')}
+            onChange={(e) => setPhonetic(e.target.value)}
+            onBlur={() => onPhonetic(unit, phonetic)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') onPhonetic(unit, phonetic)
+            }}
+          />
+        </label>
+      )}
 
       {candidates.length > 0 && (
         <div className="kvm-ruby__cands">

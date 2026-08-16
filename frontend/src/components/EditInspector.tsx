@@ -1,30 +1,21 @@
 /**
- * 舞台底栏的检查器：**同一个选中项的时间与读音并排**。
+ * 舞台底栏：**选中那个字的时间**。
  *
- * 这是"对轴与注音合并成一步"在界面上的落点（docs/ui-redesign.md §四）。
- * 对轴管「这个词什么时候唱」，注音管「这个词怎么读」，两者修正的是同一个词；
- * 分成两个舞台时，同一个词要在两处各选一次，而且注音那边连播放都没有——
- * 可读音偏偏只能靠耳朵验证（「運命」在本曲唱 さだめ 还是 うんめい）。
+ * ## 底栏只剩时间了
  *
- * 两半的粒度不同，界面上必须说清楚，不能混成一个数：
+ * 这条曾经是"时间 + 读音"并排的检查器。并排的理由是"两者修正的是同一个词"，
+ * 但那件事真正靠的是 store 里**共享的 `selection`**，不是物理相邻——而位置
+ * 是有代价的：底栏离歌词正文隔着整条时间轴，改注音要跨半个屏幕来回跑，
+ * 而"逐条核对机器猜的读音"正是这一步最长的一段活。
  *
- * | 半边 | 对象 | 来源 |
- * |---|---|---|
- * | 时间 | 选中的**字**（token） | store 里的 `selection`，逐字轴上高亮的就是它 |
- * | 读音 | 覆盖那个字的**词**（ruby 区间） | `RubyModel.unitOfToken` 换算 |
+ * 所以读音搬去了正文下方（`EditReading`），时间留在这里：它的操作对象是
+ * 逐字轴上的那个字，而逐字轴就在这条的正上方。声部同理搬到了正文下方
+ * （`EditVoice`）。**底栏因此不再有读音与声部的入口**——同一个属性两处都能改，
+ * 正是这一轮重做要消灭的东西。
  *
- * 「明日」两个字共用「あした」时是一个词、两个 token——时间只能逐字给，
- * 读音只能整词给，硬凑成一个粒度必然要在某一边说谎。
- *
- * 读音那一半整块复用 `RubyInspector`（校验、拍数、候选、拆分判断都在它那儿），
- * 本组件只补上时间那一半，并通过它的 `leading` 插槽塞进去。
- *
- * ## 声部不在这里
- *
- * 声部曾经也挂在这条底栏上。它是**行/token 的属性**，而"选中哪一行、哪个字"这个
- * 动作发生在歌词正文里 —— 控件离选择动作隔着大半个屏幕，「本句起 N 句」这种
- * 要一边看歌词一边确认范围的操作尤其别扭。现在它贴在歌词正文下方（`EditVoice`），
- * **底栏不再留任何声部入口**：同一个属性两处都能改，正是这一轮重做要消灭的东西。
+ * 粒度仍要说清：时间是**字**（token）级，读音是覆盖那个字的**词**（ruby 区间）级。
+ * 「明日」两个字共用「あした」时是一个词、两个 token，硬凑成一个粒度必然要在
+ * 某一边说谎。
  */
 
 import { LockOutlined, UnlockOutlined } from '@ant-design/icons'
@@ -34,7 +25,6 @@ import { t } from '../i18n'
 import { formatMs } from '../lib/timeScale'
 import { useProject } from '../state/projectStore'
 import type { RubyEditing } from './RubyEditor'
-import { RubyInspector } from './RubyInspector'
 import type { RubyUnit } from './RubyModel'
 import { SOURCE_META } from './Timeline'
 
@@ -46,24 +36,9 @@ export interface EditInspectorProps {
 }
 
 export default function EditInspector({ editing }: EditInspectorProps) {
-  const { selectedUnit, lineUnits, busy, phoneticOf, applyReading, split, remove, toggleLock, setPhonetic } =
-    editing
-
   return (
     <div className="edit-inspect" data-role="inspector">
-      <RubyInspector
-        unit={selectedUnit}
-        units={lineUnits}
-        busy={busy}
-        layout="bar"
-        leading={<TimingBlock unit={selectedUnit} />}
-        phoneticOverride={selectedUnit ? phoneticOf(selectedUnit) : ''}
-        onApplyReading={applyReading}
-        onSplit={split}
-        onDelete={remove}
-        onToggleLock={toggleLock}
-        onPhonetic={setPhonetic}
-      />
+      <TimingBlock unit={editing.selectedUnit} />
     </div>
   )
 }

@@ -30,10 +30,9 @@ export const ruby: Record<string, string> = {
   'ruby.field.displayPlaceholder': '假名读音',
   'ruby.field.kanaOnly': '假名不注音',
   'ruby.field.derived': '推导值',
+  // 徽章上就这两个字。这份值只存在本机、不随工程走，来龙去脉在 RubyModel 里，
+  // 界面上不解释——那是注释该干的事
   'ruby.field.local': '本地',
-  // 原文写的是"工程文件里还没有这个字段"——那是实现进度，不是用户能理解或
-  // 能处理的信息。他需要知道的只有一件事：这份改动不会跟着工程走。
-  'ruby.field.localHint': '仅存于本机，不随工程保存',
   'ruby.mora': '{n} 拍',
   'ruby.candidates': '候选',
   // 底栏并排着两把锁（时间 / 读音），只写「锁定」的那把等于没说锁的是什么

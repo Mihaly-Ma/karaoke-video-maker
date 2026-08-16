@@ -73,16 +73,11 @@ export const align: Record<string, string> = {
   // ---- 声部指派（§2.5 表格里声部那一行的自动栏写的是"暂无可靠自动方案"，
   //      手工旁路"选中词句指派声部"因此不是锦上添花，是这一环唯一的入口）----
   'align.voice': '声部',
-  'align.voiceScope': '作用范围',
-  'align.voiceScope.line': '本行',
-  'align.voiceScope.after': '本行起',
-  'align.voiceScope.tokens': '本字起',
-  'align.voiceSpan': '行数',
-  'align.voiceSpanTokens': '字数',
-  'align.voiceUnitLines': '行',
-  'align.voiceUnitTokens': '字',
+  // 范围是算出来的：没划就是当前行，在正文里划过一段就是那一段
+  'align.voiceRangeLine': '本行',
+  'align.voiceRangeSel': '划选 {n} 行',
+  'align.voiceTo': '改为',
   'align.voiceToEnd': '到曲末',
-  'align.voiceToLineEnd': '到行末',
   'align.voiceAffectLines': '将改 {n} 行',
   'align.voiceAffectTokens': '将改 {n} 字',
   'align.voiceNew': '新声部',

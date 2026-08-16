@@ -643,9 +643,251 @@ function scrollLineIntoView(
  * 一个 ruby 单元可能横跨多个 token（「明日」两个字一个词），取首字的覆盖即可 ——
  * 一个词内部再分声部在演唱上没有意义。
  */
-function tokenVoiceOf(line: Line, tokenIndex: number): string | null {
-  const vp = line.tokens[tokenIndex]?.voice_part
-  return vp && vp !== line.voice_part ? vp : null
+function tokenVoiceOf(line: Line, tokenIndex: number): string {
+  return line.tokens[tokenIndex]?.voice_part || line.voice_part || 'main'
+}
+
+/**
+ * 划词时被划到的那些词，事件名。
+ *
+ * 标记由本模块做（它拥有正文的 DOM），范围由 `EditVoice` 读 `[data-picked]` 得出。
+ * 两边各监听一次 `selectionchange` 的话，谁先跑取决于 effect 的注册顺序——
+ * 那种依赖在插入一个组件时就会悄悄反过来。改成"标记完再广播"，顺序就定死了。
+ */
+export const PICKED_WORDS_EVENT = 'kvm:picked-words'
+
+/**
+ * 划词：按住拖过几个词，把它们标进 DOM（`data-picked`），供 `EditVoice` 指派声部。
+ *
+ * **不用浏览器的文本选区**，两条独立的理由：
+ *
+ * 一、它在这里根本不成立。每个词是 `display: inline-block`（要挂注音、要定位
+ * 划线），而 Chromium 跨 inline-block 拖拽时选区落不出来——实测拖过五个词，
+ * `getSelection().toString()` 是空串、只框住一个元素。
+ *
+ * 二、就算能用也不该用。这里选的是"哪几个词"，不是一段文本；系统那条蓝底会
+ * 一路糊过注音、标点与词间空隙，读起来像在复制文字，而划完要做的事是
+ * "把这一段指派给某个声部"。
+ *
+ * 所以自己按指针位置算：从按下的那个词到当前指针下的那个词，中间按 DOM 顺序
+ * 全部标上——跨行也就自然支持了。单击（没有拖动）只清标记，把选中那件事
+ * 让给 `pick`。
+ */
+/** 一块高亮矩形，坐标相对正文的**内容**（含滚动量），所以滚动时不用重算 */
+interface PickBox {
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
+function usePickedWords(paperRef: RefObject<HTMLDivElement>): PickBox[] {
+  const [boxes, setBoxes] = useState<PickBox[]>([])
+
+  useEffect(() => {
+    /*
+     * 监听挂在 document 上，**不挂在正文容器上**。
+     *
+     * 挂容器要在 effect 跑的那一刻就拿得到 `paperRef.current`，而正文在工程还没
+     * 加载完时会提前 return（那时根本没渲染出容器）——ref 对象本身不变，effect
+     * 也就不会重跑，于是监听永远没注册上，进编辑页后划词整个是死的。
+     * 挂 document 则与挂载时机无关，每次事件再去问一次当前的容器。
+     */
+    let anchor: HTMLElement | null = null
+
+    const root = (): HTMLElement | null => paperRef.current
+    /**
+     * 指针位置对应哪个字。
+     *
+     * **不要求指针正好压在字身上**：一行里除了字还有注音上方的空档、字下方的
+     * 留白、行尾的空白，划到那些地方要是就断了，拖动必须贴着一条几十像素高的
+     * 带子走——而用户的意思很明确，就是"从这个字划到那个字"。
+     * 所以先按点命中，命中不到就在**这一行**里取横向最近的那个字。
+     */
+    const unitAt = (x: number, y: number): HTMLElement | null => {
+      const el = document.elementFromPoint(x, y) as HTMLElement | null
+      const paper = root()
+      if (!el || !paper?.contains(el)) return null
+      const direct = el.closest<HTMLElement>('.kvm-ruby__ch')
+      if (direct) return direct
+      const lineEl = el.closest<HTMLElement>('.kvm-ruby__line')
+      if (!lineEl) return null
+      let best: HTMLElement | null = null
+      let bestDist = Infinity
+      for (const ch of lineEl.querySelectorAll<HTMLElement>('.kvm-ruby__ch')) {
+        const r = ch.getBoundingClientRect()
+        const d = x < r.left ? r.left - x : x > r.right ? x - r.right : 0
+        if (d < bestDist) {
+          bestDist = d
+          best = ch
+        }
+      }
+      return best
+    }
+    const units = (): HTMLElement[] => [
+      ...(root()?.querySelectorAll<HTMLElement>('.kvm-ruby__ch') ?? []),
+    ]
+    const clear = (notify: boolean) => {
+      let had = false
+      for (const el of units()) {
+        if (el.hasAttribute('data-picked')) {
+          el.removeAttribute('data-picked')
+          had = true
+        }
+      }
+      if (had) setBoxes([])
+      if (had && notify) document.dispatchEvent(new CustomEvent(PICKED_WORDS_EVENT))
+    }
+
+    /**
+     * 划到的字合成**整块**高亮，一个视觉行一块。
+     *
+     * 逐字各画一块是走不通的：那些块半透明，紧挨着就会在接缝处叠出深色竖条，
+     * 看着正好像一道道分隔线；而留空隙又变成一串小方块。合成整块之后，
+     * 一行划过去就是一条连续的高亮带——本来要表达的也正是"这一段"。
+     *
+     * 高度取这一带里所有字的联合上下沿（含注音），所以同一带里高低不齐的字
+     * 也共用一个框顶与框底。
+     */
+    const measure = (picked: HTMLElement[]) => {
+      const paper = root()
+      if (!paper || !picked.length) {
+        setBoxes([])
+        return
+      }
+      const base = paper.getBoundingClientRect()
+      /*
+       * 按**基线**聚类，不按顶边。
+       *
+       * 带注音的字比不带的高，顶边差着一截——拿顶边当分组键，同一行会被拆成
+       * 好几块，相邻块的竖边挨在一起就成了一道道竖线（正是要消掉的东西）。
+       * 而同一视觉行的字底边永远齐平，差得远的那才是真的换了行。
+       */
+      /*
+       * 同一视觉行的容差。带注音的字与不带的，基线落点差几个像素——容差太小
+       * 会把一行拆成两块，而两块的边框贴在一起就是一道竖线（在「ゆらゆら」
+       * 与下一个词之间最容易看到）。真正的换行差着一整个行高（约 54px），
+       * 所以 16px 既吃得下同行的抖动，又不会把两行并进一块。
+       */
+      const LINE_EPS = 16
+      const rows: { l: number; r: number; t: number; b: number }[] = []
+      const items = picked
+        .map((ch) => ({
+          r: ch.getBoundingClientRect(),
+          // 注音挂在词上，框要连注音一起罩住，所以纵向取所属词的范围
+          own: ch.closest<HTMLElement>('.kvm-ruby__unit')?.getBoundingClientRect() ?? null,
+        }))
+        .sort((a, b) => a.r.bottom - b.r.bottom || a.r.left - b.r.left)
+      for (const it of items) {
+        const top = Math.min(it.own?.top ?? it.r.top, it.r.top)
+        const last = rows[rows.length - 1]
+        if (last && Math.abs(it.r.bottom - last.b) <= LINE_EPS) {
+          last.l = Math.min(last.l, it.r.left)
+          last.r = Math.max(last.r, it.r.right)
+          last.t = Math.min(last.t, top)
+        } else {
+          rows.push({ l: it.r.left, r: it.r.right, t: top, b: it.r.bottom })
+        }
+      }
+      /*
+       * 左右各外扩一点，别让框贴着字的墨迹收边——贴着看像把字裁掉了。
+       * 现在框是整块画的，外扩不会再像逐字那样在接缝处叠出竖线。
+       */
+      const PAD_X = 3
+      // 上下同样留一口气：框顶原本正压在注音的顶边上，看着像把假名切了一刀
+      const PAD_Y = 3
+      setBoxes(
+        rows.map((v) => ({
+          x: v.l - base.left + paper.scrollLeft - PAD_X,
+          y: v.t - base.top + paper.scrollTop - PAD_Y,
+          w: v.r - v.l + PAD_X * 2,
+          h: v.b - v.t + PAD_Y * 2,
+        })),
+      )
+    }
+
+    const mark = (from: HTMLElement, to: HTMLElement) => {
+      const list = units()
+      const i = list.indexOf(from)
+      const j = list.indexOf(to)
+      if (i < 0 || j < 0) return
+      const [s, e] = i <= j ? [i, j] : [j, i]
+      // 只划到一个字不算划选——那是单击的地盘（选中 + 定位播放头）
+      const on = e > s
+      const picked: HTMLElement[] = []
+      list.forEach((el, k) => {
+        if (!on || k < s || k > e) {
+          el.removeAttribute('data-picked')
+          return
+        }
+        el.setAttribute('data-picked', '')
+        picked.push(el)
+      })
+      measure(picked)
+      document.dispatchEvent(new CustomEvent(PICKED_WORDS_EVENT))
+    }
+
+    const onDown = (e: PointerEvent) => {
+      if (e.button !== 0) return
+      const paper = root()
+      if (!paper) return
+      const u = unitAt(e.clientX, e.clientY)
+      // 按在正文之外（走带、时间轴、别的面板）与划词无关，别去动已有的划选
+      if (!u && !paper.contains(e.target as Node)) return
+      // 按在正文里的非词处（行号、空白、按钮）则把上一次的划选收掉
+      if (!u) {
+        clear(true)
+        return
+      }
+      anchor = u
+      clear(true)
+    }
+    const onMove = (e: PointerEvent) => {
+      if (!anchor || !(e.buttons & 1)) return
+      const u = unitAt(e.clientX, e.clientY)
+      if (!u) return
+      mark(anchor, u)
+    }
+    const onUp = () => {
+      anchor = null
+    }
+
+    document.addEventListener('pointerdown', onDown)
+    document.addEventListener('pointermove', onMove)
+    document.addEventListener('pointerup', onUp)
+    return () => {
+      document.removeEventListener('pointerdown', onDown)
+      document.removeEventListener('pointermove', onMove)
+      document.removeEventListener('pointerup', onUp)
+    }
+  }, [paperRef])
+
+  return boxes
+}
+
+/** 一段连续的、同一个声部的词 */
+interface VoiceSeg {
+  part: string
+  units: RubyUnit[]
+}
+
+/**
+ * 把一行按**有效声部**切成连续段。
+ *
+ * 这是"一句里男女交替"在界面上能被看见的前提。此前字级覆盖是逐词渲染的：
+ * 每个词自己一条 2px 短线、自己一个声部名，于是「君の/声が/聞こえる」三个词
+ * 会得到三条断开的线和三个重复的名字——而它们其实是同一个人连着唱的一段。
+ * 切成段之后，一段只画一条线、只标一次名。
+ */
+function segmentByVoice(line: Line, units: RubyUnit[]): VoiceSeg[] {
+  const out: VoiceSeg[] = []
+  for (const u of units) {
+    const part = tokenVoiceOf(line, u.tokenIndex)
+    const last = out[out.length - 1]
+    if (last && last.part === part) last.units.push(u)
+    else out.push({ part, units: [u] })
+  }
+  return out
 }
 
 /**
@@ -721,6 +963,7 @@ export function RubyPaper({ editing, reviewOpen, onToggleReview }: RubyPaperProp
    * 高亮本身照常跟着走，被暂停的只有滚动。
    */
   usePlayheadLine(paperRef, editingLineId !== null || editingKey !== null, !!project)
+  const pickBoxes = usePickedWords(paperRef)
 
   if (!project) {
     return <p className="kvm-ruby__muted">{t('ruby.empty.project')}</p>
@@ -776,6 +1019,14 @@ export function RubyPaper({ editing, reviewOpen, onToggleReview }: RubyPaperProp
       </div>
 
       <div className="kvm-ruby__paper" ref={paperRef} style={paperFont(project.style.font_name)}>
+        {/* 划词高亮：一块一块画在文字底下，坐标由 usePickedWords 量出来 */}
+        {pickBoxes.map((b, i) => (
+          <div
+            key={i}
+            className="kvm-ruby__pickbox"
+            style={{ left: b.x, top: b.y, width: b.w, height: b.h }}
+          />
+        ))}
         {project.lines.length === 0 && <p className="kvm-ruby__muted">{t('ruby.empty.lines')}</p>}
         {project.lines.length > 0 && lines.length === 0 && (
           <p className="kvm-ruby__muted">{t('ruby.empty.allMetadata')}</p>
@@ -783,6 +1034,7 @@ export function RubyPaper({ editing, reviewOpen, onToggleReview }: RubyPaperProp
 
         {lines.map((line) => {
           const units = lineUnits.get(line.id) ?? []
+          const segs = segmentByVoice(line, units)
           const lineTextValue = line.tokens.map((tk) => tk.text).join('')
           if (editingLineId === line.id) {
             return (
@@ -805,6 +1057,8 @@ export function RubyPaper({ editing, reviewOpen, onToggleReview }: RubyPaperProp
               data-meta={line.is_metadata || undefined}
               data-active={selLineId === line.id || undefined}
               data-voice={line.voice_part || undefined}
+              /* 这一行里不止一个声部：段线与段首的声部名只在这种行上画 */
+              data-multi={segs.length > 1 || undefined}
               style={paletteVars(project.palettes[line.voice_part] ?? project.palettes['main'])}
               /*
                 **整行都可点**，不只是字。行里除了字还有行号、右侧留白、声部标签，
@@ -825,7 +1079,23 @@ export function RubyPaper({ editing, reviewOpen, onToggleReview }: RubyPaperProp
               <span className="kvm-ruby__no num">{lineNo.get(line.id)}</span>
               <span className="kvm-ruby__text">
                 {units.length === 0 && <span className="kvm-ruby__muted">{t('ruby.empty.line')}</span>}
-                {units.map((u) => {
+                {segs.map((seg, si) => (
+                  /*
+                    一段 = 连着的、同一个声部的那些词。段是这里的渲染单位而不是词，
+                    于是「谁唱的」这件事在一句里是**连续**的：一条线、一个名字，
+                    而不是每个词各画一遍。
+
+                    段上覆盖这个声部自己的配色变量（`--ruby-fill` / `--ruby-outline`），
+                    所以一句里两个声部**颜色就是分开的**——此前整行只取行级配色，
+                    字级覆盖的那几个词跟旁边一模一样，只能靠那条短线认。
+                  */
+                  <span
+                    key={`${seg.part}-${si}`}
+                    className="kvm-ruby__seg"
+                    data-part={seg.part}
+                    style={paletteVars(project.palettes[seg.part] ?? project.palettes['main'])}
+                  >
+                    {seg.units.map((u) => {
                   const k = unitKey(u)
                   const rt = u.span?.text ?? ''
                   return (
@@ -836,19 +1106,45 @@ export function RubyPaper({ editing, reviewOpen, onToggleReview }: RubyPaperProp
                       data-src={u.missing ? 'missing' : u.src}
                       data-selected={k === selectedKey || undefined}
                       /*
-                        这个词自己被指派了别的声部（与所在行不同）。带上属性之后
-                        CSS 会在它上方压一条声部色的短线 —— 光靠行标签只说得出
-                        "这句里有两个声部"，说不出**是哪几个词**。
+                        本词覆盖的 token 区间，左闭右开。摆在 DOM 上是为了让
+                        **划词指派声部**（`EditVoice`）能只靠选区把范围算出来——
+                        否则它得自己再复刻一遍 unit → token 的换算，
+                        而那份换算是 `RubyModel` 的职责，不该有第二份。
                       */
-                      data-voice={tokenVoiceOf(line, u.tokenIndex) ?? undefined}
+                      data-tk={u.tokenIndex}
+                      data-tke={u.tokenEnd}
                       tabIndex={0}
-                      onClick={() => pick(u, true)}
+                      /*
+                        **单击只选中，双击才改注音。**
+                        单击是这一屏最高频的动作（选中 = 同时定位逐字轴、播放头、
+                        检查器），而它此前顺带弹出一个覆盖在字上的输入框：想听一下
+                        这个词唱的是什么，得先把输入框关掉。改注音是低频动作，
+                        让它多一次点击换来单击不再有副作用。
+                        键盘上的 Enter 仍直接进编辑——那一步本来就要按键才发生。
+                      */
+                      onClick={() => pick(u, false)}
+                      onDoubleClick={() => pick(u, true)}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter') pick(u, true)
                       }}
                     >
                       <ruby>
-                        {u.text}
+                        {/*
+                          词的文本按 **token** 拆成一个个可命中的小块。
+                          注音仍挂在整个词上（`rt` 对应整段 ruby 内容），但划词
+                          要精确到字：声部本来就是 token 级的属性（§8.5「Token 级
+                          可覆盖」），而「ゆらゆらゆらゆら」这种纯假名串整段是一个
+                          注音单位——卡在词上就意味着这八个字只能一起指派。
+                        */}
+                        {line.tokens.slice(u.tokenIndex, u.tokenEnd).map((tk, i) => (
+                          <span
+                            key={u.tokenIndex + i}
+                            className="kvm-ruby__ch"
+                            data-tk={u.tokenIndex + i}
+                          >
+                            {tk.text}
+                          </span>
+                        ))}
                         {rt && <rt className="kvm-ruby__rt">{rt}</rt>}
                       </ruby>
                       {u.span?.locked && <LockOutlined className="kvm-ruby__lockmark" />}
@@ -872,7 +1168,9 @@ export function RubyPaper({ editing, reviewOpen, onToggleReview }: RubyPaperProp
                       )}
                     </span>
                   )
-                })}
+                    })}
+                  </span>
+                ))}
               </span>
               {line.is_metadata && <span className="kvm-ruby__tag">{t('ruby.metadata')}</span>}
               {/*
@@ -882,10 +1180,10 @@ export function RubyPaper({ editing, reviewOpen, onToggleReview }: RubyPaperProp
                 标签是那一刻唯一的证据；等去样式舞台配好四个颜色，颜色才接手。
                 main 不标 —— 它是默认值，每行挂一个「main」只是噪音。
 
-                **一句多声部要在这里看得出来。**「A: 君の / B: 声が / 合: 聞こえる」
-                是对唱的常态（§8.5「Token 级可覆盖」），只画行级那一个标签的话，
-                屏幕上这一句看起来就是单声部的，字级覆盖等于隐身。
-                所以标的是这一行**实际用到的全部声部**，多于一个时逐个列出。
+                **一句多声部时段首也各标一个**（见 `kvm-ruby__seg`），两处并不重复：
+                段首那个说的是"这几个字是谁唱"，跟着字走、字一多就要横向找；
+                行尾这排说的是"这一句用到了哪些人"，位置固定，扫一列就能看出
+                整段歌是怎么分的。
               */}
               {linePartsOf(line).map((vp) => (
                 <span key={vp} className="kvm-ruby__voice" data-role="voice-tag" data-part={vp}>
@@ -1011,6 +1309,8 @@ const CSS = `
 
 /* 歌词纸：按成片样式渲染，不套用界面配色（docs/ui-redesign.md §六） */
 .kvm-ruby__paper {
+  /* 划词高亮块按内容坐标绝对定位在这里面（见 .kvm-ruby__pickbox） */
+  position: relative;
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
@@ -1114,25 +1414,101 @@ const CSS = `
  * 两条线叠在同一侧谁也读不出来。标签用 data-part 直接吐出声部名 ——
  * 一句里两个声部时，用户要知道的是"这几个字是谁唱"，不是"这里有点不一样"。
  */
-.kvm-ruby__unit[data-voice] {
-  box-shadow: inset 0 2px 0 var(--src-manual);
+/*
+ * 一句里的一段（连着的、同一个声部的那些词）。
+ *
+ * 段而不是词，是因为"谁唱的"在一句里本来就是连续的：三个词连着由同一个人唱，
+ * 就该是一条线、一个名字。逐词画的话，「君の/声が/聞こえる」会得到三条断线
+ * 和三个重复的名字，读起来像三次换人。
+ *
+ * 线走上边而不是下边：下划线已经被"读音来源"占了（§7.4 要求来源可见），
+ * 两条线叠在同一侧谁也读不出来。
+ *
+ * 颜色取这一段自己的声部色（--ruby-fill 由段上的内联变量给），
+ * 于是同一句里的两个声部**本身就是两个颜色**，不必靠线去分辨。
+ */
+.kvm-ruby__seg {
+  position: relative;
+  color: var(--ruby-fill);
 }
-.kvm-ruby__unit[data-voice]::before {
-  content: attr(data-voice);
+/*
+ * 段线与段名画在**注音上方一段距离处**，中间空出 0.42em。
+ *
+ * 贴着画会和注音糊成一片：注音本来就在字的正上方，声部线再压在它头上，
+ * 两行小字挤在一起，谁也读不出是什么。这条线说的是"这几个字归谁"，
+ * 与"这个字怎么读"是两件事，视觉上就该分开。
+ */
+.kvm-ruby__line[data-multi] .kvm-ruby__seg {
+  box-shadow: inset 0 2px 0 var(--ruby-fill);
+  /* 换行时每一截都要有线与圆角，否则一段跨两行就只有上面那截画得出来 */
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  padding-top: 0.42em;
+}
+.kvm-ruby__line[data-multi] .kvm-ruby__seg::before {
+  content: attr(data-part);
   position: absolute;
-  top: -0.55em;
+  top: -1.05em;
   left: 0;
   font-size: var(--fs-xs);
   line-height: 1;
-  color: var(--src-manual);
+  color: var(--ruby-fill);
   pointer-events: none;
   white-space: nowrap;
+}
+/* 段名浮在行的上沿之外，给它留出落脚的地方，别压到上一行的字 */
+.kvm-ruby__line[data-multi] {
+  margin-top: 0.7em;
+}
+
+/*
+ * 划词指派声部时的选中态。
+ *
+ * 词上关掉原生选区：拖动完全由 usePickedWords 自己算（那里有为什么不用文本选区
+ * 的完整理由），留着它只会在自绘高亮之下再糊一层系统蓝。
+ */
+.kvm-ruby__unit {
+  user-select: none;
+  -webkit-user-select: none;
+}
+/*
+ * 划词高亮：**一个视觉行一块**，由 JS 量出联合矩形后绝对定位在文字底下。
+ *
+ * 逐字各画一块走不通：块是半透明的，紧挨着会在接缝处叠出深色竖条，看着正好
+ * 像一道道分隔线；留空隙又变成一串小方块。而这里要表达的是"这一段"，
+ * 本来就该是一条连续的带子——高度也因此由整块统一，不随某个字有没有注音而起伏。
+ */
+.kvm-ruby__pickbox {
+  position: absolute;
+  z-index: 0;
+  background: var(--accent-weak);
+  border: 1px solid var(--accent);
+  border-radius: var(--r-sm);
+  pointer-events: none;
+}
+/* 文字压在高亮之上，别被那层底色糊住 */
+.kvm-ruby__line {
+  position: relative;
+  z-index: 1;
 }
 
 /*
  * 来源标记：先做下划线（docs/ui-redesign.md §八未决项的处置）。
  * 粗细用 em，跟着成片字号缩放，换字号不用回来改这里。
  */
+.kvm-ruby__ch {
+  position: relative;
+  display: inline-block;
+}
+/*
+ * 注音比基字宽时，ruby 默认把基字往右挪、让注音居中——于是每行的第一个字
+ * 各自缩进不同的量（实测 0 / 5.1 / 11.3px），整屏歌词的左边缘是毛的。
+ * 靠左对齐后所有行的首字落在同一竖线上；宽注音改为向右伸，
+ * 而右边本来就还有字，不空。
+ */
+.kvm-ruby__unit ruby {
+  ruby-align: start;
+}
 .kvm-ruby__unit {
   position: relative;
   display: inline-block;
