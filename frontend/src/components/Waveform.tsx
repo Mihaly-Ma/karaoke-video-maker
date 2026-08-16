@@ -191,6 +191,16 @@ export const Waveform = forwardRef<WaveformHandle, WaveformProps>(function Wavef
       ws.on('ready', () => {
         if (deadRef.current) return
         readyRef.current = true
+        /*
+         * 就绪后把高度再喂一次。
+         *
+         * 实例是在容器刚挂上、还没分到最终高度时建的（那时 props.height 还是
+         * 那个 96px 的下限），随后布局算完、ResizeObserver 把新高度传下来——
+         * 但解码完成会重建波形画布，两件事谁先谁后不定，输给它的那一次
+         * 就会留下一块只有下限高的波形。所以在这里按当前值再设一遍，
+         * **偶发的"波形没占满"就是这个竞态**。
+         */
+        ws.setOptions({ height: cbRef.current.height })
         applyZoom(ws, cbRef.current.pxPerSec)
         ws.setMuted(true) // 换源重载后再兜底一次，理由同上
         cbRef.current.onStatus({ kind: 'ready', durationMs: ws.getDuration() * 1000 })

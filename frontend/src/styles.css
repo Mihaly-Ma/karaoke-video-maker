@@ -369,18 +369,15 @@ label.checkbox-row {
   justify-content: flex-end;
 }
 
+/* 工程名：一条说明，不是控件——回首页在旁边那个独立按钮上 */
 .topbar__project {
   display: inline-flex;
   align-items: center;
   gap: var(--sp-2);
   max-width: 260px;
-  background: transparent;
-  border-color: transparent;
+  padding: 0 var(--sp-1);
   color: var(--fg);
   font-weight: 600;
-}
-.topbar__project:hover:not(:disabled) {
-  background: var(--bg-surface);
 }
 .topbar__project-name {
   overflow: hidden;
@@ -509,7 +506,12 @@ label.checkbox-row {
   display: flex;
   flex-direction: column;
   gap: var(--sp-3);
-  overflow: hidden;
+  /*
+   * 空间不够就让这一栏自己滚，而不是把画面压成 0 高。
+   * 实测窗口矮到 440px 时画面块被压到 0×0——画面和字幕一起消失，
+   * 而这一步本来就是"边看画面边调轴"。
+   */
+  overflow: hidden auto;
   padding-right: var(--sp-3);
 }
 
@@ -718,6 +720,20 @@ label.checkbox-row {
 }
 /* 候选那一组不参与抢空间：有几个 chip 就占多宽 */
 .edit-reading .kvm-ruby__cands {
+  flex: 0 0 auto;
+}
+/*
+ * 整条**不换行**，窄了就自己横向滚。
+ *
+ * 换行的代价在这里特别大：这条贴着歌词正文，多一行就少一行歌词；而且换下去的
+ * 往往只是候选或那三个动作按钮，孤零零一行看着像另一个面板。
+ */
+.edit-reading .kvm-ruby__box--bar {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.edit-reading .kvm-ruby__box--bar > * {
   flex: 0 0 auto;
 }
 

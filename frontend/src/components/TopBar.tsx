@@ -37,7 +37,12 @@ interface TopBarProps {
   step: StepKey
   status: Record<StepKey, StepStatus>
   onStep: (step: StepKey) => void
-  /** 回首页。工程名可点是"同时做几首歌"的正常入口，不是隐藏功能 */
+  /**
+   * 回首页。**它是一个独立按钮，不挂在工程名上。**
+   *
+   * 工程名是"我现在在编哪首歌"这条信息，点它跳走是把标签当按钮用：读它的人
+   * 没打算离开，而想离开的人不会想到去点标题。两件事各归各的控件。
+   */
   onHome: () => void
 }
 
@@ -52,10 +57,20 @@ export default function TopBar({ step, status, onStep, onHome }: TopBarProps) {
   return (
     <header className="topbar">
       <div className="topbar__side">
-        <button type="button" className="topbar__project" onClick={onHome} title={t('topbar.home')}>
+        <button
+          type="button"
+          className="iconbtn"
+          data-role="home"
+          onClick={onHome}
+          title={t('topbar.home')}
+          aria-label={t('topbar.home')}
+        >
           <AppstoreOutlined />
-          <span className="topbar__project-name">{project?.title || t('common.untitled')}</span>
         </button>
+        {/* 工程名只是说明现在在编哪首歌，不承担跳转 */}
+        <span className="topbar__project" data-role="project-name">
+          <span className="topbar__project-name">{project?.title || t('common.untitled')}</span>
+        </span>
 
         {/*
          * 撤销/重做为什么不是 antd 的 UndoOutlined / RedoOutlined：那两个图标的

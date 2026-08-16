@@ -357,9 +357,18 @@ export default function MediaTrackCard({
         // 产出的 WAV 而言，"metadata" 走 Range 请求即可拿到时长，不会拉整份文件。
         preload="metadata"
         hidden
-        onLoadedMetadata={(e) =>
-          setDurationSec((prev) => prev ?? e.currentTarget.duration)
-        }
+        /*
+         * **先把值取出来，再交给 setter。**
+         *
+         * `setState` 的 updater 是延迟执行的（React 在渲染阶段才调用它），
+         * 而那时合成事件的 `currentTarget` 已经被置空——于是这里读到的是
+         * `null.duration`，抛出去就是整页白屏。切换工程时必现：素材页重新挂载，
+         * 音轨元数据紧接着加载完，正好撞上这个时序。
+         */
+        onLoadedMetadata={(e) => {
+          const d = e.currentTarget.duration
+          setDurationSec((prev) => prev ?? d)
+        }}
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}
         onEnded={() => {

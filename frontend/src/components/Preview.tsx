@@ -120,6 +120,37 @@ import { useProject } from '../state/projectStore'
  */
 const ASS_REFRESH_DEBOUNCE_MS = 120
 
+/**
+ * 上一份工程的音频正在关闭。**新的那份必须等它关完**。
+ *
+ * 这是回收音频内存唯一可靠的手段：`AudioContext.close()` 会强制放掉这个 ctx 的
+ * 全部资源，而单靠"把 AudioBuffer 的引用清掉"等 GC 是不作数的——实测来回切五次
+ * 工程，渲染进程 RSS 从 1.1GB 一路涨到 1.7GB 且从不回落；把音轨请求掐掉、其余
+ * 完全照旧，同样切五次只有 ±40MB 的正常波动。泄漏就全在这条链上。
+ *
+ * 关闭是异步的，而 React 的 cleanup 不能 await，所以排成一条队：dispose 把
+ * close 接到队尾，load 在建新 ctx 之前先等这条队。于是任一时刻只有一份工程的
+ * 音频占着内存——**这也是为什么不能改成"全应用共享一个 ctx"**：共享就永远不会
+ * close，旧工程那几百 MB 的 AudioBuffer 会一直挂在它上面。
+ */
+let audioClosing: Promise<unknown> = Promise.resolve()
+
+/**
+ * 编辑期音频解码的采样率（Hz）。
+ *
+ * 见 `AudioEngine.load` 里的说明：它直接决定试听占多少内存，而这一步要的是
+ * "听得出唱到哪儿"，不是成片音质（CLAUDE.md §5.10）。
+ */
+const EDIT_SAMPLE_RATE = 24000
+
+/**
+ * 画面停多久算卡死（毫秒）。
+ *
+ * 取值要大于一帧的间隔（24fps 也才 42ms），又要短到用户还没来得及觉得
+ * "画面坏了"就已经追回来。600ms 大约是"愣了一下"的量级。
+ */
+const STUCK_MS = 600
+
 /** 视频相对音频时钟的软纠偏阈值（秒）。CLAUDE.md D15 给的是 40~50ms */
 const SOFT_SYNC_S = 0.045
 /** 超过这个偏差就直接 seek —— 用变速已经追不回来了 */
@@ -354,9 +385,18 @@ class AudioEngine {
   ): Promise<PreviewIssue[]> {
     const warnings: PreviewIssue[] = []
     this.levels = { ...levels }
+    // 先等上一份工程的音频彻底关掉，两份几百 MB 的解码结果不该在内存里叠着
+    await audioClosing
+    if (this.disposed) return warnings
+
     let ctx: AudioContext
     try {
-      ctx = new AudioContext()
+      /*
+       * `decodeAudioData` 会把音频重采样到 ctx 的采样率，所以这一个参数就把内存
+       * 对半砍。24kHz 的上限是 12kHz，对"这个字唱在哪儿"绰绰有余；导出根本不走
+       * 这条路（后端 ffmpeg 混音），成片音质不受影响（CLAUDE.md §5.10）。
+       */
+      ctx = new AudioContext({ sampleRate: EDIT_SAMPLE_RATE })
     } catch (e) {
       return [
         {
@@ -537,17 +577,31 @@ class AudioEngine {
     if (this.master) this.master.gain.value = value
   }
 
+  /**
+   * 拆掉这一份工程的全部音频资源。
+   *
+   * **每个节点都要显式 disconnect**：只清 Map 是不够的，断不开的 gain 还挂在
+   * ctx 的图上、master 还连着 destination，于是这一整条链连同它引用到的东西
+   * 都活着——切一次工程就多留一份。AudioBuffer 也一样，只有等到没人引用它
+   * 才轮得到回收，而不是 `buffers.clear()` 那一刻。
+   *
+   * ctx 一定要**关**：那是唯一能真正放掉 AudioBuffer 的动作（见 `audioClosing`）。
+   */
   dispose(): void {
     this.disposed = true
     this.stopSources()
     this.stretch?.dispose()
     this.stretch = null
     this.buffers.clear()
+    for (const gain of this.gains.values()) gain.disconnect()
     this.gains.clear()
     this.present.clear()
-    void this.ctx?.close()
-    this.ctx = null
+    this.master?.disconnect()
     this.master = null
+    const ctx = this.ctx
+    this.ctx = null
+    // 接到队尾：下一份工程要等它关完才开始解码
+    audioClosing = audioClosing.then(() => ctx?.close()).catch(() => undefined)
   }
 
   private stopSources(): void {
@@ -1133,6 +1187,9 @@ export function Preview({ className }: PreviewProps) {
   useEffect(() => {
     if (!playing) return
     let raf = 0
+    /** 上一次看到的画面位置，以及它停在那儿多久了——卡死判定靠这两个 */
+    let lastVideoTime = -1
+    let sameSince = performance.now()
     const tick = (): void => {
       const engine = audioRef.current
       if (engine?.available) {
@@ -1145,12 +1202,42 @@ export function Preview({ className }: PreviewProps) {
         }
         emitPlayhead(Math.round(pos * 1000))
         void overlayRef.current?.renderAt(pos * 1000)
+
+        /*
+         * 画面卡住了就把它拉回来。
+         *
+         * 时钟改读音频之后，视频卡顿不再冻住进度与字幕——但画面本身还是停在
+         * 那儿，而且它自己不会恢复：解码器被拖住、标签页被限流、系统忙过一阵，
+         * 事后都不会自动追上音频。所以这里当看门狗：
+         *
+         * - 被暂停（浏览器出于省电/资源策略会这么干）→ 追上音频再 play()
+         * - 没暂停但画面时间连着 `STUCK_MS` 不动 → seek 一次，通常能把解码器踢醒
+         *
+         * 判定放在这个循环里而不是帧回调里：帧回调本身就是卡住时最先停掉的那个，
+         * 让它去检测自己有没有停是不成立的。
+         */
+        const video = videoRef.current
+        if (video && videoActive && engine.playing) {
+          const now = performance.now()
+          if (video.paused) {
+            video.currentTime = pos
+            void video.play().catch(() => undefined)
+            lastVideoTime = -1
+            sameSince = now
+          } else if (video.currentTime !== lastVideoTime) {
+            lastVideoTime = video.currentTime
+            sameSince = now
+          } else if (now - sameSince > STUCK_MS) {
+            video.currentTime = pos
+            sameSince = now
+          }
+        }
       }
       raf = requestAnimationFrame(tick)
     }
     raf = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(raf)
-  }, [emitPlayhead, playing, setPlaying])
+  }, [emitPlayhead, playing, setPlaying, videoActive])
 
   // --- 播放位置：store → 播放器（时间轴 / 注音编辑器发来的跳转意图） ----------
 
@@ -1696,7 +1783,12 @@ const styles = {
     background: '#000',
     aspectRatio: '16 / 9',
     overflow: 'hidden',
-    minHeight: 0,
+    /*
+     * 画面有下限，不许被压没。外层布局在窗口变矮时会一路压缩这一格
+     * （实测 440px 高的窗口下它是 0×0，画面与字幕一起消失），
+     * 而这一步的常态就是"边看画面边调轴"。放不下时由左栏自己滚。
+     */
+    minHeight: 88,
     containerType: 'size',
   },
   // 画布。宽度由 JSX 处按画幅算出（`min(100cqw, 100cqh × 画幅比)`，即信箱式内缩），
