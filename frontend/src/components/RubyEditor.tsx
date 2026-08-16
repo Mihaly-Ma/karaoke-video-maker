@@ -1463,6 +1463,15 @@ const CSS = `
 .kvm-ruby__seg {
   position: relative;
   color: var(--ruby-fill);
+  /*
+   * 描边也要在**段**上求值，不能只在行上写一次。
+   *
+   * 声部之间的差别恰恰在描边色上：配色约定是填充走"家族身份"（几乎都是白），
+   * 描边的色相走"声部身份"（§8.5 的通道分配）。而 -webkit-text-stroke 在行上
+   * 声明时就已经算成了具体颜色再继承下去，段里重设 --ruby-outline 根本改不动它
+   * ——于是一行里两个声部看起来是同一个颜色。
+   */
+  -webkit-text-stroke: var(--paper-stroke) var(--ruby-outline, var(--bg-canvas));
 }
 /*
  * 段线与段名画在**注音上方一段距离处**，中间空出 0.42em。
@@ -1472,7 +1481,7 @@ const CSS = `
  * 与"这个字怎么读"是两件事，视觉上就该分开。
  */
 .kvm-ruby__line[data-multi] .kvm-ruby__seg {
-  box-shadow: inset 0 2px 0 var(--ruby-fill);
+  box-shadow: inset 0 2px 0 var(--ruby-outline, var(--fg-2));
   /* 换行时每一截都要有线与圆角，否则一段跨两行就只有上面那截画得出来 */
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
@@ -1485,7 +1494,21 @@ const CSS = `
   left: 0;
   font-size: var(--fs-xs);
   line-height: 1;
-  color: var(--ruby-fill);
+  /*
+   * 线与名字取**描边色**而不是填充色：配色约定里填充走"家族身份"（几乎都是白），
+   * 描边的色相才是声部身份（§8.5）。取填充的话，两个声部的线会一样白。
+   */
+  color: var(--ruby-outline, var(--fg-2));
+  /* 名字压在同色的段线上会糊成一个色块，垫一层画布底把它托起来 */
+  background: var(--bg-canvas);
+  /*
+   * 去掉描边。正文的字带 -webkit-text-stroke（那是为了在任意画面上都醒目），
+   * 而它会继承到这个几像素高的小标签上——一描边就糊成一团，认不出是哪个字。
+   */
+  -webkit-text-stroke: 0;
+  font-weight: 700;
+  padding: 0 3px;
+  border-radius: var(--r-sm);
   pointer-events: none;
   white-space: nowrap;
 }

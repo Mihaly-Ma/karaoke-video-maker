@@ -1077,21 +1077,32 @@ export function Preview({ className }: PreviewProps) {
     setRvfcMissing(!hasFrameCallback(video))
 
     return requestFrameLoop(video, (meta: FrameMeta) => {
-      // 画布模式没有 rVFC 自动重绘，时钟只能由这里推——`renderAt` 是它唯一的入口。
-      // 内部自己排队（只保留最后一次），逐帧调用不会把 IPC 排成长队。
-      void overlayRef.current?.renderAt(meta.mediaTime * 1000)
-
-      emitPlayhead(Math.round(meta.mediaTime * 1000))
+      const base = rateRef.current
+      const engine = audioRef.current
+      /*
+       * **音频在放的时候，时钟不归这里管。**
+       *
+       * 播放头与字幕此前都挂在这个帧回调上，于是视频一卡（解码跟不上、代理还在
+       * 缓冲、系统忙），rVFC 就不再来——画面与进度一起冻住，而音频是独立时钟
+       * 仍在走，听感上是"声音继续、画面停了"；再按暂停/播放，视频从冻住的地方
+       * 接着放，进度也跟着退回去。
+       *
+       * 而 D15 定的本来就是音频当主时钟、视频当从动方。所以这里只留纠偏，
+       * 时钟交给下面那个 rAF 循环（它读的是音频引擎的位置）。
+       * 音频不可用时（降级成 <video> 出声）这里仍兼任时钟，见下面的分支。
+       */
+      if (!engine?.available || !engine.playing) {
+        // 画布模式没有 rVFC 自动重绘，`renderAt` 是字幕唯一的入口。
+        // 内部自己排队（只保留最后一次），逐帧调用不会把 IPC 排成长队。
+        void overlayRef.current?.renderAt(meta.mediaTime * 1000)
+        emitPlayhead(Math.round(meta.mediaTime * 1000))
+        if (video.playbackRate !== base) video.playbackRate = base
+        return
+      }
 
       // 音频是主时钟，视频跟着它走。偏差小时微调播放速率（静音视频调速无副作用），
       // 大到追不回来才硬 seek —— 每次超阈值就 seek 会让画面一直抖。
       // 基准速率是用户选的试听速率，纠偏只在它上下浮动 ±2%。
-      const base = rateRef.current
-      const engine = audioRef.current
-      if (!engine?.available || !engine.playing) {
-        if (video.playbackRate !== base) video.playbackRate = base
-        return
-      }
       // 纠偏比的是「播放时钟」，所以这里用 currentTime 而不是 mediaTime：
       // mediaTime 是已呈现帧的时间，天然落后于播放位置一帧左右。
       const drift = video.currentTime - engine.positionSec
@@ -1107,31 +1118,39 @@ export function Preview({ className }: PreviewProps) {
   }, [emitPlayhead, videoActive])
 
   /**
-   * 没有可用视频时的时钟：rVFC 依附于 <video>，纯音频工程（以及视频放不了、
-   * 已降级为纯音频的工程）里它一帧都不会触发。此时直接读音频引擎
-   * （主时钟本来就是它），否则播放头会一动不动 ——
-   * 「先只有音轨、边听边打轴」正是本工具最常见的起点（CLAUDE.md §2.5）。
+   * **播放时钟：读音频引擎，与有没有视频无关。**
+   *
+   * 音频本来就是主时钟（D15），视频是从动方。此前这个循环只在没有视频时才跑，
+   * 有视频时改由 rVFC 推播放头——代价是视频一卡（解码跟不上、代理还在缓冲、
+   * 系统忙）帧回调就不来了，画面与进度一起冻住而声音继续；再按一次播放，
+   * 视频从冻住处接着放、进度跟着退回去。现在时钟不再受画面卡顿影响。
+   *
+   * 字幕也跟这个时钟走，理由相同：画布模式下字幕只能由代码推
+   * （`renderAt` 是唯一入口），挂在帧回调上就会跟着一起冻住。
+   *
+   * 音频不可用时（降级成 <video> 出声）这里什么都不做，时钟由 rVFC 兼任。
    */
   useEffect(() => {
-    if (videoActive || !playing) return
+    if (!playing) return
     let raf = 0
     const tick = (): void => {
       const engine = audioRef.current
       if (engine?.available) {
         const pos = engine.positionSec
-        // 音频放完了要自己停：没有 <video> 就没有 onEnded 兜底
+        // 音频放完了要自己停：纯音频工程没有 <video> 的 onEnded 兜底
         if (engine.durationSec > 0 && pos >= engine.durationSec) {
           emitPlayhead(Math.round(engine.durationSec * 1000))
           setPlaying(false)
           return
         }
         emitPlayhead(Math.round(pos * 1000))
+        void overlayRef.current?.renderAt(pos * 1000)
       }
       raf = requestAnimationFrame(tick)
     }
     raf = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(raf)
-  }, [emitPlayhead, videoActive, playing, setPlaying])
+  }, [emitPlayhead, playing, setPlaying])
 
   // --- 播放位置：store → 播放器（时间轴 / 注音编辑器发来的跳转意图） ----------
 
@@ -1487,7 +1506,7 @@ export function Preview({ className }: PreviewProps) {
           {playing ? <PauseOutlined /> : <CaretRightOutlined />}
         </button>
 
-        <span ref={clockRef} style={styles.clock}>
+        <span ref={clockRef} data-testid="clock" style={styles.clock}>
           {formatTime(useProject.getState().playheadMs)}
         </span>
         <span style={styles.duration}>/ {formatTime(durationMs)}</span>
