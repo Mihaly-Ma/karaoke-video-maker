@@ -242,15 +242,34 @@ export class TimeStretchPlayer {
     return this.clock.mediaSec + elapsed * this.clock.rate
   }
 
-  dispose(): void {
-    if (this.disposed) return
+  /**
+   * 释放。返回的 promise 在处理器交回样本内存后 resolve。
+   *
+   * 处理器收到 `dispose` 会把整曲样本 transfer **回主线程**——WebKit 关闭
+   * AudioContext 时并不回收 worklet 堆里的 ArrayBuffer 后备内存（实测每切一次
+   * 工程净留 ~135MB），transfer-back 的 detach 是唯一立即生效的放手动作。
+   * 调用方应等这个 promise 再 `ctx.close()`，否则关闭可能抢在消息投递之前。
+   * 带超时兜底：worklet 线程已死时（此时内存本来就随线程回收了）不能卡住关闭队列。
+   */
+  dispose(): Promise<void> {
+    if (this.disposed) return Promise.resolve()
     this.disposed = true
+    const ack = new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 1000)
+      this.node.port.onmessage = (e: MessageEvent<{ type?: string }>) => {
+        if (e.data?.type !== 'disposed') return
+        // 回执携带的 buffer 到这里就没有引用了，随消息一起进主线程的垃圾
+        clearTimeout(timer)
+        this.node.port.close()
+        resolve()
+      }
+    })
     try {
       this.node.port.postMessage({ type: 'dispose' })
     } catch {
       /* port 已关闭 */
     }
-    this.node.port.onmessage = null
     this.node.disconnect()
+    return ack
   }
 }

@@ -544,9 +544,33 @@ if (typeof registerProcessor === 'function' && typeof AudioWorkletProcessor === 
           core.setRate(msg.value)
           this.report()
           break
-        case 'dispose':
+        case 'dispose': {
           this.alive = false
+          // 大块内存（整曲样本 + 抽取参考）transfer 回主线程再置空引用。
+          // WebKit 关闭 AudioContext 时不回收 worklet 堆里的 ArrayBuffer 后备内存
+          // （实测来回切工程每轮净留 ~135MB，恰为转移进来的样本量），而 detach
+          // 是立即生效的放手动作，不依赖 worklet 侧是否还会跑 GC。
+          const bufs = new Set()
+          for (const s of this.slots) {
+            if (!s) continue
+            for (const ch of s.channels) if (ch.buffer.byteLength > 0) bufs.add(ch.buffer)
+          }
+          for (const arr of core.layerRefDecim) if (arr.buffer.byteLength > 0) bufs.add(arr.buffer)
+          if (core.refDecim.buffer.byteLength > 0) bufs.add(core.refDecim.buffer)
+          this.slots = this.layerIds.map(() => null)
+          this.presentIds = []
+          core.layers = []
+          core.layerRefDecim = []
+          core.refDecim = new Float32Array(0)
+          core.acc = []
+          core.fifo = []
+          try {
+            this.port.postMessage({ type: 'disposed' }, [...bufs])
+          } catch {
+            // 端口已关：数据回不去，但引用已清空，只能指望作用域随线程销毁
+          }
           break
+        }
         default:
           break
       }

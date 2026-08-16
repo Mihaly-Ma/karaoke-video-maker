@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import * as api from '../api/client'
 import type { Project } from '../api/types'
 import { t } from '../i18n'
+import { useReleaseMediaOnUnmount } from '../lib/releaseMedia'
 import { trackPath, type TrackKind } from './MediaTrackCard'
 
 /**
@@ -60,7 +61,9 @@ function formatDuration(ms: number): string {
 
 export default function MediaVideoPreview({ project, onPlayback }: MediaVideoPreviewProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
+  useReleaseMediaOnUnmount(videoRef)
   const companionRef = useRef<HTMLAudioElement>(null)
+  useReleaseMediaOnUnmount(companionRef)
 
   const [unplayable, setUnplayable] = useState(false)
   const [videoPlaying, setVideoPlaying] = useState(false)

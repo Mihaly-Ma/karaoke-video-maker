@@ -94,6 +94,7 @@ import type { ComponentType } from 'react'
 import * as api from '../api/client'
 import type { JobStatus } from '../api/types'
 import { t } from '../i18n'
+import { useReleaseMediaOnUnmount } from '../lib/releaseMedia'
 import {
   checkPreviewEnvironment,
   describeError,
@@ -341,6 +342,8 @@ class AudioEngine {
   private running = false
   private rate = 1
   private disposed = false
+  /** 中途离开（加载中导航走人）时掐掉在途的音轨请求，别让它们跑完再丢弃 */
+  private readonly aborter = new AbortController()
 
   get available(): boolean {
     return this.present.size > 0
@@ -455,7 +458,9 @@ class AudioEngine {
 
     for (const id of layers) {
       try {
-        const resp = await fetch(api.mediaUrl(projectId, LAYER_KIND[id]))
+        const resp = await fetch(api.mediaUrl(projectId, LAYER_KIND[id]), {
+          signal: this.aborter.signal,
+        })
         if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`)
         const decoded = await ctx.decodeAudioData(await resp.arrayBuffer())
         if (this.disposed) return warnings
@@ -468,6 +473,8 @@ class AudioEngine {
           this.buffers.set(id, decoded)
         }
       } catch (e) {
+        // 中途离开导致的中断不是失败，何况此刻已没有人展示这些警告
+        if (this.disposed) return warnings
         warnings.push({
           level: 'warn',
           title: t('media.player.warn.trackFailed', { track: t(`media.player.track.${id}`) }),
@@ -589,8 +596,13 @@ class AudioEngine {
    */
   dispose(): void {
     this.disposed = true
+    this.aborter.abort()
     this.stopSources()
-    this.stretch?.dispose()
+    // 拉伸器的释放是异步的：处理器要把整曲样本 transfer 回来（WebKit 上这是
+    // 唯一能把它们从 worklet 堆里拿出来的动作，见 lib/timestretch.ts）。
+    // ctx.close() 必须排在回执之后，否则关闭会抢在消息投递之前，样本就永远
+    // 留在那个堆里——close 并不回收它们，这正是当初泄漏的根因。
+    const stretchAck = this.stretch?.dispose() ?? Promise.resolve()
     this.stretch = null
     this.buffers.clear()
     for (const gain of this.gains.values()) gain.disconnect()
@@ -601,7 +613,10 @@ class AudioEngine {
     const ctx = this.ctx
     this.ctx = null
     // 接到队尾：下一份工程要等它关完才开始解码
-    audioClosing = audioClosing.then(() => ctx?.close()).catch(() => undefined)
+    audioClosing = audioClosing
+      .then(() => stretchAck)
+      .then(() => ctx?.close())
+      .catch(() => undefined)
   }
 
   private stopSources(): void {
@@ -652,6 +667,7 @@ export function Preview({ className }: PreviewProps) {
   padTo169Ref.current = padTo169
 
   const videoRef = useRef<HTMLVideoElement | null>(null)
+  useReleaseMediaOnUnmount(videoRef)
   /**
    * 字幕画布的宿主。React 不往里放任何子节点，画布由字幕层独占——与
    * `StyleFilmPreview` 同一形态。

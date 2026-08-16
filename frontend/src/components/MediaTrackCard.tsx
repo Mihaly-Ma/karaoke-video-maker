@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPoi
 import * as api from '../api/client'
 import type { Project } from '../api/types'
 import { t } from '../i18n'
+import { useReleaseMediaOnUnmount } from '../lib/releaseMedia'
 import Waveform, { type WaveformStatus } from './Waveform'
 
 /**
@@ -191,6 +192,7 @@ export default function MediaTrackCard({
   onPlayback,
 }: MediaTrackCardProps) {
   const audioRef = useRef<HTMLAudioElement>(null)
+  useReleaseMediaOnUnmount(audioRef)
   const waveWrapRef = useRef<HTMLDivElement>(null)
 
   const [playing, setPlaying] = useState(false)
