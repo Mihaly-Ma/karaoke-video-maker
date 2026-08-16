@@ -1350,9 +1350,8 @@ export function Preview({ className }: PreviewProps) {
    * 编辑器里看到的形状必须是成片的形状。1:1 的 MV 塞进写死的 16:9 盒子里，
    * 画面只占中间 56%，两侧一大片黑——那不是这支片子的样子。
    *
-   * 尺寸未知时（工程还没有画面）退回 16:9。**JASSUB 不受这里影响**：它按
-   * `<video>` 的实际内容区定位自己的 canvas（`_getElementBoundingBox`），
-   * 盒子比例不对时字幕仍贴着画面，只是画面被摆在了一个错误形状的框里。
+   * 尺寸未知时（工程还没有画面）退回 16:9。补边开着时它是**补边后**的画布比例，
+   * 因为 `canvasSize` 取自 ASS 的 PlayRes。
    */
   const filmW = canvasSize?.width ?? project.video_width
   const filmH = canvasSize?.height ?? project.video_height
@@ -1360,36 +1359,63 @@ export function Preview({ className }: PreviewProps) {
 
   return (
     <div className={className} style={styles.root}>
-      {/* JASSUB 会把它的 canvas 绝对定位插在 <video> 之后，所以这里必须 relative */}
+      {/*
+       * 画面区分两层，**不能合成一层**。
+       *
+       * 外层 `stage` 只是一块黑底，它的高度由上下游布局说了算：编辑舞台给的是
+       * `flex: 0 1 auto`、导出舞台给的是 `flex: 1 1 auto`，窗口一变形它就被压扁
+       * 或拉高，`aspectRatio` 在这种时候是让位的一方。
+       *
+       * 内层 `film` 才是画布，比例恒等于 ASS 的 PlayRes：宽度按容器查询单位算出
+       * 信箱式内缩的结果，高度交给宽高比推导，两个方向都不会被外面的形变带走。
+       *
+       * **已被验证是错的做法**：让字幕画布直接铺满 `stage`。画布模式下 JASSUB
+       * 不碰 canvas 的 CSS 尺寸（`resize()` 里设 CSS 宽高那段有 `if (this._video)`
+       * 守着），只把位图按 PlayRes 比例内缩后交给 CSS 去拉伸——盒子比例一旦不等于
+       * PlayRes，字幕就被拉伸，且随窗口比例连续变化，而同一个盒子里的 `<video>`
+       * 有 `object-fit: contain` 顶着、画面纹丝不动，看起来就像"只有字幕会变形"。
+       * 视频模式没这个毛病是因为那时 JASSUB 自己把 canvas 摆到视频的内容矩形上。
+       */}
       <div style={{ ...styles.stage, aspectRatio: filmAspect }}>
-        {hasVideo && (
-          <video
-            ref={videoRef}
-            // 跨源隔离页面里不加 crossOrigin，带 CORP 头的媒体会加载失败；
-            // JASSUB 还要靠未被污染的画面读色彩空间来对齐字幕颜色矩阵
-            crossOrigin="anonymous"
-            playsInline
-            muted
-            preload="auto"
-            src={api.mediaUrl(project.id, videoSrcKind)}
-            onEnded={onEnded}
-            // 元素报错就地降级为纯音频，**不当致命错误**：声音、播放头、打轴、
-            // 导出全都不依赖这条视频轨（WebKit 放不了 .mkv 时走的正是这里）
-            onError={markVideoUnplayable}
-            style={styles.video}
-          />
-        )}
-        {/* 字幕画布的宿主：铺满整个画面区，字幕因此能画进补边的黑边里 */}
-        <div ref={overlayHostRef} style={styles.overlayHost} />
-        {stageNote && (
-          <div style={styles.noVideo}>
-            <span style={styles.noVideoTitle}>{stageNote.title}</span>
-            {stageNote.hint && <span style={styles.noVideoHint}>{stageNote.hint}</span>}
-          </div>
-        )}
-        {overlayLoading && videoActive && (
-          <div style={styles.badge}>{t('media.player.overlayLoading')}</div>
-        )}
+        <div
+          style={{
+            ...styles.film,
+            aspectRatio: filmAspect,
+            // 信箱式内缩：宽度取"盒子宽"与"盒子高 × 画幅比"里的小者。
+            // 比例直接复用 `filmAspect`（`1920 / 1080` 这样的分式），
+            // 与上一行同源——另算一份数值就多一处会漂移的地方
+            width: `min(100cqw, calc(100cqh * ${filmAspect}))`,
+          }}
+        >
+          {hasVideo && (
+            <video
+              ref={videoRef}
+              // 跨源隔离页面里不加 crossOrigin，带 CORP 头的媒体会加载失败；
+              // JASSUB 还要靠未被污染的画面读色彩空间来对齐字幕颜色矩阵
+              crossOrigin="anonymous"
+              playsInline
+              muted
+              preload="auto"
+              src={api.mediaUrl(project.id, videoSrcKind)}
+              onEnded={onEnded}
+              // 元素报错就地降级为纯音频，**不当致命错误**：声音、播放头、打轴、
+              // 导出全都不依赖这条视频轨（WebKit 放不了 .mkv 时走的正是这里）
+              onError={markVideoUnplayable}
+              style={styles.video}
+            />
+          )}
+          {/* 字幕画布的宿主：铺满整个画布，字幕因此能画进补边的黑边里 */}
+          <div ref={overlayHostRef} style={styles.overlayHost} />
+          {stageNote && (
+            <div style={styles.noVideo}>
+              <span style={styles.noVideoTitle}>{stageNote.title}</span>
+              {stageNote.hint && <span style={styles.noVideoHint}>{stageNote.hint}</span>}
+            </div>
+          )}
+          {overlayLoading && videoActive && (
+            <div style={styles.badge}>{t('media.player.overlayLoading')}</div>
+          )}
+        </div>
       </div>
 
       <div style={styles.controls}>
@@ -1566,12 +1592,39 @@ const styles = {
     color: '#888',
     fontSize: 13,
   },
+  // 画面区的外层：一块黑底，被压扁时露出来的就是它，画布本身在 `film` 里。
+  //
   // aspectRatio 由工程的画面尺寸逐次覆盖（见 `filmAspect`）；这里的 16/9 只是
   // 还没有画面时的兜底。写死 16/9 会让 1:1 / 4:3 的片子被塞进一个横长的盒子里，
   // 画面缩在中间、两侧一大片黑，编辑时看到的形状根本不是成片的形状。
-  stage: { position: 'relative', background: '#000', aspectRatio: '16 / 9', overflow: 'hidden' },
+  //
+  // `containerType: size` 是给 `film` 的宽度公式用的：它要按**这块盒子**的实际
+  // 宽高去算内缩，而 cqw / cqh 取的正是最近的 size 容器
+  stage: {
+    position: 'relative',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    background: '#000',
+    aspectRatio: '16 / 9',
+    overflow: 'hidden',
+    minHeight: 0,
+    containerType: 'size',
+  },
+  // 画布。宽度由 JSX 处按画幅算出（`min(100cqw, 100cqh × 画幅比)`，即信箱式内缩），
+  // 高度交给 aspect-ratio 推导，比例因此恒等于 ASS 的 PlayRes。
+  //
+  // **已被验证是错的做法**：`width: 100% + max-height: 100% + aspect-ratio`。
+  // 看起来该由宽高比把高度上限转成宽度上限，chromium 与 WebKit 实测都**不会**：
+  // `width` 是明确值时只有高度被截断、宽度纹丝不动，盒子比例照样被压扁，
+  // 与不改之前逐个相同，等于没修。回归基线 `scripts/verify-preview-aspect.mjs`。
+  film: {
+    position: 'relative',
+    aspectRatio: '16 / 9',
+    overflow: 'hidden',
+  },
   video: { width: '100%', height: '100%', objectFit: 'contain', display: 'block' },
-  // 铺满画面区、不吃鼠标事件（走带与徽章仍要可点）
+  // 铺满画布、不吃鼠标事件（走带与徽章仍要可点）
   overlayHost: { position: 'absolute', inset: 0, pointerEvents: 'none' },
   noVideo: {
     position: 'absolute',

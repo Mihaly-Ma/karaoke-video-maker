@@ -60,9 +60,16 @@ export const STYLE_STAGE_CSS = `
 }
 .sty-chip--on { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-/* 预览盒：flex 居中 + aspect-ratio，比例由工程的画面尺寸决定（内联 --sty-aspect）。
-   max-height 经宽高比转移成宽度上限，画面因此在任意窗口尺寸下都是信箱式内缩，
-   不会被拉伸——JASSUB 在画布模式下按同一个比例做内缩，两边必须一致。 */
+/* 预览盒：比例由工程的画面尺寸决定（内联 --sty-aspect），且**必须**在任意窗口
+   尺寸下都保持住——JASSUB 在画布模式下不碰 canvas 的 CSS 尺寸，只把位图按这个
+   比例内缩后交给 CSS 拉伸，盒子一被压扁，字幕就跟着变形。
+
+   写法是信箱式内缩：宽度取"容器宽"与"容器高 × 画幅比"里的小者，高度由宽高比推导。
+   .sty-film-wrap 因此要声明成 size 容器（cqw / cqh 取的是它的内容盒）。
+
+   **已被验证是错的做法**：width: 100% + max-height: 100%，指望宽高比把高度上限
+   转成宽度上限。chromium 与 WebKit 实测都**不会**：width 是明确值时只有高度被截断、
+   宽度纹丝不动，比例照样破。回归基线 frontend/scripts/verify-preview-aspect.mjs。 */
 .sty-film-wrap {
   flex: 1 1 auto;
   min-height: 0;
@@ -71,11 +78,11 @@ export const STYLE_STAGE_CSS = `
   justify-content: center;
   padding: var(--sp-4);
   overflow: hidden;
+  container-type: size;
 }
 .sty-film {
   position: relative;
-  width: 100%;
-  max-height: 100%;
+  width: min(100cqw, calc(100cqh * var(--sty-aspect, 16 / 9)));
   aspect-ratio: var(--sty-aspect, 16 / 9);
   overflow: hidden;
   border-radius: var(--r-sm);
