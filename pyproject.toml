@@ -50,7 +50,7 @@ separate = [
     "onnxruntime>=1.20",
 ]
 download = [
-    "yt-dlp>=2026.7",
+    "yt-dlp>=2026.8.19",
 ]
 lyrics = [
     "requests>=2.32",
