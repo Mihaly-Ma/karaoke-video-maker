@@ -158,6 +158,7 @@ class ProjectStore:
 
             draft = entry.project.model_copy(deep=True)
             mutator(draft)
+            draft.separate_credits()
 
             entry.undo.append(before)
             if len(entry.undo) > _MAX_HISTORY:

@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, Self
 
 from kvm.models.karaoke import DEFAULT_FONT_CHAIN, normalize_font_chain
 from pydantic import BaseModel, Field, computed_field, model_validator
@@ -113,6 +113,35 @@ class LineDTO(BaseModel):
     is_metadata: bool = False
     locked: bool = False
 
+    @model_validator(mode="after")
+    def _normalize_credit_labels(self) -> Self:
+        return self.normalize_credit_labels()
+
+    def normalize_credit_labels(self) -> Self:
+        if not self.is_metadata:
+            return self
+        text = "".join(token.text for token in self.tokens)
+        label, separator, _ = text.replace(":", "：", 1).partition("：")
+        if not separator:
+            return self
+        labels = {
+            "词": "詞",
+            "作词": "作詞",
+            "编曲": "編曲",
+            "监制": "監制",
+            "母带": "母帯",
+        }
+        replacement = labels.get(label)
+        if replacement is None:
+            return self
+        normalized = replacement + text[len(label) :]
+        offset = 0
+        for token in self.tokens:
+            end = offset + len(token.text)
+            token.text = normalized[offset:end]
+            offset = end
+        return self
+
 
 class PaletteDTO(BaseModel):
     name: str = "main"
@@ -164,6 +193,8 @@ class StyleDTO(BaseModel):
             ),
         }
 
+    credits_enabled: bool = True
+    credits_text: str | None = None
     font_size: int = 64
     bold: bool = True
     outline: float = 3.0
@@ -311,6 +342,21 @@ class ProjectDTO(BaseModel):
     title: str = ""
     artist: str = ""
     lines: list[LineDTO] = Field(default_factory=list)
+    credits: list[LineDTO] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _separate_credits(self) -> Self:
+        return self.separate_credits()
+
+    def separate_credits(self) -> Self:
+        known = {line.id for line in self.credits}
+        for line in self.lines:
+            if line.is_metadata and line.id not in known:
+                self.credits.append(line)
+                known.add(line.id)
+        self.lines = [line for line in self.lines if not line.is_metadata]
+        return self
+
     style: StyleDTO = Field(default_factory=StyleDTO)
     palettes: dict[str, PaletteDTO] = Field(default_factory=dict)
     video_width: int = 1920
@@ -454,6 +500,7 @@ class LyricPreview(BaseModel):
     """下载前的预览。用户要能看到实际内容再决定用哪条。"""
 
     lines: list[LineDTO]
+    credits: list[LineDTO] = Field(default_factory=list)
     granularity: str
     has_ruby: bool
     raw_excerpt: str = ""
@@ -746,6 +793,16 @@ class SetLockRequest(BaseModel):
 
     project_id: str
     items: list[LockItem] = Field(default_factory=list)
+
+
+class SetLyricRow(BaseModel):
+    line_id: str | None = None
+    text: str
+
+
+class EditLyricsRequest(BaseModel):
+    project_id: str
+    rows: list[SetLyricRow]
 
 
 class SetLineTextRequest(BaseModel):

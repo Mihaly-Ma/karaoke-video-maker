@@ -64,6 +64,8 @@ class StylePatchDTO(BaseModel):
     `font_names` 的改动。老前端与诊断脚本发的都是这个键。
     """
 
+    credits_enabled: bool | None = None
+    credits_text: str | None = None
     font_size: int | None = None
     bold: bool | None = None
     outline: float | None = None

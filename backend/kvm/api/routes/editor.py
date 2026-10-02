@@ -35,6 +35,7 @@ from collections.abc import Callable
 from fastapi import APIRouter, HTTPException, Request, Response
 from kvm.api.schemas import (
     DerivePhoneticsRequest,
+    EditLyricsRequest,
     MergeLineRequest,
     ProjectDTO,
     SetLineTextRequest,
@@ -167,6 +168,26 @@ def set_lock(req: SetLockRequest, request: Request, response: Response) -> Proje
         req.project_id,
         f"批量锁定（{len(req.items)} 项）",
         lambda draft: ops.set_locks(draft, items=req.items),
+    )
+
+
+@router.post("/lyrics", response_model=ProjectDTO)
+def edit_lyrics(req: EditLyricsRequest, request: Request, response: Response) -> ProjectDTO:
+    try:
+        current = _store(request).get(req.project_id)
+    except KeyError:
+        current = None
+    if current is not None and [
+        (line.id, "".join(token.text for token in line.tokens)) for line in current.lines
+    ] == [(row.line_id, row.text.strip()) for row in req.rows]:
+        response.headers[_WARNING_HEADER] = "0"
+        return current
+    return _apply(
+        request,
+        response,
+        req.project_id,
+        "编辑歌词",
+        lambda draft: ops.edit_lyrics(draft, rows=req.rows),
     )
 
 

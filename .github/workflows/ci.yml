@@ -241,6 +241,15 @@ jobs:
         shell: bash
         run: uv run python scripts/package.py ${{ matrix.portable && '--portable' || '' }}
 
+      - name: 在 DMG 中加入安装说明
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for dmg in src-tauri/target/release/bundle/dmg/*.dmg; do
+            bash scripts/add_dmg_readme.sh "$dmg" assets/dmg/README.txt
+          done
+
       # 出包之后再打一次：撞盘时这两个数一比就知道是哪一段吃掉的。
       # `always()` 是故意的——出包失败时这个数字才最值钱。
       - name: 磁盘余量（出包后）

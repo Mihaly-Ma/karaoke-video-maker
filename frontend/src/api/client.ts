@@ -266,6 +266,12 @@ export const setRuby = (body: {
   text: string
 }) => post<Project>('/editor/ruby', body)
 
+export const setMetadata = (projectId: string, lineId: string, isMetadata: boolean) =>
+  post<Project>('/editor/metadata', { project_id: projectId, line_id: lineId, is_metadata: isMetadata })
+
+export const editLyrics = (projectId: string, rows: { line_id: string | null; text: string }[]) =>
+  post<Project>('/editor/lyrics', { project_id: projectId, rows })
+
 export const splitLine = (body: { project_id: string; line_id: string; token_index: number }) =>
   post<Project>('/editor/split', body)
 

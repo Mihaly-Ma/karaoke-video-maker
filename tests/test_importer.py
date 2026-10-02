@@ -164,4 +164,88 @@ def test_tid_survives_split_and_merge_on_real_sample() -> None:
     after = _tids(project.lines)
 
     assert after == before
-    assert len(after) == len(set(after)) == 633
+    assert len(after) == len(set(after)) == 601
+    assert len(after) + len(_tids(project.credits)) == 633
+
+
+def test_qrc_numeric_credit_placeholders_do_not_shift_ruby() -> None:
+    content = (
+        "[kana:1111111お1き1い]\n"
+        "[0,500]lulu. - Mrs. GREEN APPLE(0,500)\n"
+        "[500,500]1st Violin：室屋(500,500)\n"
+        "[1000,500]2nd Violin：小寺(1000,500)\n"
+        "[8000,3000]終(8000,1000)わりが来(9000,1000)たら言(10000,1000)おう"
+    )
+    lines = parse_qrc(content)
+    assert all(line.is_metadata for line in lines[:3])
+    assert not lines[3].is_metadata
+    text = line_text(lines[3])
+    assert [(text[r.start : r.end], r.text) for r in lines[3].ruby] == [
+        ("終", "お"),
+        ("来", "き"),
+        ("言", "い"),
+    ]
+
+
+def test_qrc_invalid_coverage_does_not_attach_shifted_ruby() -> None:
+    lines = parse_qrc("[kana:1ひ1つき1ほし]\n[1000,1000]日(1000,500)月(1500,500)")
+    assert not lines[0].ruby
+
+
+@pytest.mark.parametrize(
+    ("label", "expected"),
+    [("词", "詞"), ("作词", "作詞"), ("编曲", "編曲"), ("监制", "監制"), ("母带", "母帯")],
+)
+def test_qrc_credit_labels_use_japanese_glyphs(label: str, expected: str) -> None:
+    lines = parse_qrc(
+        f"[0,500]{label}：(0,100)大森(100,200)元貴(300,200)\n[8000,1000]言葉(8000,1000)"
+    )
+    assert line_text(lines[0]) == f"{expected}：大森元貴"
+    assert [token.start_ms for token in lines[0].tokens] == [0, 100, 300]
+    assert [token.dur_ms for token in lines[0].tokens] == [100, 200, 200]
+    assert line_text(lines[1]) == "言葉"
+    # 日文字形的名单再次导入时仍应被识别为名单。
+    normalized = parse_qrc(f"[0,500]{expected}：大森元貴(0,500)\n[8000,1000]言葉(8000,1000)")
+    assert normalized[0].is_metadata
+
+
+def test_loading_legacy_credits_changes_only_labels_and_preserves_identity() -> None:
+    from kvm.api.schemas import LineDTO, RubySpanDTO, TokenDTO
+
+    original = LineDTO(
+        id="credit",
+        tokens=[
+            TokenDTO(text="编", start_ms=0, dur_ms=100, tid="old-1"),
+            TokenDTO(text="曲：词编", start_ms=100, dur_ms=100, tid="old-2", locked_timing=True),
+        ],
+        ruby=[RubySpanDTO(start=3, end=4, text="なまえ", locked=True)],
+    )
+    raw = original.model_dump()
+    raw["is_metadata"] = True
+    loaded = LineDTO.model_validate(raw)
+    assert line_text(loaded) == "編曲：词编"
+    assert loaded.id == original.id
+    assert loaded.ruby == original.ruby
+    assert [
+        (token.tid, token.start_ms, token.dur_ms, token.locked_timing) for token in loaded.tokens
+    ] == [
+        (token.tid, token.start_ms, token.dur_ms, token.locked_timing) for token in original.tokens
+    ]
+    assert LineDTO.model_validate(loaded.model_dump()) == loaded
+    assert line_text(original) == "编曲：词编"
+
+
+def test_qrc_credit_normalization_does_not_shift_kana_or_change_lyrics() -> None:
+    lines = parse_qrc("[kana:1111はな]\n[0,500]词：编词(0,500)\n[8000,1000]花(8000,1000)")
+    assert line_text(lines[0]) == "詞：编词"
+    assert [(ruby.start, ruby.end, ruby.text) for ruby in lines[1].ruby] == [(0, 1, "はな")]
+    sung = parse_qrc("[8000,1000]词：编曲(8000,1000)")
+    assert not sung[0].is_metadata
+    assert line_text(sung[0]) == "词：编曲"
+
+
+def test_custom_credit_content_is_not_normalized() -> None:
+    project = ProjectDTO(id="custom-credit")
+    project.style.credits_text = "词：甲\n编曲：乙"
+    restored = ProjectDTO.model_validate_json(project.model_dump_json())
+    assert restored.style.credits_text == "词：甲\n编曲：乙"

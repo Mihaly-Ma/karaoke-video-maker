@@ -71,6 +71,7 @@ from kvm.api.schemas import (
     PhoneticSpanDTO,
     ProjectDTO,
     RubySpanDTO,
+    SetLyricRow,
     TimingItem,
     TokenDTO,
 )
@@ -1071,7 +1072,20 @@ def set_metadata(project: ProjectDTO, *, line_id: str, is_metadata: bool) -> Edi
     自动分行把它拆开同样违背他的意图。
     """
     out = EditOutcome()
-    _, line = _find_line(project, line_id)
+    credit = next((line for line in project.credits if line.id == line_id), None)
+    if credit is not None and not is_metadata:
+        project.credits.remove(credit)
+        start = credit.tokens[0].start_ms if credit.tokens else 0
+        index = next(
+            (
+                i
+                for i, line in enumerate(project.lines)
+                if line.tokens and line.tokens[0].start_ms > start
+            ),
+            len(project.lines),
+        )
+        project.lines.insert(index, credit)
+    line = credit if credit is not None else _find_line(project, line_id)[1]
     label = _preview_text(_line_text(line))
 
     if line.is_metadata == is_metadata:
@@ -1083,6 +1097,7 @@ def set_metadata(project: ProjectDTO, *, line_id: str, is_metadata: bool) -> Edi
     line.locked = True
     if is_metadata:
         out.warnings.append(f"「{label}」不再作为歌词排版，改为并入制作名单屏")
+        project.separate_credits()
     else:
         out.warnings.append(f"「{label}」将作为正文歌词参与排版与调轴")
     return out
@@ -1366,6 +1381,34 @@ def _fill_unbound_timing(
             f"{tight} 个新增音节两侧都被锁定的时间夹住，没有空位，已按最小时长排开，请手工调整"
         )
     return filled
+
+
+def edit_lyrics(project: ProjectDTO, *, rows: Sequence[SetLyricRow]) -> EditOutcome:
+    from kvm.lyrics.importer import parse_text
+
+    out = EditOutcome()
+    old_ids = {line.id for line in project.lines}
+    requested = [row.line_id for row in rows if row.line_id is not None]
+    if len(requested) != len(set(requested)) or not set(requested) <= old_ids:
+        raise EditError("歌词行标识重复或不存在")
+    if any(not row.text.strip() or "\n" in row.text or "\r" in row.text for row in rows):
+        raise EditError("每行歌词不能为空或包含换行")
+
+    result: list[LineDTO] = []
+    for row in rows:
+        if row.line_id is None:
+            line = parse_text(row.text)[0]
+            for token in line.tokens:
+                token.tid = f"{line.id}#{token.tid}"
+            if result:
+                line.slot = 1 - result[-1].slot
+                line.voice_part = result[-1].voice_part
+            result.append(line)
+        else:
+            out.warnings.extend(set_line_text(project, line_id=row.line_id, text=row.text).warnings)
+            result.append(_find_line(project, row.line_id)[1])
+    project.lines = result
+    return out
 
 
 def set_line_text(project: ProjectDTO, *, line_id: str, text: str) -> EditOutcome:
@@ -1895,7 +1938,10 @@ def merge_imported_lines(
     """
     out = EditOutcome()
     fresh = [ln.model_copy(deep=True) for ln in new_lines]
-    old_lines = list(project.lines)
+    has_credits = any(line.is_metadata for line in fresh)
+    old_lines = [*project.credits, *project.lines] if has_credits else list(project.lines)
+    if has_credits:
+        project.credits = []
 
     if not keep_manual_edits:
         dropped = sum(_manual_items(ln) for ln in old_lines)
@@ -1905,10 +1951,12 @@ def merge_imported_lines(
                 f"已按你的选择放弃全部手工修改：{dropped} 项（调过的轴、注音、"
                 "发音形、声部标记）随旧歌词一并丢弃，本次导入可以整体撤销"
             )
+        project.separate_credits()
         return out
 
     if not old_lines:
         project.lines = fresh
+        project.separate_credits()
         return out
 
     tid_index = _tid_index(fresh)
@@ -1955,6 +2003,7 @@ def merge_imported_lines(
             f"{stats.lost} 项手工修改在新歌词里找不到对应位置，已收进「失效修正」"
             "清单等你确认——它们没有被丢掉，但也没有自动落到新歌词上"
         )
+    project.separate_credits()
     return out
 
 

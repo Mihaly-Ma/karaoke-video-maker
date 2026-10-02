@@ -81,4 +81,11 @@ export const lyrics: Record<string, string> = {
   'lyrics.editHint': '拆行 / 并行',
   'lyrics.editFailed': '修改失败：{msg}',
   'lyrics.noLines': '还没有歌词',
+  'lyrics.editor.open': '编辑歌词',
+  'lyrics.editor.hint': '可粘贴多行歌词；新增行需打轴，空行不保存。保存后可撤销。',
+  'lyrics.editor.addFirst': '在开头添加行',
+  'lyrics.editor.insert': '下方插行',
+  'lyrics.editor.delete': '删行',
+  'lyrics.editor.row': '第 {n} 行歌词',
+  'lyrics.editor.save': '保存歌词',
 }

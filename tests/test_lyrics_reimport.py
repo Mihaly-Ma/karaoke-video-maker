@@ -91,7 +91,8 @@ def _edited_project() -> ProjectDTO:
     注音、发音形、行内 token 级声部，以及"自动判定被用户推翻"这件事本身。
     """
     project = _project(_QRC_V1)
-    credits, _sakura, haru, mada, unmei = project.lines
+    credits = project.credits[0]
+    _sakura, haru, mada, unmei = project.lines
 
     # 1. 制作名单误判的手工旁路（§2.5）：这一行自动判成了制作名单，用户说它是正文
     assert credits.is_metadata is True, "前提：首行会被自动判成制作名单"
@@ -209,7 +210,7 @@ def test_合并后行内时间不倒挂且让路的是没锁的那一侧() -> No
     把用户的手工调整又平掉了一次，只是这次换了个更隐蔽的借口。
     """
     project = _project(_QRC_V1)
-    sakura = project.lines[1]
+    sakura = project.lines[0]
     ops.set_locks(
         project,
         items=[LockItem(line_id=sakura.id, target="timing", token_index=1, locked=True)],
@@ -219,7 +220,7 @@ def test_合并后行内时间不倒挂且让路的是没锁的那一侧() -> No
 
     ops.merge_imported_lines(project, parse_qrc(_QRC_V2))
 
-    tokens = project.lines[1].tokens
+    tokens = project.lines[0].tokens
     for a, b in itertools.pairwise(tokens):
         assert a.start_ms + a.dur_ms <= b.start_ms, "合并后出现时间倒挂"
     assert tokens[1].locked_timing is True
@@ -262,7 +263,7 @@ def test_分行完全不同时绑不上的锁定项进失效修正清单() -> No
 
 def test_绑不上的时间轴也进清单且带得回原值() -> None:
     project = _project(_QRC_V1)
-    unmei = project.lines[4]
+    unmei = project.lines[3]
     ops.set_timing(project, line_id=unmei.id, token_index=0, start_ms=7800)
 
     ops.merge_imported_lines(project, parse_qrc(_QRC_V3))
@@ -308,13 +309,12 @@ def test_显式放弃修改时整体替换且不留清单() -> None:
     ops.merge_imported_lines(project, parse_qrc(_QRC_V2), keep_manual_edits=False)
 
     assert [line_text(ln) for ln in project.lines] == [
-        "词：片岡健太",
         "桜舞って",
         "春、君にそっと触れる",
         "まだ君を見てる",
         "運命を",
     ]
-    assert project.lines[0].is_metadata is True, "放弃修改后自动判定重新接管"
+    assert line_text(project.credits[0]) == "詞：片岡健太", "放弃修改后自动判定重新接管"
     assert all(not t.locked_timing for ln in project.lines for t in ln.tokens)
     assert all(not sp.locked for ln in project.lines for sp in ln.ruby)
     assert all(sp.text != "さわ" for ln in project.lines for sp in ln.ruby)
@@ -396,7 +396,7 @@ def test_路由默认合并而不是整体替换(client_and_project) -> None:
         "/api/editor/ruby",
         json={
             "project_id": project_id,
-            "line_id": lines[2]["id"],
+            "line_id": lines[1]["id"],
             "start": 4,
             "end": 5,
             "text": "さわ",
@@ -406,7 +406,7 @@ def test_路由默认合并而不是整体替换(client_and_project) -> None:
 
     after = _import(client, project_id, _QRC_V2)
 
-    haru = after["lines"][2]
+    haru = after["lines"][1]
     assert "".join(t["text"] for t in haru["tokens"]) == "春、君にそっと触れる"
     sawa = next((sp for sp in haru["ruby"] if sp["text"] == "さわ"), None)
     assert sawa is not None, "重新导入把用户的手工注音抹掉了"
@@ -422,7 +422,7 @@ def test_路由上的放弃修改开关(client_and_project) -> None:
         "/api/editor/ruby",
         json={
             "project_id": project_id,
-            "line_id": lines[2]["id"],
+            "line_id": lines[1]["id"],
             "start": 4,
             "end": 5,
             "text": "さわ",
@@ -446,7 +446,7 @@ def test_重新导入占一格撤销可以整体退回(client_and_project) -> No
         "/api/editor/ruby",
         json={
             "project_id": project_id,
-            "line_id": lines[2]["id"],
+            "line_id": lines[1]["id"],
             "start": 4,
             "end": 5,
             "text": "さわ",
@@ -551,7 +551,9 @@ def _misbound(project: ProjectDTO, expected: list[LineDTO]) -> int:
     所以正确的结果必然是"每个音节 = 它自己那一版的时间 + 7"。对不上就是错绑。
     """
     bad = 0
-    for line, want in zip(project.lines, expected, strict=True):
+    for line, want in zip(
+        project.lines, [line for line in expected if not line.is_metadata], strict=True
+    ):
         for tok, ref in zip(line.tokens, want.tokens, strict=True):
             if tok.locked_timing and tok.start_ms != ref.start_ms + 7:
                 bad += 1
@@ -564,7 +566,8 @@ def test_实测样本上一字不改地重新导入不丢任何手工成果() ->
     project = ProjectDTO(id="sekishunka", lines=parse_qrc(raw))
     total = _lock_everything(project)
     rubies = sum(len(ln.ruby) for ln in project.lines)
-    assert (total, rubies) == (633, 178)
+    assert (total, rubies) == (601, 163)
+    assert sum(len(line.ruby) for line in project.credits) + rubies == 178
 
     ops.merge_imported_lines(project, parse_qrc(raw))
 
@@ -575,7 +578,7 @@ def test_实测样本上一字不改地重新导入不丢任何手工成果() ->
 
 
 @pytest.mark.skipif(not _SEKISHUNKA_QRC.is_file(), reason="缺少实测样本 workspace/qrc/")
-@pytest.mark.parametrize(("rewritten", "min_rebound"), [(1, 632), (5, 628), (20, 613)])
+@pytest.mark.parametrize(("rewritten", "min_rebound"), [(1, 600), (5, 596), (20, 581)])
 def test_实测样本上改写若干行的写法后重绑命中率(rewritten: int, min_rebound: int) -> None:
     """改写 N 行 ⇒ 那 N 行里被改的音节绑不上，**其余一个都不能掉**，且一个都不能绑错。
 
@@ -612,7 +615,7 @@ def test_实测样本上用户拆过行之后重新导入仍然绑得回来() ->
 
     ops.merge_imported_lines(project, parse_qrc(raw))
 
-    assert len(project.lines) == 60, "重新导入后应当回到新歌词的分行"
+    assert len(project.lines) == 55, "重新导入后应当回到新歌词的分行"
     assert sum(1 for ln in project.lines for t in ln.tokens if t.locked_timing) == total
     assert _misbound(project, parse_qrc(raw)) == 0
     assert project.orphans == []

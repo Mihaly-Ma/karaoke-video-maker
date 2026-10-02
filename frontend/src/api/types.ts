@@ -55,6 +55,8 @@ export interface Palette {
 }
 
 export interface Style {
+  credits_enabled: boolean
+  credits_text: string | null
   /**
    * 有序字体候选链：链首缺哪个字形，就落到后面那个。
    *
@@ -171,6 +173,7 @@ export interface Project {
   title: string
   artist: string
   lines: Line[]
+  credits: Line[]
   style: Style
   palettes: Record<string, Palette>
   video_width: number
@@ -251,6 +254,7 @@ export interface LyricSearchResponse {
 
 export interface LyricPreview {
   lines: Line[]
+  credits: Line[]
   granularity: string
   has_ruby: boolean
   raw_excerpt: string

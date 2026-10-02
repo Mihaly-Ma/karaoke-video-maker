@@ -42,6 +42,7 @@ import { useProject } from '../state/projectStore'
 import EditInspector from './EditInspector'
 import EditReading from './EditReading'
 import EditVoice from './EditVoice'
+import LyricsEditor from './LyricsEditor'
 import Preview from './Preview'
 import { RubyPaper, RubyStyles, useRubyEditing } from './RubyEditor'
 import { RubyReviewList } from './RubyInspector'
@@ -148,6 +149,7 @@ export default function EditStage() {
             }
             bottom={
               <>
+                <LyricsEditor />
                 <RubyPaper
                   editing={editing}
                   reviewOpen={reviewOpen}

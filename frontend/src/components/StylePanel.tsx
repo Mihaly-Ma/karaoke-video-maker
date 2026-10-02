@@ -84,6 +84,7 @@ function collectParts(
 export default function StylePanel() {
   const project = useProject((s) => s.project)
   const updateStyle = useProject((s) => s.updateStyle)
+  const setMetadata = useProject((s) => s.setMetadata)
   const updatePalettes = useProject((s) => s.updatePalettes)
   const storeError = useProject((s) => s.error)
 
@@ -394,6 +395,72 @@ export default function StylePanel() {
             </button>
           </div>
           <LayoutControls {...controls} />
+        </section>
+
+        <section className="sty-sec">
+          <div className="sty-sec__head">{t('style.section.credits')}</div>
+          <details>
+            <summary>{t('style.credits.source', { n: project.credits.length })}</summary>
+            {project.credits.map((line) => (
+              <div key={line.id}>
+                <span>{line.tokens.map((token) => token.text).join('')}</span>
+                <button
+                  type="button"
+                  className="small ghost"
+                  onClick={() => void setMetadata(line.id, false)}
+                >
+                  {t('style.credits.restoreLyric')}
+                </button>
+              </div>
+            ))}
+          </details>
+          <label className="sty-check">
+            <input
+              type="checkbox"
+              checked={draft.credits_enabled}
+              onChange={(e) => setNow('credits_enabled', e.target.checked)}
+            />
+            {t('style.credits.show')}
+          </label>
+          <label className="sty-check">
+            <input
+              type="checkbox"
+              checked={draft.credits_text !== null}
+              onChange={(e) =>
+                setNow(
+                  'credits_text',
+                  e.target.checked
+                    ? [
+                        project.title,
+                        project.artist,
+                        ...project.credits
+                          .filter(
+                            (l) =>
+                              !l.tokens
+                                .map((tk) => tk.text)
+                                .join('')
+                                .includes(' - '),
+                          )
+                          .map((l) => l.tokens.map((tk) => tk.text).join('')),
+                      ]
+                        .filter(Boolean)
+                        .join('\n')
+                    : null,
+                )
+              }
+            />
+            {t('style.credits.custom')}
+          </label>
+          {draft.credits_text !== null && (
+            <textarea
+              rows={5}
+              style={{ width: '100%' }}
+              aria-label={t('style.credits.content')}
+              value={draft.credits_text}
+              onChange={(e) => set('credits_text', e.target.value)}
+              onBlur={flushStyle}
+            />
+          )}
         </section>
 
         <section className="sty-sec">

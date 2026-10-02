@@ -197,7 +197,8 @@ class AssBuilder:
         两边漏掉同一类文本的风险是真的，所以修改任一处都要看另一处。
         """
         chars = {c for c in self._p.title + self._p.artist if c.strip()}
-        for line in self._p.lines:
+        chars.update(c for c in (self._p.style.credits_text or "") if c.strip())
+        for line in [*self._p.lines, *self._p.credits]:
             for tok in line.tokens:
                 chars.update(c for c in tok.text if c.strip())
             for rb in line.ruby:
@@ -550,7 +551,11 @@ class AssBuilder:
         """
         p = self._p
         st = p.style
-        if not p.title and not p.artist:
+        if not st.credits_enabled:
+            return []
+        if st.credits_text is None and not p.title and not p.artist:
+            return []
+        if st.credits_text is not None and not st.credits_text.strip():
             return []
 
         window = _find_credit_window(line_windows)
@@ -558,7 +563,13 @@ class AssBuilder:
             return []
         start_ms, end_ms = window
 
-        credits = [ln.text for ln in p.lines if ln.is_metadata and " - " not in ln.text]
+        credits = [
+            ln.text for ln in [*p.credits, *p.lines] if ln.is_metadata and " - " not in ln.text
+        ]
+        title, artist = p.title, p.artist
+        if st.credits_text is not None:
+            custom = [text.strip() for text in st.credits_text.splitlines() if text.strip()]
+            title, artist, credits = custom[0], "", custom[1:]
         t0, t1 = _ass_time(start_ms), _ass_time(end_ms)
         cx = p.video_width // 2
         # 填充与描边成对取，理由同引导点：描边是配色的一部分，不是固定的黑边
@@ -567,20 +578,20 @@ class AssBuilder:
 
         # 整块垂直居中于画面。先量总高再定起点，避免行数变化时偏上或偏下。
         h_title = int(st.font_size * 1.5)
-        h_artist = int(st.font_size * 0.78) if p.artist else 0
+        h_artist = int(st.font_size * 0.78) if artist else 0
         h_credit = int(st.font_size * 0.68)
         total = h_title + h_artist + h_credit * len(credits)
         y = (p.video_height - total) // 2
 
         out = [
             f"Dialogue: 0,{t0},{t1},Title,,0,0,0,,"
-            f"{{\\an8\\pos({cx},{y}){color}\\fad(500,500)}}{_escape(p.title)}\n"
+            f"{{\\an8\\pos({cx},{y}){color}\\fad(500,500)}}{_escape(title)}\n"
         ]
         y += h_title
-        if p.artist:
+        if artist:
             out.append(
                 f"Dialogue: 0,{t0},{t1},Credit,,0,0,0,,"
-                f"{{\\an8\\pos({cx},{y}){color}\\fad(500,500)}}{_escape(p.artist)}\n"
+                f"{{\\an8\\pos({cx},{y}){color}\\fad(500,500)}}{_escape(artist)}\n"
             )
             y += h_artist
         for c in credits:

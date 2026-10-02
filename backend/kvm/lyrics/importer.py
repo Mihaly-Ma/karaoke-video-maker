@@ -37,7 +37,10 @@ _CONTENT_RE = re.compile(r'LyricContent="(.*)"\s*/>', re.S)
 _QRC_LINE_RE = re.compile(r"^\[(\d+),(\d+)\](.*)$")
 _QRC_TOKEN_RE = re.compile(r"(.*?)\((\d+),(\d+)\)", re.S)
 _QRC_TAG_RE = re.compile(r"^\[([a-zA-Z_]+):(.*)\]$", re.S)
-_CREDIT_RE = re.compile(r"^(词|曲|编曲|制作人|作词|作曲|监制|混音|母带)[:：]")
+_CREDIT_RE = re.compile(
+    r"^(?:(?:词|曲|编曲|制作人|作词|作曲|詞|作詞|編曲|监制|監制|混音|母带|母帯)|"
+    r"[A-Za-z0-9][A-Za-z0-9 .,\&/()-]*)[:：]"
+)
 _LRC_TAG_RE = re.compile(r"\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]")
 # CJK 统一表意文字（含扩展 A）与叠字符号「々」，用于判定需要注音的"基字符"。
 _KANJI_RE = re.compile(r"[㐀-䶿一-鿿々]")
@@ -399,6 +402,18 @@ def _attach_ruby(lines: list[LineDTO], kana_entries: list[dict]) -> None:
             if _is_kanji(ch):
                 positions.append((li, ci))
 
+    coverage = sum(int(entry.get("cover", 1) or 1) for entry in kana_entries)
+    if coverage != len(positions):
+        numeric_positions = [
+            (li, ci)
+            for li, ln in enumerate(lines)
+            for ci, ch in enumerate(line_text(ln))
+            if _is_kanji(ch) or ch.isdecimal()
+        ]
+        if coverage != len(numeric_positions):
+            return
+        positions = numeric_positions
+
     pi = 0
     for entry in kana_entries:
         cover = int(entry.get("cover", 1) or 1)
@@ -462,6 +477,8 @@ def parse_qrc(content: str) -> list[LineDTO]:
         ln.is_metadata = _is_metadata_line(text, start_ms, first_vocal)
 
     _attach_ruby(lines, kana_entries)
+    for ln in lines:
+        ln.normalize_credit_labels()
     _assign_tids(lines)
     _assign_slots(lines)
     return lines

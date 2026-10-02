@@ -348,6 +348,8 @@ class KaraokeStyle:
     取当前主字体请用 `primary_font`。
     """
 
+    credits_enabled: bool = True
+    credits_text: str | None = None
     font_size: int = 64
     outline: float = 3.0
     shadow: float = 1.0
@@ -525,6 +527,7 @@ class KaraokeProject:
     title: str = ""
     artist: str = ""
     lines: list[Line] = field(default_factory=list)
+    credits: list[Line] = field(default_factory=list)
     style: KaraokeStyle = field(default_factory=KaraokeStyle)
     palettes: dict[str, VoicePalette] = field(default_factory=dict)
 

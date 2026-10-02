@@ -87,6 +87,7 @@ function lineWeight(ln: Line): number {
  */
 function creditAt(singable: Line[], project: Project): number | null {
   const st = project.style
+  if (!st.credits_enabled || st.credits_text?.trim() === '') return null
   const off = project.global_offset_ms
   const headEnd = lineStart(singable[0]) + off - st.lead_in_ms
   if (headEnd >= CREDIT_MIN_DUR_MS + CREDIT_PAD_MS) return 0

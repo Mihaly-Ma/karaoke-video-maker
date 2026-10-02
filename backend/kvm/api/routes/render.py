@@ -160,12 +160,13 @@ def project_dto_to_domain(dto: ProjectDTO) -> KaraokeProject:
             is_metadata=ln.is_metadata,
             locked=ln.locked,
         )
-        for ln in dto.lines
+        for ln in [*dto.lines, *dto.credits]
     ]
     return KaraokeProject(
         title=dto.title,
         artist=dto.artist,
-        lines=lines,
+        lines=[line for line in lines if not line.is_metadata],
+        credits=[line for line in lines if line.is_metadata],
         style=KaraokeStyle(**dto.style.model_dump()),
         palettes={name: VoicePalette(**pal.model_dump()) for name, pal in dto.palettes.items()},
         video_width=dto.video_width,

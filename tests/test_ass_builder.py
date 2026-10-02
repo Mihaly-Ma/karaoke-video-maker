@@ -855,3 +855,45 @@ def test_rendered_charset_includes_credits_and_ruby() -> None:
     for ch in "曲名歌手ルビ":
         assert ch in charset
     assert " " not in charset  # 空白不计
+
+
+def test_disabled_credits_emit_no_title_or_credit_dialogues() -> None:
+    project = _credit_song()
+    project.style.credits_enabled = False
+    ass = _build(project)
+    assert not any(
+        ",Title," in line or ",Credit," in line
+        for line in ass.splitlines()
+        if line.startswith("Dialogue:")
+    )
+
+
+def test_custom_credits_replace_automatic_content_and_include_custom_glyphs() -> None:
+    project = _credit_song()
+    project.style.credits_text = "我的标题\n制作：𠮷\n第二行"
+    ass = _build(project)
+    credit_lines = [
+        line
+        for line in ass.splitlines()
+        if line.startswith("Dialogue:") and (",Title," in line or ",Credit," in line)
+    ]
+    assert len(credit_lines) == 3
+    assert "我的标题" in credit_lines[0]
+    assert "制作：𠮷" in credit_lines[1]
+    assert all(project.title not in line and project.artist not in line for line in credit_lines)
+    assert "𠮷" in AssBuilder(project, _FakeMetrics()).rendered_charset()
+    project.style.credits_text = ""
+    assert not AssBuilder(project, _FakeMetrics())._emit_credits([(20000, 30000)])
+
+
+def test_separate_credits_render_and_contribute_to_font_coverage() -> None:
+    project = _credit_song()
+    project.credits = [
+        Line(tokens=[Token(text="編曲：甲", start_ms=0, dur_ms=100)], is_metadata=True)
+    ]
+    ass = _build(project)
+    assert any("編曲：甲" in line for line in _dialogues(ass, "Credit"))
+    assert all("編曲：甲" not in line for line in _dialogues(ass, "Main"))
+    assert "編" in AssBuilder(project, _FakeMetrics()).rendered_charset()
+    project.style.credits_text = "自定义"
+    assert "編曲：甲" not in _build(project)

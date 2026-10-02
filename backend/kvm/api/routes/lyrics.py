@@ -139,7 +139,8 @@ def preview(req: LyricFetchRequest) -> LyricPreview:
     except LyricProviderError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return LyricPreview(
-        lines=parsed.lines,
+        lines=[line for line in parsed.lines if not line.is_metadata],
+        credits=[line for line in parsed.lines if line.is_metadata],
         granularity=parsed.granularity,
         has_ruby=parsed.has_ruby,
         raw_excerpt=parsed.raw_excerpt,
@@ -161,8 +162,9 @@ def _apply_lines(
     而重绑一旦撞号就会绑到错误的那一行去（比绑不上更糟，见 `importer.rebase_tids`）。
     """
     if not replace:
-        rebase_tids(draft.lines, lines)
+        rebase_tids([*draft.credits, *draft.lines], lines)
         draft.lines = [*draft.lines, *lines]
+        draft.separate_credits()
         return
 
     outcome = merge_imported_lines(draft, lines, keep_manual_edits=keep_manual_edits)

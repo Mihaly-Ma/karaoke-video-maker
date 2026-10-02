@@ -119,4 +119,10 @@ export const style: Record<string, string> = {
   'style.scheme.defaultName': '自定义配色',
   'style.scheme.derivedDesc': '由「{from}」改出',
   'style.scheme.customDesc': '在「样式」步骤手工调出',
+  'style.credits.source': '来源名单（{n} 行）',
+  'style.credits.restoreLyric': '移回歌词',
+  'style.section.credits': '制作名单 / Credit',
+  'style.credits.show': '显示 Credit',
+  'style.credits.custom': '自定义内容',
+  'style.credits.content': 'Credit 内容（首行为标题）',
 }

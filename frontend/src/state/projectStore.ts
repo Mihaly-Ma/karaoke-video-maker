@@ -135,6 +135,8 @@ interface ProjectState {
    */
   setLock: (target: LockTarget | LockTarget[]) => Promise<void>
   setRuby: (lineId: string, start: number, end: number, text: string) => Promise<void>
+  setMetadata: (lineId: string, isMetadata: boolean) => Promise<void>
+  editLyrics: (rows: { line_id: string | null; text: string }[]) => Promise<void>
   splitLine: (lineId: string, tokenIndex: number) => Promise<void>
   mergeLine: (lineId: string) => Promise<void>
   setVoicePart: (lineId: string, voicePart: string, range?: [number, number]) => Promise<void>
@@ -276,6 +278,14 @@ export const useProject = create<ProjectState>((set, get) => {
     setRuby: async (lineId, start, end, text) =>
       withProject((id) => api.setRuby({ project_id: id, line_id: lineId, start, end, text })),
 
+    setMetadata: async (lineId, isMetadata) => withProject((id) => api.setMetadata(id, lineId, isMetadata)),
+    editLyrics: async (rows) => {
+      await withProject((id) => api.editLyrics(id, rows))
+      const { project, selection } = get()
+      if (selection.kind !== 'none' && !project?.lines.some((line) => line.id === selection.lineId)) {
+        set({ selection: { kind: 'none' } })
+      }
+    },
     splitLine: async (lineId, tokenIndex) =>
       withProject((id) => api.splitLine({ project_id: id, line_id: lineId, token_index: tokenIndex })),
 

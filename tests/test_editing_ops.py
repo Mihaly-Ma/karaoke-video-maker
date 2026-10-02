@@ -656,8 +656,9 @@ def test_set_metadata_marks_line_and_locks_it() -> None:
 
     out = ops.set_metadata(p, line_id="L1", is_metadata=True)
 
-    assert p.lines[0].is_metadata
-    assert p.lines[0].locked
+    assert p.credits[0].is_metadata
+    assert p.credits[0].locked
+    assert all(line.id != "L1" for line in p.lines)
     assert out.warnings, "这行从此不作为歌词排版，属于「做了但你该知道」"
 
 
