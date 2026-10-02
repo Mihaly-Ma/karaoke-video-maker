@@ -150,7 +150,7 @@ export function RubyInspector({
 
       {/* 表记读法：渲染进注音行的形态，落库到 RubySpan.text */}
       <label className="kvm-ruby__field">
-        <span className="kvm-ruby__label">{t('ruby.field.display')}</span>
+        <span className="kvm-ruby__label">{t('ruby.reading')}</span>
         <input
           type="text"
           data-field="display"
@@ -176,14 +176,18 @@ export function RubyInspector({
         <button type="button" className="primary" disabled={!annotatable || busy || !validation.ok} onClick={apply}>
           {t('ruby.action.apply')}
         </button>
+      </div>
+
+      <details className="edit-reading-more">
+        <summary>{t('ruby.more')}</summary>
+        <div className="kvm-ruby__row">
         <button type="button" className="small" disabled={!draft || busy} onClick={() => setDraft(toHiragana(draft))}>
           {t('ruby.action.hiragana')}
         </button>
         <button type="button" className="small" disabled={!draft || busy} onClick={() => setDraft(toKatakana(draft))}>
           {t('ruby.action.katakana')}
         </button>
-      </div>
-
+        </div>
       {/* 发音形：喂对齐器的形态。后端还没有这个字段，见 RubyModel 的说明 */}
       {bar && !phoneticOpen ? (
         <button
@@ -250,6 +254,7 @@ export function RubyInspector({
           <DeleteOutlined /> {t('ruby.action.delete')}
         </button>
       </div>
+      </details>
     </section>
   )
 }

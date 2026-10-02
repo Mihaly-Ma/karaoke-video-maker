@@ -1,3 +1,4 @@
+import { MergeCellsOutlined, ScissorOutlined } from '@ant-design/icons'
 import { useState } from 'react'
 
 import { t } from '../i18n'
@@ -34,23 +35,22 @@ export default function LyricsEditor() {
 
   return (
     <>
-      <div style={{ padding: '4px 8px' }}>
-        <button
-          type="button"
-          onClick={() => {
-            setRows(
-              project.lines.map((line) => ({
-                key: line.id,
-                line_id: line.id,
-                text: line.tokens.map((token) => token.text).join(''),
-              })),
-            )
-            setError(null)
-          }}
-        >
-          {t('lyrics.editor.open')}
-        </button>
-      </div>
+      <button
+        type="button"
+        className="small"
+        onClick={() => {
+          setRows(
+            project.lines.map((line) => ({
+              key: line.id,
+              line_id: line.id,
+              text: line.tokens.map((token) => token.text).join(''),
+            })),
+          )
+          setError(null)
+        }}
+      >
+        {t('lyrics.editor.open')}
+      </button>
       {rows !== null && (
         <div
           role="dialog"
@@ -136,6 +136,34 @@ export default function LyricsEditor() {
           </section>
         </div>
       )}
+    </>
+  )
+}
+
+
+export function LyricsLineActions() {
+  const selection = useProject((s) => s.selection)
+  const splitLine = useProject((s) => s.splitLine)
+  const mergeLine = useProject((s) => s.mergeLine)
+  const [busy, setBusy] = useState(false)
+  const run = async (split: boolean) => {
+    if (busy || selection.kind === 'none') return
+    setBusy(true)
+    try {
+      if (split && selection.kind === 'token') await splitLine(selection.lineId, selection.tokenIndex)
+      else if (!split) await mergeLine(selection.lineId)
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <>
+      <button type="button" className="small" data-role="split" disabled={busy || selection.kind !== 'token' || selection.tokenIndex <= 0} title={`${t('align.split')}｜${t('align.splitHint')}`} aria-label={t('align.split')} onClick={() => void run(true)}>
+        <ScissorOutlined />
+      </button>
+      <button type="button" className="small" data-role="merge" disabled={busy || selection.kind === 'none'} title={`${t('align.merge')}｜${t('align.mergeHint')}`} aria-label={t('align.merge')} onClick={() => void run(false)}>
+        <MergeCellsOutlined />
+      </button>
     </>
   )
 }

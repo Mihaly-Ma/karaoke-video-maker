@@ -93,7 +93,25 @@ class TokenDTO(BaseModel):
     """
 
 
+class MoraTimeDTO(BaseModel):
+    text: str = Field(min_length=1)
+    start_ms: int = Field(ge=0)
+    dur_ms: int = Field(ge=10)
+
+
+class MoraTimingSpanDTO(BaseModel):
+    start: int
+    end: int
+    reading: str
+    surface: str
+    times: list[MoraTimeDTO]
+    token_ids: list[str] = Field(default_factory=list)
+    token_starts: list[int] = Field(default_factory=list)
+    token_durations: list[int] = Field(default_factory=list)
+
+
 class LineDTO(BaseModel):
+    mora_timings: list[MoraTimingSpanDTO] = Field(default_factory=list)
     id: str
     tokens: list[TokenDTO] = Field(default_factory=list)
     ruby: list[RubySpanDTO] = Field(default_factory=list)
@@ -723,6 +741,32 @@ class ShiftRequest(BaseModel):
     delta_ms: int
     line_id: str | None = None
     token_index: int | None = None
+
+
+class SetMoraTimingItem(BaseModel):
+    line_id: str
+    start: int = Field(ge=0)
+    end: int = Field(gt=0)
+    reading: str
+    surface: str
+    times: list[MoraTimeDTO] = Field(min_length=1)
+
+
+class SetMoraTimingsRequest(BaseModel):
+    project_id: str
+    items: list[SetMoraTimingItem] = Field(min_length=1)
+
+
+class ShiftRange(BaseModel):
+    line_id: str
+    start: int = Field(ge=0)
+    end: int = Field(gt=0)
+
+
+class ShiftSelectionRequest(BaseModel):
+    project_id: str
+    delta_ms: int
+    ranges: list[ShiftRange] = Field(min_length=1)
 
 
 class SetTimingRequest(BaseModel):

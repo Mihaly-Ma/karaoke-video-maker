@@ -13,6 +13,10 @@ export const ruby: Record<string, string> = {
   'ruby.stat.review': '{n} 处待检查',
   'ruby.stat.locked': '{n} 处已锁定',
   // 同屏还有一条「时间来源」图例（时间轴底部），只写「来源」两条会互相冒充
+  'ruby.more': '更多',
+  'ruby.group.lyrics': '歌词编辑',
+  'ruby.group.reading': '注音工具',
+  'ruby.group.voice': '声部工具',
   'ruby.legend': '读音来源',
   'ruby.src.dict': '词典',
   'ruby.src.guess': '推断',

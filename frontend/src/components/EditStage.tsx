@@ -42,7 +42,6 @@ import { useProject } from '../state/projectStore'
 import EditInspector from './EditInspector'
 import EditReading from './EditReading'
 import EditVoice from './EditVoice'
-import LyricsEditor from './LyricsEditor'
 import Preview from './Preview'
 import { RubyPaper, RubyStyles, useRubyEditing } from './RubyEditor'
 import { RubyReviewList } from './RubyInspector'
@@ -149,21 +148,11 @@ export default function EditStage() {
             }
             bottom={
               <>
-                <LyricsEditor />
                 <RubyPaper
                   editing={editing}
                   reviewOpen={reviewOpen}
                   onToggleReview={() => setReviewOpen((v) => !v)}
                 />
-                {/*
-                  正文下方贴两条：先注音、后声部。**顺序按频次排**——
-                  逐条核对机器猜的读音是这一步最长的一段活，它要离正文最近；
-                  声部一首歌只指派几次。
-
-                  两条都在这儿而不在底栏检查器里，是同一条判据：控件跟操作对象
-                  待在一起（各自文件头有详述）。底栏因此只剩时间，而时间的操作
-                  对象——逐字轴——就在它正上方。
-                */}
                 <EditReading editing={editing} />
                 <EditVoice />
               </>

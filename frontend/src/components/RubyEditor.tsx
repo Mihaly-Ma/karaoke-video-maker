@@ -43,6 +43,7 @@ import {
 } from '@ant-design/icons'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, RefObject } from 'react'
+import LyricsEditor, { LyricsLineActions } from './LyricsEditor'
 
 import type { Line, Palette, Project } from '../api/types'
 import { t } from '../i18n'
@@ -1000,20 +1001,26 @@ export function RubyPaper({ editing, reviewOpen, onToggleReview }: RubyPaperProp
   return (
     <div className="kvm-ruby__canvas">
       <div className="kvm-ruby__bar">
+        <div className="edit-tool-group" role="group" aria-label={t('ruby.group.lyrics')}>
+          <LyricsEditor />
+          <LyricsLineActions />
+        </div>
+        <div className="edit-tool-group" role="group" aria-label={t('ruby.group.reading')}>
+        <details className="edit-source-legend">
+          <summary>{t('ruby.legend')}</summary>
         <span className="num">{t('ruby.stat.spans', { n: stats.spans })}</span>
         {stats.locked > 0 && <span className="num">{t('ruby.stat.locked', { n: stats.locked })}</span>}
 
-        <span className="kvm-ruby__legend">
-          <span className="kvm-ruby__label">{t('ruby.legend')}</span>
-          {SOURCE_ORDER.map((s) => (
-            <span key={s} className="kvm-ruby__swatch" data-src={s}>
-              <i />
-              {t(SOURCE_LABEL_KEY[s])}
-            </span>
-          ))}
-        </span>
-
-        <span className="kvm-ruby__spacer" />
+          <span className="kvm-ruby__legend">
+            <span className="kvm-ruby__label">{t('ruby.legend')}</span>
+            {SOURCE_ORDER.map((s) => (
+              <span key={s} className="kvm-ruby__swatch" data-src={s}>
+                <i />
+                {t(SOURCE_LABEL_KEY[s])}
+              </span>
+            ))}
+          </span>
+        </details>
 
         {/* 制作名单行的出口。没有这种行时连按钮都不出现，免得多一个永远点不出东西的开关 */}
         {metadataCount > 0 && (
@@ -1042,6 +1049,7 @@ export function RubyPaper({ editing, reviewOpen, onToggleReview }: RubyPaperProp
           {t('ruby.review.title')} <span className="num">{review.length}</span>
         </button>
 
+        </div>
         {notice && <span className="kvm-ruby__notice">{notice}</span>}
         {storeError && <span className="error">{storeError}</span>}
       </div>

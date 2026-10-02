@@ -15,6 +15,7 @@ import type {
   GuideStatus,
   JobStatus,
   LockTarget,
+  MoraTimingItem,
   LyricPreview,
   LyricSearchResponse,
   Palette,
@@ -226,6 +227,15 @@ export const shift = (body: {
   line_id: string | null
   token_index: number | null
 }) => post<Project>('/editor/shift', body)
+
+export const setMoraTimings = (projectId: string, items: MoraTimingItem[]) =>
+  post<Project>('/editor/mora-timings', { project_id: projectId, items })
+
+export const shiftSelection = (body: {
+  project_id: string
+  delta_ms: number
+  ranges: { line_id: string; start: number; end: number }[]
+}) => post<Project>('/editor/shift-selection', body)
 
 export const setTiming = (body: {
   project_id: string

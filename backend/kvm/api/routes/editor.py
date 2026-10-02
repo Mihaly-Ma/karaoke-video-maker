@@ -41,16 +41,19 @@ from kvm.api.schemas import (
     SetLineTextRequest,
     SetLockRequest,
     SetMetadataRequest,
+    SetMoraTimingsRequest,
     SetPhoneticRequest,
     SetRubyRequest,
     SetTimingRequest,
     SetTimingsRequest,
     SetVoicePartRequest,
     ShiftRequest,
+    ShiftSelectionRequest,
     SplitLineRequest,
 )
 from kvm.api.store import ProjectStore
 from kvm.editing import ops
+from kvm.editing.mora_timing import set_mora_timings
 
 _log = logging.getLogger(__name__)
 
@@ -111,6 +114,32 @@ def shift(req: ShiftRequest, request: Request, response: Response) -> ProjectDTO
             delta_ms=req.delta_ms,
             line_id=req.line_id,
             token_index=req.token_index,
+        ),
+    )
+
+
+@router.post("/mora-timings", response_model=ProjectDTO)
+def mora_timings(req: SetMoraTimingsRequest, request: Request, response: Response) -> ProjectDTO:
+    return _apply(
+        request,
+        response,
+        req.project_id,
+        "注音打轴",
+        lambda draft: set_mora_timings(draft, req.items),
+    )
+
+
+@router.post("/shift-selection", response_model=ProjectDTO)
+def shift_selection(req: ShiftSelectionRequest, request: Request, response: Response) -> ProjectDTO:
+    return _apply(
+        request,
+        response,
+        req.project_id,
+        "选中部分平移",
+        lambda draft: ops.shift_selection(
+            draft,
+            delta_ms=req.delta_ms,
+            ranges=[(r.line_id, r.start, r.end) for r in req.ranges],
         ),
     )
 

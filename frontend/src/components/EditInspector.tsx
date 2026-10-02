@@ -19,12 +19,13 @@
  */
 
 import { LockOutlined, UnlockOutlined } from '@ant-design/icons'
-import { useCallback, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { t } from '../i18n'
 import { formatMs } from '../lib/timeScale'
 import { useProject } from '../state/projectStore'
-import type { RubyEditing } from './RubyEditor'
+import EditSelectionTiming from './EditSelectionTiming'
+import { PICKED_WORDS_EVENT, type RubyEditing } from './RubyEditor'
 import type { RubyUnit } from './RubyModel'
 import { SOURCE_META } from './Timeline'
 
@@ -36,9 +37,15 @@ export interface EditInspectorProps {
 }
 
 export default function EditInspector({ editing }: EditInspectorProps) {
+  const [hasRange, setHasRange] = useState(false)
+  useEffect(() => {
+    const read = () => setHasRange(!!document.querySelector('.kvm-ruby__ch[data-picked]'))
+    document.addEventListener(PICKED_WORDS_EVENT, read)
+    return () => document.removeEventListener(PICKED_WORDS_EVENT, read)
+  }, [])
   return (
     <div className="edit-inspect" data-role="inspector">
-      <TimingBlock unit={editing.selectedUnit} />
+      {hasRange ? <EditSelectionTiming /> : <TimingBlock unit={editing.selectedUnit} />}
     </div>
   )
 }

@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import * as api from '../api/client'
-import type { LockTarget, Palette, Project, TimingItem } from '../api/types'
+import type { LockTarget, MoraTimingItem, Palette, Project, TimingItem } from '../api/types'
 
 /**
  * 编辑器状态层。
@@ -120,6 +120,8 @@ interface ProjectState {
 
   /** 三级调轴统一入口。scope=global 时忽略 target。 */
   shift: (scope: 'global' | 'line' | 'token', deltaMs: number) => Promise<void>
+  setMoraTimings: (items: MoraTimingItem[]) => Promise<void>
+  shiftSelection: (ranges: { line_id: string; start: number; end: number }[], deltaMs: number) => Promise<void>
   setTiming: (lineId: string, tokenIndex: number, startMs?: number, durMs?: number) => Promise<void>
   /**
    * 批量改时间，整批作为一个 undo 单元——打完一首歌的打轴结果应走这个，
@@ -258,6 +260,11 @@ export const useProject = create<ProjectState>((set, get) => {
         }),
       )
     },
+
+    setMoraTimings: (items) => withProject((id) => api.setMoraTimings(id, items)),
+
+    shiftSelection: (ranges, deltaMs) =>
+      withProject((id) => api.shiftSelection({ project_id: id, ranges, delta_ms: deltaMs })),
 
     setTiming: async (lineId, tokenIndex, startMs, durMs) =>
       withProject((id) =>

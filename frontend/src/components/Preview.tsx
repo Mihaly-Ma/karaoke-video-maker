@@ -1597,7 +1597,7 @@ export function Preview({ className }: PreviewProps) {
         选中态此前只加粗字重，在一排同样大小的按钮里几乎看不出来（尤其"仅人声"
         与"伴奏"这种一眼扫过去的选择）。现在按下的那一档是 accent 实底。
       */}
-      <div style={styles.controls}>
+      <div className="preview-controls" style={styles.controls}>
         <button
           type="button"
           className="iconbtn"
@@ -1624,7 +1624,7 @@ export function Preview({ className }: PreviewProps) {
           style={styles.seek}
         />
 
-        <div style={styles.seg} role="group" aria-label={t('media.player.mix.label')}>
+        <div className="preview-tracks" style={styles.seg} role="group" aria-label={t('media.player.mix.label')}>
           {TOGGLE_LAYERS.map((id) => {
             const blocked = id === GUIDE_LAYER ? guideBlockReason() : layerBlockReason(id)
             const Icon = LAYER_ICON[id] ?? SoundOutlined
@@ -1654,7 +1654,7 @@ export function Preview({ className }: PreviewProps) {
                   ...(blocked ? styles.toggleDisabled : null),
                 }}
               >
-                <Icon />
+                <Icon /><span className="preview-track-label">{label}</span>
               </button>
             )
           })}

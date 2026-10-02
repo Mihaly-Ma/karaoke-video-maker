@@ -53,6 +53,7 @@ from kvm.api.schemas import (
     RenderRequest,
 )
 from kvm.api.store import ProjectStore, default_root
+from kvm.editing.mora_timing import effective_mora_timings
 from kvm.media import guide as guide_module
 from kvm.media.download import _ffprobe_bin, _probe_duration
 from kvm.media.ffmpeg import find_ffmpeg_with_libass
@@ -62,6 +63,7 @@ from kvm.models.karaoke import (
     KaraokeProject,
     KaraokeStyle,
     Line,
+    MoraTiming,
     ReadingSource,
     RubySpan,
     TimingSource,
@@ -134,6 +136,14 @@ def project_dto_to_domain(dto: ProjectDTO) -> KaraokeProject:
     """
     lines = [
         Line(
+            mora_timings=[
+                MoraTiming(
+                    token_start=lo,
+                    token_end=hi,
+                    times=[(t.start_ms + delta, t.start_ms + t.dur_ms + delta) for t in span.times],
+                )
+                for span, lo, hi, delta in effective_mora_timings(ln)
+            ],
             tokens=[
                 Token(
                     text=tok.text,

@@ -324,7 +324,7 @@ async function runEngineOn(name, browser) {
     const insp = document.querySelector('.edit-inspect')
     const bar = document.querySelector('.kvm-tl')
     if (!off) return null
-    const o = off.getBoundingClientRect()
+    const o = (document.querySelector('[data-role="timing-options"] summary') ?? off).getBoundingClientRect()
     const i = insp?.getBoundingClientRect()
     return {
       inTimeline: !!bar && bar.contains(off),
@@ -812,11 +812,14 @@ async function runMutations(browser, source) {
     // --- 整曲偏移 ---
     const readOffset = async () => (await fetchProject()).global_offset_ms
     const o0 = await readOffset()
+    await page.locator('[data-role="timing-options"] summary').click()
     await page.locator('[data-role="global-offset"] [data-role="global-nudge"]').last().click()
     const o1 = await waitFor(readOffset, o0 + 100)
     check(o1 === o0 + 100, '+100 真的落到 global_offset_ms', `${o0} → ${o1}`)
     await page.locator('[data-role="global-offset"] [data-role="global-nudge"]').first().click()
     check((await waitFor(readOffset, o0)) === o0, '-100 还原')
+
+    await page.locator('[data-role="timing-options"] summary').click()
 
     // --- 声部：单句 / 批量 / 字级区间 ---
     const vLine = (await fetchProject()).lines[3]

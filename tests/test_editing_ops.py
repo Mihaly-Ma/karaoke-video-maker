@@ -896,3 +896,94 @@ def test_set_locks_rejects_out_of_range_token() -> None:
 # "按声部索引的一整套配色"改成"一组四色"（声部名由用户自定义，把它焊进方案
 # 会让取色在真实工程里全部落空，详见 `schemas.PaletteScheme`），
 # 配色的可读性判据与方案库的增删改名放在一起看更完整。
+
+
+def test_shift_selection_shared_boundaries_and_other_line() -> None:
+    p = _project()
+    untouched = p.lines[1].model_dump()
+    ops.shift_selection(p, delta_ms=100, ranges=[("L1", 1, 3)])
+    assert [(t.start_ms, t.dur_ms) for t in p.lines[0].tokens] == [
+        (1000, 600),
+        (1600, 300),
+        (1900, 200),
+        (2100, 300),
+    ]
+    assert p.lines[1].model_dump() == untouched
+    assert p.global_offset_ms == 0
+    assert all(t.locked_timing for t in p.lines[0].tokens)
+
+
+def test_shift_selection_cross_line_uses_one_clamped_delta() -> None:
+    p = _project()
+    out = ops.shift_selection(p, delta_ms=-9999, ranges=[("L1", 2, 4), ("L2", 0, 2)])
+    assert out.warnings
+    assert [t.start_ms for t in p.lines[0].tokens] == [1000, 1500, 1510, 1710]
+    assert [t.start_ms for t in p.lines[1].tokens] == [2510, 2910]
+    assert p.lines[0].tokens[1].dur_ms == 10
+    assert not p.lines[0].tokens[0].locked_timing
+
+
+def test_shift_selection_gap_does_not_touch_neighbors() -> None:
+    p = _project()
+    p.lines[0].tokens[1].start_ms += 50
+    p.lines[0].tokens[1].dur_ms -= 100
+    before = [t.model_dump() for t in p.lines[0].tokens]
+    ops.shift_selection(p, delta_ms=30, ranges=[("L1", 1, 2)])
+    assert p.lines[0].tokens[1].start_ms == 1580
+    for i in (0, 2, 3):
+        assert p.lines[0].tokens[i].model_dump() == before[i]
+
+
+def test_shift_selection_invalid_range_is_atomic() -> None:
+    p = _project()
+    before = p.model_dump()
+    with pytest.raises(ops.EditError):
+        ops.shift_selection(p, delta_ms=100, ranges=[("L1", 1, 3), ("L2", 0, 99)])
+    assert p.model_dump() == before
+
+
+def test_shift_selection_persistence_and_one_undo(tmp_path: Path) -> None:
+    store = ProjectStore(tmp_path)
+    created = store.create("选区测试")
+    store.mutate(created.id, lambda p: setattr(p, "lines", _project().lines))
+    before = store.get(created.id).model_dump()
+    depth = store.history_depth(created.id)[0]
+    store.mutate(
+        created.id,
+        lambda p: ops.shift_selection(p, delta_ms=100, ranges=[("L1", 1, 4), ("L2", 0, 2)]),
+    )
+    changed = store.get(created.id).model_dump()
+    assert ProjectStore(tmp_path).get(created.id).model_dump() == changed
+    assert store.history_depth(created.id)[0] == depth + 1
+    assert store.undo(created.id).model_dump() == before
+    assert store.redo(created.id).model_dump() == changed
+
+
+def test_shift_selection_api_validation_and_undo(tmp_path: Path) -> None:
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from kvm.api.routes.editor import router
+
+    app = FastAPI()
+    app.include_router(router)
+    store = ProjectStore(tmp_path)
+    app.state.store = store
+    created = store.create("选区接口")
+    store.mutate(created.id, lambda p: setattr(p, "lines", _project().lines))
+    before = store.get(created.id).model_dump()
+    with TestClient(app) as client:
+        body = {
+            "project_id": created.id,
+            "delta_ms": 100,
+            "ranges": [{"line_id": "L1", "start": 1, "end": 3}],
+        }
+        response = client.post("/api/editor/shift-selection", json=body)
+        assert response.status_code == 200
+        assert response.json()["lines"][0]["tokens"][1]["start_ms"] == 1600
+        depth = store.history_depth(created.id)[0]
+        body["ranges"][0]["end"] = 99
+        assert client.post("/api/editor/shift-selection", json=body).status_code == 400
+        assert store.history_depth(created.id)[0] == depth
+        body["ranges"] = []
+        assert client.post("/api/editor/shift-selection", json=body).status_code == 422
+        assert store.undo(created.id).model_dump() == before

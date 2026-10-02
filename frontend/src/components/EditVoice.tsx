@@ -460,6 +460,7 @@ export default function EditVoice() {
           key={p}
           type="button"
           className="small"
+          aria-pressed={p === curPart}
           data-role="voice-assign"
           data-part={p}
           disabled={disabled}

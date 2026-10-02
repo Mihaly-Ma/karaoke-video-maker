@@ -700,10 +700,33 @@ class AssBuilder:
                 f"\\1c{pal.sung_fill}\\3c{pal.sung_outline}",
                 f"\\clip({seg_x0},0,{seg_x0},{h})",
             ]
+            timed = {
+                i: span for span in ln.mora_timings for i in range(span.token_start, span.token_end)
+            }
+            emitted: set[int] = set()
             for i in range(i0, i1):
+                span = timed.get(i)
+                if span is not None:
+                    if span.token_start in emitted:
+                        continue
+                    emitted.add(span.token_start)
+                    x_start = lo.token_x[span.token_start]
+                    x_end = lo.token_x[span.token_end]
+                    count = len(span.times)
+                    for beat, (a_ms, b_ms) in enumerate(span.times):
+                        left = x_start + (x_end - x_start) * beat / count
+                        right = x_start + (x_end - x_start) * (beat + 1) / count
+                        a = max(left, lo.token_x[i0])
+                        b = min(right, lo.token_x[i1])
+                        if b <= a:
+                            continue
+                        start_ms = round(a_ms + (b_ms - a_ms) * (a - left) / (right - left))
+                        end_ms = round(a_ms + (b_ms - a_ms) * (b - left) / (right - left))
+                        rel_a = max(0, start_ms + off - show)
+                        rel_b = max(rel_a + 1, end_ms + off - show)
+                        clip_tags.append(f"\\t({rel_a},{rel_b},\\clip({seg_x0},0,{round(b)},{h}))")
+                    continue
                 tk = ln.tokens[i]
-                # dur=0 的块（QRC 实测存在，多为半角空格）会触发 libass #124，
-                # 必须跳过而不是输出零时长动画
                 if tk.dur_ms <= 0:
                     continue
                 rel_a = max(0, tk.start_ms + off - show)
@@ -751,12 +774,30 @@ class AssBuilder:
                 b_ms = max(e for _, e in span)
                 rel_a = max(0, a_ms + off - show)
                 rel_b = max(rel_a + 1, b_ms + off - show)
+                token_chars = [0]
+                for token in ln.tokens:
+                    token_chars.append(token_chars[-1] + len(token.text))
+                mora_span = next(
+                    (
+                        m
+                        for m in ln.mora_timings
+                        if token_chars[m.token_start] == r.start
+                        and token_chars[m.token_end] == r.end
+                    ),
+                    None,
+                )
+                animation = f"\\t({rel_a},{rel_b},\\clip({rx},0,{rx + rw},{h}))"
+                if mora_span is not None:
+                    animation = "".join(
+                        f"\\t({max(0, a + off - show)},{max(1, b + off - show)},"
+                        f"\\clip({rx},0,{round(rx + rw * (i + 1) / len(mora_span.times))},{h}))"
+                        for i, (a, b) in enumerate(mora_span.times)
+                    )
                 events.append(
                     f"Dialogue: 3,{t_show},{t_hide},Ruby,,0,0,0,,"
                     f"{{\\an7\\pos({rx},{ruby_y}){fad}"
                     f"\\1c{pal.sung_fill}\\3c{pal.sung_outline}"
-                    f"\\clip({rx},0,{rx},{h})"
-                    f"\\t({rel_a},{rel_b},\\clip({rx},0,{rx + rw},{h}))}}{rtext}\n"
+                    f"\\clip({rx},0,{rx},{h}){animation}}}{rtext}\n"
                 )
         return events
 

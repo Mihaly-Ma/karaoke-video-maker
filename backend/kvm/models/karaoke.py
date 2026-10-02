@@ -212,6 +212,13 @@ class Token:
 
 
 @dataclass
+class MoraTiming:
+    token_start: int
+    token_end: int
+    times: list[tuple[int, int]]
+
+
+@dataclass
 class Line:
     """一行歌词。
 
@@ -243,6 +250,8 @@ class Line:
     """标记被歌词源塞进正文的制作名单行（词/曲/编曲/制作人）。"""
 
     locked: bool = False
+
+    mora_timings: list[MoraTiming] = field(default_factory=list)
 
     @property
     def text(self) -> str:

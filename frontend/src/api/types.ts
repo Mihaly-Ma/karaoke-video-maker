@@ -36,7 +36,17 @@ export interface Token {
   tid: string
 }
 
+export interface MoraTime { text: string; start_ms: number; dur_ms: number }
+export interface MoraTimingSpan {
+  start: number; end: number; reading: string; surface: string; times: MoraTime[]
+  token_ids: string[]; token_starts: number[]; token_durations: number[]
+}
+export interface MoraTimingItem {
+  line_id: string; start: number; end: number; reading: string; surface: string; times: MoraTime[]
+}
+
 export interface Line {
+  mora_timings?: MoraTimingSpan[]
   id: string
   tokens: Token[]
   ruby: RubySpan[]

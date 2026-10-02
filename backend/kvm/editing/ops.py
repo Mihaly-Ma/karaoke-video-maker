@@ -611,6 +611,63 @@ def shift(
     return out
 
 
+def shift_selection(
+    project: ProjectDTO, *, delta_ms: int, ranges: list[tuple[str, int, int]]
+) -> EditOutcome:
+    """选区同量平移，共享边界由两侧未选音节吸收，整批统一夹紧。"""
+    if not ranges:
+        raise EditError("请先选中歌词")
+    plans: list[tuple[LineDTO, int, int, bool, bool]] = []
+    seen: set[str] = set()
+    lower: int | None = None
+    upper: int | None = None
+    for line_id, start, end in ranges:
+        _, line = _find_line(project, line_id)
+        if line_id in seen or not 0 <= start < end <= len(line.tokens):
+            raise EditError(f"行 {line_id} 的选区无效")
+        seen.add(line_id)
+        first, last = line.tokens[start], line.tokens[end - 1]
+        floor = -first.start_ms
+        lead = start > 0 and _ends_at(line.tokens[start - 1], first)
+        trail = end < len(line.tokens) and _ends_at(last, line.tokens[end])
+        if start > 0:
+            prev = line.tokens[start - 1]
+            boundary = prev.start_ms + (MIN_DUR_MS if lead else prev.dur_ms)
+            floor = max(floor, boundary - first.start_ms)
+        lower = floor if lower is None else max(lower, floor)
+        if end < len(line.tokens):
+            nxt = line.tokens[end]
+            boundary = nxt.start_ms + (nxt.dur_ms - MIN_DUR_MS if trail else 0)
+            ceiling = boundary - last.start_ms - last.dur_ms
+            upper = ceiling if upper is None else min(upper, ceiling)
+        plans.append((line, start, end, lead, trail))
+    assert lower is not None
+    if upper is not None and lower > upper:
+        raise EditError("选区相邻时间已重叠，请先调整边界")
+    effective = max(delta_ms, lower)
+    if upper is not None:
+        effective = min(effective, upper)
+    out = EditOutcome()
+    if effective != delta_ms:
+        out.warnings.append(f"选区平移被夹紧：{delta_ms}ms → {effective}ms")
+    if effective == 0:
+        return out
+    for line, start, end, lead, trail in plans:
+        for tok in line.tokens[start:end]:
+            tok.start_ms += effective
+            _mark_timing_manual(tok)
+        if lead:
+            prev = line.tokens[start - 1]
+            prev.dur_ms += effective
+            _mark_timing_manual(prev)
+        if trail:
+            nxt = line.tokens[end]
+            nxt.start_ms += effective
+            nxt.dur_ms -= effective
+            _mark_timing_manual(nxt)
+    return out
+
+
 def _shift_global(project: ProjectDTO, delta_ms: int, out: EditOutcome) -> None:
     """整体平移：只动一个数。
 

@@ -78,8 +78,6 @@ import {
   FieldTimeOutlined,
   LinkOutlined,
   LockOutlined,
-  MergeCellsOutlined,
-  ScissorOutlined,
   UndoOutlined,
   VerticalAlignMiddleOutlined,
   ZoomInOutlined,
@@ -109,6 +107,7 @@ import {
   visibleRangeMs,
 } from '../lib/timeScale'
 import EditOffset from './EditOffset'
+import MoraTap from './MoraTap'
 import { Waveform } from './Waveform'
 import type { WaveformHandle, WaveformStatus } from './Waveform'
 
@@ -393,8 +392,6 @@ export function Timeline() {
   const setAudioMode = useProject((s) => s.setAudioMode)
   const shift = useProject((s) => s.shift)
   const setTiming = useProject((s) => s.setTiming)
-  const splitLine = useProject((s) => s.splitLine)
-  const mergeLine = useProject((s) => s.mergeLine)
 
   const hostRef = useRef<HTMLDivElement | null>(null)
   /** 波形那一格。它的高度由 flex 分配，量到多少就转给 wavesurfer 多少 */
@@ -427,6 +424,8 @@ export function Timeline() {
   const dragRef = useRef<DragConfig | null>(null)
 
   const [tapMode, setTapMode] = useState(false)
+  const [moraMode, setMoraMode] = useState(false)
+  const [tapKind, setTapKind] = useState<'token' | 'mora'>('token')
   const [tapPos, setTapPos] = useState(0)
   const [tapDraft, setTapDraft] = useState<Record<string, Timing>>({})
   const [tapStackLen, setTapStackLen] = useState(0)
@@ -1213,16 +1212,6 @@ export function Timeline() {
     [enqueue, selection, shift],
   )
 
-  const doSplit = useCallback(() => {
-    if (selection.kind !== 'token' || selection.tokenIndex <= 0) return
-    void enqueue(() => splitLine(selection.lineId, selection.tokenIndex))
-  }, [enqueue, selection, splitLine])
-
-  const doMerge = useCallback(() => {
-    if (selection.kind === 'none') return
-    void enqueue(() => mergeLine(selection.lineId))
-  }, [enqueue, mergeLine, selection])
-
   /**
    * 点波形定位。这里**只发出跳转意图**（写 store 的播放头），真正的 seek 由
    * Preview 执行；播放头标记也由上面那个订阅统一移动，不在这里抢着画 ——
@@ -1244,6 +1233,7 @@ export function Timeline() {
 
   const keyRef = useRef<(e: KeyboardEvent) => void>(() => undefined)
   keyRef.current = (e: KeyboardEvent) => {
+    if (moraMode) return
     const t = e.target
     if (
       t instanceof HTMLElement &&
@@ -1355,14 +1345,25 @@ export function Timeline() {
          */}
         <button
           data-role="tap"
-          data-on={tapMode ? '1' : '0'}
-          aria-pressed={tapMode}
-          onClick={() => (tapMode ? exitTapMode() : enterTapMode())}
+          data-on={tapMode || moraMode ? '1' : '0'}
+          aria-pressed={tapMode || moraMode}
+          onClick={(e) => {
+            e.currentTarget.blur()
+            if (tapMode) exitTapMode()
+            else if (moraMode) return
+            else if (tapKind === 'mora') { setRate(0.75); setMoraMode(true) }
+            else enterTapMode()
+          }}
+          disabled={moraMode}
           title={tapMode ? t('align.tapExit') : t('align.tapEnter')}
         >
           <FieldTimeOutlined />
-          {tapMode ? t('align.tapOn') : t('align.tap')}
+          {tapMode || moraMode ? t('align.tapOn') : t('align.tap')}
         </button>
+        <select aria-label={t('align.mora.mode')} value={tapKind} disabled={tapMode || moraMode} onChange={(e) => setTapKind(e.target.value as 'token' | 'mora')}>
+          <option value="token">{t('align.mora.token')}</option>
+          <option value="mora">{t('align.mora.reading')}</option>
+        </select>
         {/* 还剩多少字没打轴要能一眼看到：它直接决定「这首歌还差多远能用」，
             所以贴着打轴按钮放，而不是塞进底部图例 */}
         {unsetCount > 0 && (
@@ -1488,27 +1489,6 @@ export function Timeline() {
         <span style={S.sep} />
 
         <button
-          data-role="split"
-          onClick={doSplit}
-          disabled={selection.kind !== 'token' || selection.tokenIndex <= 0}
-          title={`${t('align.split')}｜${t('align.splitHint')}`}
-          aria-label={t('align.split')}
-        >
-          <ScissorOutlined />
-        </button>
-        <button
-          data-role="merge"
-          onClick={doMerge}
-          disabled={selection.kind === 'none'}
-          title={`${t('align.merge')}｜${t('align.mergeHint')}`}
-          aria-label={t('align.merge')}
-        >
-          <MergeCellsOutlined />
-        </button>
-
-        <span style={S.sep} />
-
-        <button
           data-role="link"
           data-on={linkNeighbor ? '1' : '0'}
           aria-pressed={linkNeighbor}
@@ -1530,7 +1510,10 @@ export function Timeline() {
          *    两者曾经都是四个 ±ms 按钮、长得一模一样，是真实发生过的误读来源；
          *    现在除了距离，形态也不同（对称摆在数值两侧 + 图标 + 「整曲」二字）
          */}
-        <EditOffset />
+        <details className="edit-timing-options" data-role="timing-options">
+          <summary>{t('align.offset')}</summary>
+          <div className="edit-timing-options__panel"><EditOffset /></div>
+        </details>
 
         <span style={{ marginLeft: 'auto' }} />
 
@@ -1560,6 +1543,8 @@ export function Timeline() {
           <ColumnWidthOutlined />
         </button>
       </div>
+
+      {moraMode && <MoraTap onExit={() => { setMoraMode(false); setRate(1) }} />}
 
       {/* ------------------------------------------------ 打轴面板 */}
       {tapMode && (
