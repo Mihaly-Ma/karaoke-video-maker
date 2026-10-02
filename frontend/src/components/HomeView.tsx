@@ -1,5 +1,5 @@
 import { DeleteOutlined, PlusOutlined } from '@ant-design/icons'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import * as api from '../api/client'
 import type { Project, ProjectSummary } from '../api/types'
@@ -32,6 +32,13 @@ export default function HomeView({ onOpen }: HomeViewProps) {
   const [title, setTitle] = useState('')
   const [artist, setArtist] = useState('')
   const [busy, setBusy] = useState(false)
+  const [pendingDelete, setPendingDelete] = useState<ProjectSummary | null>(null)
+  const [deleting, setDeleting] = useState(false)
+  const deleteDialog = useRef<HTMLDialogElement>(null)
+
+  useEffect(() => {
+    if (pendingDelete) deleteDialog.current?.showModal()
+  }, [pendingDelete])
 
   const reload = useCallback(async () => {
     try {
@@ -75,12 +82,15 @@ export default function HomeView({ onOpen }: HomeViewProps) {
   }
 
   const remove = async (s: ProjectSummary) => {
-    if (!window.confirm(t('home.confirmDelete', { title: s.title || t('common.untitled') }))) return
+    setDeleting(true)
     try {
       await api.deleteProject(s.id)
       await reload()
     } catch (e) {
       setError(t('home.deleteFailed', { msg: e instanceof Error ? e.message : String(e) }))
+    } finally {
+      setDeleting(false)
+      setPendingDelete(null)
     }
   }
 
@@ -155,9 +165,10 @@ export default function HomeView({ onOpen }: HomeViewProps) {
                   className="iconbtn pcard__del"
                   title={t('home.delete')}
                   aria-label={t('home.delete')}
+                  onKeyDown={(e) => e.stopPropagation()}
                   onClick={(e) => {
                     e.stopPropagation()
-                    void remove(s)
+                    setPendingDelete(s)
                   }}
                 >
                   <DeleteOutlined />
@@ -187,6 +198,34 @@ export default function HomeView({ onOpen }: HomeViewProps) {
             )
           })}
         </div>
+        {pendingDelete && (
+          <dialog
+            ref={deleteDialog}
+            aria-labelledby="delete-project-title"
+            style={{ background: 'var(--bg-surface)', color: 'inherit', borderRadius: 8 }}
+            onCancel={(e) => {
+              if (deleting) e.preventDefault()
+              else setPendingDelete(null)
+            }}
+          >
+            <p id="delete-project-title">
+              {t('home.confirmDelete', { title: pendingDelete.title || t('common.untitled') })}
+            </p>
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button
+                autoFocus
+                type="button"
+                disabled={deleting}
+                onClick={() => setPendingDelete(null)}
+              >
+                {t('common.cancel')}
+              </button>
+              <button type="button" disabled={deleting} onClick={() => void remove(pendingDelete)}>
+                {t('home.delete')}
+              </button>
+            </div>
+          </dialog>
+        )}
       </div>
     </div>
   )
