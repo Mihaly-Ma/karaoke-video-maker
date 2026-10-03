@@ -1393,3 +1393,19 @@ label.checkbox-row {
 .stage--edit .edit-voice { flex-direction: row; flex-wrap: wrap; gap: 6px 12px; padding: 6px 10px; }
 .stage--edit .edit-voice__row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .stage--edit .edit-voice [data-role="voice-assign"][aria-pressed="true"] { color: var(--accent); border-color: var(--accent); background: var(--accent-weak); }
+
+.kvm-ruby__split {
+  width: min(420px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  padding: 20px;
+  border: var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--bg-panel);
+  color: var(--text);
+}
+.kvm-ruby__split::backdrop { background: rgb(0 0 0 / 55%); }
+.kvm-ruby__split label { display: flex; flex-direction: column; gap: 6px; margin: 12px 0; }
+.kvm-ruby__split input, .kvm-ruby__split select { width: 100%; }
+.kvm-ruby__split p { font-size: var(--fs-sm); }
+.kvm-ruby__split button + button { margin-left: 8px; }

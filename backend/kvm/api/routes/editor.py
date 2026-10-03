@@ -50,6 +50,7 @@ from kvm.api.schemas import (
     ShiftRequest,
     ShiftSelectionRequest,
     SplitLineRequest,
+    SplitRubyRequest,
     TokenRangeRequest,
 )
 from kvm.api.store import ProjectStore
@@ -283,6 +284,25 @@ def set_ruby(req: SetRubyRequest, request: Request, response: Response) -> Proje
         "设定注音",
         lambda draft: ops.set_ruby(
             draft, line_id=req.line_id, start=req.start, end=req.end, text=req.text
+        ),
+    )
+
+
+@router.post("/split-ruby", response_model=ProjectDTO)
+def split_ruby(req: SplitRubyRequest, request: Request, response: Response) -> ProjectDTO:
+    return _apply(
+        request,
+        response,
+        req.project_id,
+        "拆分注音",
+        lambda draft: ops.split_ruby(
+            draft,
+            line_id=req.line_id,
+            start=req.start,
+            end=req.end,
+            cut=req.cut,
+            left=req.left,
+            right=req.right,
         ),
     )
 

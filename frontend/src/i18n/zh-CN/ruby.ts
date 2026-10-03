@@ -46,6 +46,13 @@ export const ruby: Record<string, string> = {
   'ruby.action.apply': '应用',
   'ruby.action.hiragana': '平假名',
   'ruby.action.katakana': '片假名',
+  'ruby.action.manualSplit': '拆分注音',
+  'ruby.split.boundary': '拆分位置',
+  'ruby.split.left': '前段读音',
+  'ruby.split.right': '后段读音',
+  'ruby.split.save': '保存拆分',
+  'ruby.split.cancel': '取消',
+  'ruby.split.hint': '分别填写两段读音；可继续拆分。正文时间不变，拆分后请复核注音拍轴。',
   'ruby.action.split': '拆送り仮名',
   'ruby.action.delete': '删除注音',
 

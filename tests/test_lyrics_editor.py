@@ -383,3 +383,68 @@ def test_split_mora_combination_and_short_timing_failure_are_atomic(client: Test
     before = store.get(p.id).model_dump()
     assert client.post("/api/editor/split-tokens", json=req).status_code == 400
     assert store.get(p.id).model_dump() == before
+
+
+def test_split_continuous_kanji_ruby_is_atomic_and_undoable(
+    client: TestClient, tmp_path: Path
+) -> None:
+    store = app.state.store
+    p = store.create("注音拆分", "测试")
+    line = LineDTO(
+        id="kanji",
+        tokens=[
+            TokenDTO(text=c, start_ms=1000 + i * 500, dur_ms=500) for i, c in enumerate("世界")
+        ],
+        ruby=[RubySpanDTO(start=0, end=2, text="せかい", source="manual", locked=True)],
+    )
+    store.mutate(p.id, lambda draft: setattr(draft, "lines", [line]))
+    original = store.get(p.id).model_dump(mode="json")
+    depth = store.history_depth(p.id)[0]
+    body = dict(project_id=p.id, line_id="kanji", start=0, end=2, cut=1, left="せ", right="かい")
+    for patch in ({"cut": 0}, {"cut": 2}, {"right": ""}, {"left": "世"}):
+        assert client.post("/api/editor/split-ruby", json=body | patch).status_code == 400
+        assert store.get(p.id).model_dump(mode="json") == original
+        assert store.history_depth(p.id)[0] == depth
+    response = client.post("/api/editor/split-ruby", json=body)
+    assert response.status_code == 200
+    saved = response.json()
+    assert [(sp["start"], sp["end"], sp["text"]) for sp in saved["lines"][0]["ruby"]] == [
+        (0, 1, "せ"),
+        (1, 2, "かい"),
+    ]
+    assert all(sp["locked"] for sp in saved["lines"][0]["ruby"])
+    assert saved["lines"][0]["tokens"] == original["lines"][0]["tokens"]
+    assert saved["orphans"] == original["orphans"]
+    assert store.history_depth(p.id)[0] == depth + 1
+    assert ProjectStore(tmp_path).get(p.id).model_dump(mode="json") == saved
+    assert client.post(f"/api/projects/{p.id}/undo").json() == original
+    assert client.post(f"/api/projects/{p.id}/redo").json() == saved
+    timed = client.post(
+        "/api/editor/mora-timings",
+        json={
+            "project_id": p.id,
+            "items": [
+                {
+                    "line_id": "kanji",
+                    "start": 0,
+                    "end": 1,
+                    "surface": "世",
+                    "reading": "せ",
+                    "times": [{"text": "せ", "start_ms": 1000, "dur_ms": 500}],
+                },
+                {
+                    "line_id": "kanji",
+                    "start": 1,
+                    "end": 2,
+                    "surface": "界",
+                    "reading": "かい",
+                    "times": [
+                        {"text": "か", "start_ms": 1500, "dur_ms": 200},
+                        {"text": "い", "start_ms": 1700, "dur_ms": 300},
+                    ],
+                },
+            ],
+        },
+    )
+    assert timed.status_code == 200
+    assert len(timed.json()["lines"][0]["mora_timings"]) == 2

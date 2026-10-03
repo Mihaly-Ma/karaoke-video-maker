@@ -880,6 +880,16 @@ class SetRubyRequest(BaseModel):
     text: str
 
 
+class SplitRubyRequest(BaseModel):
+    project_id: str
+    line_id: str
+    start: int
+    end: int
+    cut: int
+    left: str
+    right: str
+
+
 class SetPhoneticRequest(BaseModel):
     """设定某个字符区间的**发音形**（§4.2 的 `reading_phonetic`）。
 

@@ -1093,6 +1093,41 @@ def set_ruby(project: ProjectDTO, *, line_id: str, start: int, end: int, text: s
     return out
 
 
+def split_ruby(
+    project: ProjectDTO,
+    *,
+    line_id: str,
+    start: int,
+    end: int,
+    cut: int,
+    left: str,
+    right: str,
+) -> EditOutcome:
+    from kvm.models.karaoke import is_kana_text
+
+    _, line = _find_line(project, line_id)
+    if line.is_metadata or not 0 <= start < cut < end <= len(_line_text(line)):
+        raise EditError("请选择注音范围内部的拆分位置")
+    if not is_kana_text(left) or not is_kana_text(right):
+        raise EditError("两段读音都需要填写有效假名")
+    if any(
+        sp.start < end and sp.end > start and (sp.start < start or sp.end > end) for sp in line.ruby
+    ):
+        raise EditError("注音范围已变化，请重新选择")
+    line.ruby = [sp for sp in line.ruby if not (sp.start < end and sp.end > start)]
+    out = set_ruby(project, line_id=line_id, start=start, end=cut, text=left)
+    out.warnings.extend(
+        set_ruby(
+            project,
+            line_id=line_id,
+            start=cut,
+            end=end,
+            text=right,
+        ).warnings
+    )
+    return out
+
+
 # ---- 发音形（喂强制对齐的那一份读音） ----
 
 

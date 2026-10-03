@@ -18,9 +18,11 @@
  */
 
 import { DeleteOutlined, LockOutlined, ScissorOutlined, UnlockOutlined, WarningOutlined } from '@ant-design/icons'
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 
 import { t } from '../i18n'
+import { useProject } from '../state/projectStore'
 import {
   alignReading,
   normalizeKana,
@@ -69,7 +71,22 @@ export function RubyInspector({
   onToggleLock,
   onPhonetic,
 }: RubyInspectorProps) {
+  const splitRuby = useProject((s) => s.splitRuby)
+  const [splitOpen, setSplitOpen] = useState(false)
+  const splitDialog = useRef<HTMLDialogElement>(null)
+  useEffect(() => {
+    if (splitOpen) splitDialog.current?.showModal()
+  }, [splitOpen])
+  const [cut, setCut] = useState(1)
+  const [left, setLeft] = useState('')
+  const [right, setRight] = useState('')
+  const [splitting, setSplitting] = useState(false)
+  const [splitError, setSplitError] = useState('')
   const key = unit ? unitKey(unit) : ''
+  useEffect(() => {
+    setSplitOpen(false)
+    setSplitError('')
+  }, [key])
   const saved = unit?.span?.text ?? ''
   const [draft, setDraft] = useState(saved)
   const [phonetic, setPhonetic] = useState('')
@@ -113,6 +130,21 @@ export function RubyInspector({
     )
   }
 
+  busy = busy || splitting
+  const chars = toCodePoints(unit.text)
+  const saveSplit = async () => {
+    if (splitting) return
+    setSplitting(true)
+    setSplitError('')
+    try {
+      await splitRuby(unit.lineId, unit.start, unit.end, unit.start + cut, normalizeKana(left), normalizeKana(right))
+      setSplitOpen(false)
+    } catch (error) {
+      setSplitError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setSplitting(false)
+    }
+  }
   const annotatable = canAnnotate(unit)
   const validation = validateKana(draft)
   const moras = draft && validation.ok ? splitMora(draft) : []
@@ -177,6 +209,39 @@ export function RubyInspector({
           {t('ruby.action.apply')}
         </button>
       </div>
+
+      <div className="kvm-ruby__row">
+        <button type="button" className="small" disabled={!annotatable || chars.length < 2 || busy}
+          onClick={() => { setCut(1); setLeft(''); setRight(''); setSplitError(''); setSplitOpen(true) }}>
+          <ScissorOutlined /> {t('ruby.action.manualSplit')}
+        </button>
+      </div>
+      {splitOpen && createPortal(
+        <dialog ref={splitDialog} className="kvm-ruby__split" data-role="ruby-split"
+          onCancel={(e) => { e.preventDefault(); if (!busy) setSplitOpen(false) }}>
+          <h3>{t('ruby.action.manualSplit')} · {unit.text}</h3>
+          <label>{t('ruby.split.boundary')}
+            <select value={cut} disabled={busy} onChange={(e) => setCut(Number(e.target.value))}>
+              {chars.slice(0, -1).map((_, i) => (
+                <option key={i} value={i + 1}>{chars.slice(0, i + 1).join('')} ｜ {chars.slice(i + 1).join('')}</option>
+              ))}
+            </select>
+          </label>
+          <label>{chars.slice(0, cut).join('')}
+            <input aria-label={t('ruby.split.left')} value={left} disabled={busy} placeholder={t('ruby.field.displayPlaceholder')}
+              onChange={(e) => setLeft(e.target.value)} />
+          </label>
+          <label>{chars.slice(cut).join('')}
+            <input aria-label={t('ruby.split.right')} value={right} disabled={busy} placeholder={t('ruby.field.displayPlaceholder')}
+              onChange={(e) => setRight(e.target.value)} />
+          </label>
+          <p>{t('ruby.split.hint')}</p>
+          {splitError && <p className="kvm-ruby__error">{splitError}</p>}
+          <button type="button" disabled={busy || !left || !right || !validateKana(left).ok || !validateKana(right).ok}
+            onClick={() => void saveSplit()}>{t('ruby.split.save')}</button>
+          <button type="button" disabled={busy} onClick={() => setSplitOpen(false)}>{t('ruby.split.cancel')}</button>
+        </dialog>, document.body,
+      )}
 
       <details className="edit-reading-more">
         <summary>{t('ruby.more')}</summary>

@@ -282,6 +282,11 @@ export const setRuby = (body: {
   text: string
 }) => post<Project>('/editor/ruby', body)
 
+export const splitRuby = (body: {
+  project_id: string; line_id: string; start: number; end: number
+  cut: number; left: string; right: string
+}) => post<Project>('/editor/split-ruby', body)
+
 export const setMetadata = (projectId: string, lineId: string, isMetadata: boolean) =>
   post<Project>('/editor/metadata', { project_id: projectId, line_id: lineId, is_metadata: isMetadata })
 
