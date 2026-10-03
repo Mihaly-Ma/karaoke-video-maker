@@ -237,8 +237,7 @@ def test_unset_line_stays_unset() -> None:
     ops.set_line_text(p, line_id="L1", text="桜舞うて")
 
     line = p.lines[0]
-    # 整行只有一个 token 的（纯文本导入）不擅自切成逐字
-    assert _texts(line) == ["桜舞うて"]
+    assert _texts(line) == list("桜舞うて")
     assert line.tokens[0].timing_source == "unset"
     assert line.tokens[0].timing_granularity == "line"
 
@@ -278,3 +277,23 @@ def test_unknown_line_raises() -> None:
     p = _project()
     with pytest.raises(ops.EditError):
         ops.set_line_text(p, line_id="nope", text="桜")
+
+
+def test_saving_legacy_unset_line_splits_without_changing_text() -> None:
+    line = LineDTO(
+        id="legacy",
+        tokens=[
+            TokenDTO(
+                text="桜舞って",
+                start_ms=0,
+                dur_ms=0,
+                timing_source="unset",
+            )
+        ],
+    )
+    p = ProjectDTO(id="legacy-project", lines=[line])
+    ops.set_line_text(p, line_id="legacy", text="桜舞って")
+    assert _texts(p.lines[0]) == list("桜舞って")
+    assert all(
+        t.start_ms == t.dur_ms == 0 and t.timing_source == "unset" for t in p.lines[0].tokens
+    )

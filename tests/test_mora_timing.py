@@ -129,3 +129,44 @@ def test_render_body_and_ruby_follow_nonuniform_mora_times() -> None:
     assert re.findall(r"\\t\((\d+),(\d+),", body) == re.findall(r"\\t\((\d+),(\d+),", ruby)
     values = [(int(a), int(b)) for a, b in re.findall(r"\\t\((\d+),(\d+),", body)]
     assert [b - a for a, b in values] == [100, 500, 200]
+
+
+def test_merge_and_split_units_preserve_existing_mora_times() -> None:
+    project = ProjectDTO(
+        id="P",
+        lines=[
+            LineDTO(
+                id="L",
+                tokens=[
+                    TokenDTO(text="今", start_ms=1000, dur_ms=300),
+                    TokenDTO(text="日", start_ms=1300, dur_ms=400),
+                ],
+                ruby=[RubySpanDTO(start=0, end=2, text="きょう")],
+            )
+        ],
+    )
+    set_mora_timings(
+        project,
+        [
+            SetMoraTimingItem(
+                line_id="L",
+                start=0,
+                end=2,
+                surface="今日",
+                reading="きょう",
+                times=[
+                    MoraTimeDTO(text="きょ", start_ms=1000, dur_ms=300),
+                    MoraTimeDTO(text="う", start_ms=1300, dur_ms=400),
+                ],
+            )
+        ],
+    )
+    ops.merge_tokens(project, line_id="L", start=0, end=2)
+    assert len(effective_mora_timings(project.lines[0])) == 1
+    assert len(project.lines[0].tokens) == 1
+    ops.split_tokens(project, line_id="L", start=0, end=1)
+    assert len(project.lines[0].tokens) == 2
+    assert project_dto_to_domain(project).lines[0].mora_timings[0].times == [
+        (1000, 1300),
+        (1300, 1700),
+    ]

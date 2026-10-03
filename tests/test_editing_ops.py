@@ -987,3 +987,30 @@ def test_shift_selection_api_validation_and_undo(tmp_path: Path) -> None:
         body["ranges"] = []
         assert client.post("/api/editor/shift-selection", json=body).status_code == 422
         assert store.undo(created.id).model_dump() == before
+
+
+def test_first_timing_ignores_unset_neighbors_but_respects_known_boundaries() -> None:
+    p = ProjectDTO(
+        id="P",
+        lines=[
+            LineDTO(
+                id="L",
+                tokens=[
+                    TokenDTO(text="春", start_ms=0, dur_ms=0, timing_source="unset"),
+                    TokenDTO(text="夏", start_ms=0, dur_ms=0, timing_source="unset"),
+                    TokenDTO(
+                        text="秋",
+                        start_ms=3000,
+                        dur_ms=500,
+                        timing_source="manual",
+                        locked_timing=True,
+                    ),
+                ],
+            )
+        ],
+    )
+    before = p.lines[0].tokens[2].model_dump()
+    ops.set_timing(p, line_id="L", token_index=1, start_ms=2000, dur_ms=1500)
+    assert (p.lines[0].tokens[1].start_ms, p.lines[0].tokens[1].dur_ms) == (2000, 1000)
+    assert p.lines[0].tokens[0].timing_source == "unset"
+    assert p.lines[0].tokens[2].model_dump() == before

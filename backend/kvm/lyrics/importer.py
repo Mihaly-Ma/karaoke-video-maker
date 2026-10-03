@@ -3,7 +3,7 @@
 CLAUDE.md §2.5：手工导入不是"搜索失败后的惩罚性回退"，要能随时主动使用，
 冷门曲、同人曲在任何歌词库都可能查不到。三种格式的粒度依次递增：
 
-- `text`：无时间轴，一行一个 Token，时间置 0，**不伪造时间**，等用户手工打轴。
+- `text`：无时间轴，逐字切分（连续英文词保留整词），时间置 0，等用户手工打轴。
 - `lrc`：`[mm:ss.xx]` 行级时间轴，一行一个 Token。
 - `qrc`：逐字轴 + `[kana:]` 假名轨。解析规则与 `experiments/qrc_decrypt.py`
   已实测验证过的实现一致（本模块与 `kvm.lyrics.qq` 共用这份解析逻辑：
@@ -32,6 +32,7 @@ from collections.abc import Sequence
 
 from kvm.api.schemas import LineDTO, RubySpanDTO, TokenDTO
 from kvm.lyrics.base import Granularity
+from kvm.models.karaoke import is_kana
 
 _CONTENT_RE = re.compile(r'LyricContent="(.*)"\s*/>', re.S)
 _QRC_LINE_RE = re.compile(r"^\[(\d+),(\d+)\](.*)$")
@@ -189,8 +190,44 @@ def has_ruby(lines: list[LineDTO]) -> bool:
 # ---------------------------------------------------------------------------
 
 
+_SMALL_YOUON = frozenset("ゃゅょゎャュョヮ")
+_SMALL_VOWEL = frozenset("ぁぃぅぇぉァィゥェォ")
+_PLAIN_VOWEL = frozenset("あいうえおアイウエオ")
+_FOREIGN_BASE = frozenset("うゔウヴ")
+
+
+def split_text_units(text: str) -> list[str]:
+    """假名按拍、汉字逐字切分，连续 ASCII 词保留整词。"""
+    units: list[str] = []
+    buf = ""
+    for ch in text:
+        if ch.isascii() and (ch.isalnum() or ch in "'’-"):
+            buf += ch
+            continue
+        if buf:
+            units.append(buf)
+            buf = ""
+        prev = units[-1][-1] if units else ""
+        attaches = (
+            bool(prev)
+            and is_kana(prev)
+            and prev not in "っッんンーゃゅょゎャュョヮぁぃぅぇぉァィゥェォ"
+            and (
+                ch in _SMALL_YOUON
+                or (ch in _SMALL_VOWEL and (prev not in _PLAIN_VOWEL or prev in _FOREIGN_BASE))
+            )
+        )
+        if attaches:
+            units[-1] += ch
+        else:
+            units.append(ch)
+    if buf:
+        units.append(buf)
+    return units
+
+
 def parse_text(content: str) -> list[LineDTO]:
-    """纯文本导入：一行一句，整行装进单个 Token，时间置 0。
+    """纯文本导入：一行一句，切成待打轴单元，时间置 0。
 
     **不伪造时间**——等用户 tap-to-time 手工打轴，或后续跑强制对齐。
 
@@ -199,9 +236,7 @@ def parse_text(content: str) -> list[LineDTO]:
     自动重算逻辑）误以为这个 0 是用户认可的时间，前端也就没法把"尚未打轴"
     显眼地标出来。`locked_timing=False`，允许强制对齐自由填入真实时间。
 
-    `timing_granularity` 标 `line`：这个 token 装的是整行，将来无论手工打轴还是
-    行级对齐，它能达到的权威粒度也就是行级——留着默认的 `provider_char`
-    等于谎称有逐字权威（CLAUDE.md §4.2 禁止把插值出来的粒度标成 provider）。
+    单元切分不代表已有逐字时间；粒度仍标 `line`，由后续打轴或对齐更新。
     """
     lines: list[LineDTO] = []
     for raw in content.splitlines():
@@ -213,13 +248,14 @@ def parse_text(content: str) -> list[LineDTO]:
                 id=_new_id(),
                 tokens=[
                     TokenDTO(
-                        text=text,
+                        text=unit,
                         start_ms=0,
                         dur_ms=0,
                         timing_source="unset",
                         locked_timing=False,
                         timing_granularity="line",
                     )
+                    for unit in split_text_units(text)
                 ],
             )
         )

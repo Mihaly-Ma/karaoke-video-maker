@@ -32,7 +32,7 @@ try {
     const browser = await engine.launch()
     try {
       const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
-      const errors = [], shifts = [], moraRequests = []
+      const errors = [], shifts = [], moraRequests = [], unitRequests = []
       page.on('pageerror', (error) => { errors.push(error.message); console.error(error.message) })
       const project = structuredClone(fixture)
       await page.addInitScript(() => localStorage.setItem('kvm.step.selection-test', 'edit'))
@@ -43,6 +43,20 @@ try {
         if (path === '/api/editor/mora-timings') {
           moraRequests.push(request.postDataJSON())
           if (moraRequests.length === 1) return route.fulfill({ status: 400, json: { detail: '保存失败测试' } })
+          return route.fulfill({ json: project })
+        }
+        if (path === '/api/editor/merge-tokens' || path === '/api/editor/split-tokens') {
+          const body = request.postDataJSON(); unitRequests.push({ path, ...body })
+          if (unitRequests.length === 1) return route.fulfill({ status: 400, json: { detail: '单元操作失败测试' } })
+          const line = project.lines.find((l) => l.id === body.line_id)
+          const tokens = line.tokens.slice(body.start, body.end)
+          if (path.endsWith('merge-tokens')) {
+            const end = Math.max(...tokens.map((tk) => tk.start_ms + tk.dur_ms))
+            line.tokens.splice(body.start, body.end - body.start, { ...tokens[0], text: tokens.map((tk) => tk.text).join(''), dur_ms: end - tokens[0].start_ms, locked_segmentation: true })
+          } else {
+            const token = tokens[0], chars = Array.from(token.text)
+            line.tokens.splice(body.start, 1, ...chars.map((text, i) => ({ ...token, text, tid: `${token.tid}-${i}`, start_ms: token.start_ms + i * token.dur_ms / chars.length, dur_ms: token.dur_ms / chars.length })))
+          }
           return route.fulfill({ json: project })
         }
         if (path === '/api/editor/shift-selection') {
@@ -96,6 +110,30 @@ try {
       await timing.getByRole('spinbutton').press('Enter')
       await page.waitForFunction(() => !document.querySelector('[data-role="selection-timing"] button:disabled'))
       assert.equal(shifts[1].delta_ms, -50)
+      const merge = page.getByRole('button', { name: '合并单元', exact: true })
+      const split = page.getByRole('button', { name: '拆分单元', exact: true })
+      assert(!await merge.isEnabled())
+      const mergeFrom = await page.locator('.kvm-ruby__line[data-line="L1"] .kvm-ruby__ch[data-tk="1"]').boundingBox()
+      const mergeTo = await page.locator('.kvm-ruby__line[data-line="L1"] .kvm-ruby__ch[data-tk="3"]').boundingBox()
+      await page.mouse.move(mergeFrom.x + mergeFrom.width / 2, mergeFrom.y + mergeFrom.height / 2)
+      await page.mouse.down()
+      await page.mouse.move(mergeTo.x + mergeTo.width / 2, mergeTo.y + mergeTo.height / 2, { steps: 10 })
+      await page.mouse.up()
+      await merge.click()
+      await page.getByRole('alert').getByText('单元操作失败测试', { exact: true }).waitFor()
+      await merge.click()
+      await page.waitForFunction(() => !document.querySelector('.kvm-ruby__ch[data-picked]'))
+      await page.waitForFunction(async () => { const { useProject } = await import('/src/state/projectStore.ts'); return useProject.getState().project.lines[0].tokens.length === 2 })
+      assert.equal(await page.locator('.kvm-ruby__line[data-line="L1"] .kvm-ruby__ch').allTextContents().then((texts) => texts.join('')), '桜舞って')
+      assert.equal(unitRequests[1].start, 1)
+      assert.equal(unitRequests[1].end, 4)
+      await split.click()
+      await page.waitForFunction(() => document.querySelector('[aria-label="计时单元"]').querySelectorAll('button')[1].disabled)
+      await page.waitForFunction(async () => { const { useProject } = await import('/src/state/projectStore.ts'); return useProject.getState().project.lines[0].tokens.length === 4 })
+      assert.equal(await page.locator('.kvm-ruby__line[data-line="L1"] .kvm-ruby__ch').allTextContents().then((texts) => texts.join('')), '桜舞って')
+      assert.equal(unitRequests[2].path, '/api/editor/split-tokens')
+      assert.equal(unitRequests[2].end, 2)
+
       await page.screenshot({ path: `/tmp/kvm-edit-overview-${engine.name()}.png` })
       await page.locator('.kvm-ruby__line[data-line="L2"] .kvm-ruby__ch[data-tk="0"]').click()
       await page.getByRole('combobox', { name: '手工打轴方式' }).selectOption('mora')
@@ -119,6 +157,18 @@ try {
       await mora.getByRole('button', { name: '保存并退出' }).click()
       await mora.waitFor({ state: 'detached' })
       assert.equal(moraRequests.length, 2)
+      await page.evaluate(async () => {
+        const { useProject } = await import('/src/state/projectStore.ts')
+        const state = useProject.getState(), project = structuredClone(state.project)
+        const line = project.lines.find((l) => l.id === 'L2')
+        line.tokens = [{ ...line.tokens[0], text: 'がっ', locked_segmentation: true }]
+        line.ruby = []
+        useProject.setState({ project, selection: { kind: 'token', lineId: 'L2', tokenIndex: 0 } })
+      })
+      await page.locator('[data-role="tap"]').click()
+      await page.locator('.mora-tap__beats b').getByText('がっ', { exact: true }).waitFor()
+      assert.equal(await page.locator('.mora-tap__beats button').count(), 1)
+      await page.locator('[data-role="mora-tap"]').getByRole('button', { name: '保存并退出' }).click()
       await page.setViewportSize({ width: 1024, height: 768 })
       assert(await toolbar.getByRole('button', { name: '编辑歌词', exact: true }).isVisible())
       const options = page.locator('[data-role="timing-options"]')
@@ -128,7 +178,7 @@ try {
       await options.locator('summary').click()
       await page.screenshot({ path: `/tmp/kvm-edit-${engine.name()}.png` })
       assert.deepEqual(errors, [])
-      console.log(`${engine.name()}：默认注音声部、跨行移动、注音打轴、回退与失败重试通过`)
+      console.log(`${engine.name()}：默认注音声部、跨行移动、合并拆分、注音打轴、回退与失败重试通过`)
     } finally { await browser.close() }
   }
 } finally { await server.close() }

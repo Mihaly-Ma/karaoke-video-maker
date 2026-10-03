@@ -24,6 +24,7 @@ export interface Token {
    */
   timing_source: 'provider' | 'aligned' | 'interpolated' | 'manual' | 'unset'
   locked_timing: boolean
+  locked_segmentation?: boolean
   /**
    * 该 token 时间的权威粒度：低于权威粒度的时间由插值产生，
    * 禁止标成 provider/aligned（CLAUDE.md §4.2）。

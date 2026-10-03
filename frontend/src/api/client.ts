@@ -231,6 +231,12 @@ export const shift = (body: {
 export const setMoraTimings = (projectId: string, items: MoraTimingItem[]) =>
   post<Project>('/editor/mora-timings', { project_id: projectId, items })
 
+export const splitTokens = (projectId: string, lineId: string, start: number, end: number) =>
+  post<Project>('/editor/split-tokens', { project_id: projectId, line_id: lineId, start, end })
+
+export const mergeTokens = (projectId: string, lineId: string, start: number, end: number) =>
+  post<Project>('/editor/merge-tokens', { project_id: projectId, line_id: lineId, start, end })
+
 export const shiftSelection = (body: {
   project_id: string
   delta_ms: number

@@ -24,7 +24,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { t } from '../i18n'
 import { formatMs } from '../lib/timeScale'
 import { useProject } from '../state/projectStore'
-import EditSelectionTiming from './EditSelectionTiming'
+import EditSelectionTiming, { EditUnitActions } from './EditSelectionTiming'
 import { PICKED_WORDS_EVENT, type RubyEditing } from './RubyEditor'
 import type { RubyUnit } from './RubyModel'
 import { SOURCE_META } from './Timeline'
@@ -45,6 +45,7 @@ export default function EditInspector({ editing }: EditInspectorProps) {
   }, [])
   return (
     <div className="edit-inspect" data-role="inspector">
+      <EditUnitActions />
       {hasRange ? <EditSelectionTiming /> : <TimingBlock unit={editing.selectedUnit} />}
     </div>
   )

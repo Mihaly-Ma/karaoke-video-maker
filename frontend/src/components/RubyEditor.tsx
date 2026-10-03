@@ -656,6 +656,7 @@ function tokenVoiceOf(line: Line, tokenIndex: number): string {
  * 那种依赖在插入一个组件时就会悄悄反过来。改成"标记完再广播"，顺序就定死了。
  */
 export const PICKED_WORDS_EVENT = 'kvm:picked-words'
+export const CLEAR_PICKED_WORDS_EVENT = 'kvm:clear-picked-words'
 
 /**
  * 划词：按住拖过几个词，把它们标进 DOM（`data-picked`），供 `EditVoice` 指派声部。
@@ -881,10 +882,13 @@ function usePickedWords(paperRef: RefObject<HTMLDivElement>): PickBox[] {
       anchor = null
     }
 
+    const onClear = () => { clear(true); setBoxes([]) }
+    document.addEventListener(CLEAR_PICKED_WORDS_EVENT, onClear)
     document.addEventListener('pointerdown', onDown)
     document.addEventListener('pointermove', onMove)
     document.addEventListener('pointerup', onUp)
     return () => {
+      document.removeEventListener(CLEAR_PICKED_WORDS_EVENT, onClear)
       document.removeEventListener('pointerdown', onDown)
       document.removeEventListener('pointermove', onMove)
       document.removeEventListener('pointerup', onUp)
@@ -1072,6 +1076,8 @@ export function RubyPaper({ editing, reviewOpen, onToggleReview }: RubyPaperProp
           const units = lineUnits.get(line.id) ?? []
           const segs = segmentByVoice(line, units)
           const lineTextValue = line.tokens.map((tk) => tk.text).join('')
+          const tokenOffsets = [0]
+          for (const tk of line.tokens) tokenOffsets.push(tokenOffsets[tokenOffsets.length - 1] + Array.from(tk.text).length)
           if (editingLineId === line.id) {
             return (
               <div key={line.id} className="kvm-ruby__line" data-line={line.id} data-editing>
@@ -1178,7 +1184,10 @@ export function RubyPaper({ editing, reviewOpen, onToggleReview }: RubyPaperProp
                             className="kvm-ruby__ch"
                             data-tk={u.tokenIndex + i}
                           >
-                            {tk.text}
+                            {Array.from(tk.text).slice(
+                              Math.max(0, u.start - tokenOffsets[u.tokenIndex + i]),
+                              u.end - tokenOffsets[u.tokenIndex + i],
+                            ).join('')}
                           </span>
                         ))}
                         {rt && <rt className="kvm-ruby__rt">{rt}</rt>}

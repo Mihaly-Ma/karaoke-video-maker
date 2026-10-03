@@ -76,6 +76,7 @@ from kvm.api.schemas import (
     TokenDTO,
 )
 from kvm.api.store import default_root
+from kvm.lyrics.importer import split_text_units
 from kvm.models.karaoke import (
     ReadingSource,
     TimingSource,
@@ -239,13 +240,22 @@ def _set_leading_edge(tokens: list[TokenDTO], index: int, value: int) -> tuple[i
 
     lower = 0
     lead_shared = False
-    if index > 0:
+    if index > 0 and tokens[index - 1].timing_source != "unset":
         prev = tokens[index - 1]
         lead_shared = _ends_at(prev, tok)
         lower = max(0, prev.start_ms + MIN_DUR_MS if lead_shared else prev.start_ms + prev.dur_ms)
-    upper = max(tok_end - MIN_DUR_MS, lower)
+    if tok.timing_source == "unset" and tok.dur_ms == 0:
+        upper = (
+            max(lower, tokens[index + 1].start_ms - MIN_DUR_MS)
+            if index + 1 < len(tokens) and tokens[index + 1].timing_source != "unset"
+            else None
+        )
+    else:
+        upper = max(tok_end - MIN_DUR_MS, lower)
 
-    val = min(max(value, lower), upper)
+    val = max(value, lower)
+    if upper is not None:
+        val = min(val, upper)
     delta = val - tok.start_ms
     tok.start_ms = val
     tok.dur_ms = max(MIN_DUR_MS, tok_end - val)
@@ -264,7 +274,7 @@ def _set_trailing_edge(tokens: list[TokenDTO], index: int, value: int) -> tuple[
     lower = tok.start_ms + MIN_DUR_MS
     trail_shared = False
     upper: int | None = None
-    if index + 1 < len(tokens):
+    if index + 1 < len(tokens) and tokens[index + 1].timing_source != "unset":
         nxt = tokens[index + 1]
         trail_shared = _ends_at(tok, nxt)
         upper = nxt.start_ms + nxt.dur_ms - MIN_DUR_MS if trail_shared else nxt.start_ms
@@ -609,6 +619,104 @@ def shift(
             raise EditError(msg)
         _shift_token(project, line_id, token_index, delta_ms, out)
     return out
+
+
+def split_tokens(project: ProjectDTO, *, line_id: str, start: int, end: int) -> EditOutcome:
+    """按假名拍拆开单元，单拍组合支持手动逐字符拆开。"""
+    _, line = _find_line(project, line_id)
+    if line.is_metadata or not 0 <= start < end <= len(line.tokens):
+        raise EditError("请选择同一行的计时单元")
+    result: list[TokenDTO] = []
+    changed = False
+    for token in line.tokens[start:end]:
+        pieces = split_text_units(token.text)
+        if len(pieces) == 1:
+            pieces = list(token.text)
+        if len(pieces) <= 1:
+            result.append(token)
+            continue
+        unset = token.timing_source == "unset"
+        if not unset and token.dur_ms < len(pieces) * MIN_DUR_MS:
+            raise EditError("单元时长太短，请先增加时长再拆分")
+        weights = [len(piece) for piece in pieces]
+        total = sum(weights)
+        spare = token.dur_ms - len(pieces) * MIN_DUR_MS
+        offset = 0
+        result.extend(token.model_copy(deep=True, update={"text": piece}) for piece in pieces)
+        split = result[-len(pieces) :]
+        chars = 0
+        for i, (part, weight) in enumerate(zip(split, weights, strict=True)):
+            chars += weight
+            boundary = (i + 1) * MIN_DUR_MS + round(spare * chars / total)
+            part.tid = uuid.uuid4().hex
+            part.locked_segmentation = True
+            part.start_ms = token.start_ms + offset if not unset else 0
+            part.dur_ms = boundary - offset if not unset else 0
+            if not unset:
+                _mark_timing_manual(part)
+            offset = boundary
+        changed = True
+    if not changed:
+        raise EditError("选中的单元已不能继续拆分")
+    from kvm.editing.mora_timing import effective_mora_timings, token_bounds
+
+    effective = effective_mora_timings(line)
+    line.tokens[start:end] = result
+    for span, _, _, delta in effective:
+        lo, hi = token_bounds(line, span.start, span.end)
+        for beat in span.times:
+            beat.start_ms += delta
+        span.token_ids = [t.tid for t in line.tokens[lo:hi]]
+        span.token_starts = [t.start_ms for t in line.tokens[lo:hi]]
+        span.token_durations = [t.dur_ms for t in line.tokens[lo:hi]]
+    out = EditOutcome()
+    if any(t.timing_source != "unset" for t in result):
+        out.warnings.append("拆分单元的时间按字符比例分配，请试听复核")
+    return out
+
+
+def merge_tokens(project: ProjectDTO, *, line_id: str, start: int, end: int) -> EditOutcome:
+    """同一行的相邻计时单元合并，字符区间与注音保持不变。"""
+    _, line = _find_line(project, line_id)
+    if line.is_metadata or not 0 <= start < end <= len(line.tokens) or end - start < 2:
+        raise EditError("请选择同一行的至少两个相邻单元")
+    selected = line.tokens[start:end]
+    voices = {t.voice_part or line.voice_part for t in selected}
+    if len(voices) != 1:
+        raise EditError("选中单元属于不同声部，请先统一声部")
+    untimed = [t.timing_source == "unset" for t in selected]
+    if any(untimed) and not all(untimed):
+        raise EditError("选区同时包含已打轴和未打轴单元，请先完成打轴或分别合并")
+    from kvm.editing.mora_timing import effective_mora_timings, token_bounds
+
+    effective = effective_mora_timings(line)
+    first = min(t.start_ms for t in selected)
+    last = max(t.start_ms + t.dur_ms for t in selected)
+    merged = selected[0].model_copy(
+        deep=True,
+        update={
+            "text": "".join(t.text for t in selected),
+            "tid": uuid.uuid4().hex,
+            "start_ms": first if not all(untimed) else 0,
+            "dur_ms": last - first if not all(untimed) else 0,
+            "locked_segmentation": True,
+            "locked_voice": any(t.locked_voice for t in selected),
+        },
+    )
+    if not all(untimed):
+        _mark_timing_manual(merged)
+    line.tokens[start:end] = [merged]
+    for span, _, _, delta in effective:
+        try:
+            lo, hi = token_bounds(line, span.start, span.end)
+        except EditError:
+            continue
+        for beat in span.times:
+            beat.start_ms += delta
+        span.token_ids = [t.tid for t in line.tokens[lo:hi]]
+        span.token_starts = [t.start_ms for t in line.tokens[lo:hi]]
+        span.token_durations = [t.dur_ms for t in line.tokens[lo:hi]]
+    return EditOutcome()
 
 
 def shift_selection(
@@ -1286,31 +1394,6 @@ _LINE_GRANULARITY = "line"
 """时间的权威粒度只到行级。纯文本导入的行就是这一档（见 `lyrics.importer.parse_text`）。"""
 
 
-def _is_ascii_word_char(ch: str) -> bool:
-    return ch.isascii() and (ch.isalnum() or ch in "'’-")
-
-
-def _split_units(text: str) -> list[str]:
-    """把一段新输入切成 token：逐字一个，但**连续的 ASCII 词整块成词**。
-
-    CLAUDE.md §6.2：日语歌词里的英文段落不能按字符切 `\\k`，`sumika` 逐字母
-    扫光是滑稽的，歌词源给出来的也是整块。
-    """
-    units: list[str] = []
-    buf = ""
-    for ch in text:
-        if _is_ascii_word_char(ch):
-            buf += ch
-            continue
-        if buf:
-            units.append(buf)
-            buf = ""
-        units.append(ch)
-    if buf:
-        units.append(buf)
-    return units
-
-
 def _retokenize(old_line: LineDTO, new_text: str) -> list[str]:
     """新行的 token 切分：**改动之外的地方一律沿用老边界**。
 
@@ -1318,11 +1401,18 @@ def _retokenize(old_line: LineDTO, new_text: str) -> list[str]:
     某个新 token **严格重合**才肯绑（§4.4：差一个字宁可不绑），所以边界只要
     整体重切一遍，整行的时间与声部就会全部绑不上——明明只改了一个字。
 
-    改动区域没有老边界可依，按逐字（ASCII 词整块）切；整行只有一个 token 的
-    （纯文本导入的行）保持整行一个 token，不要替用户擅自切成逐字。
+    改动区域和未打轴的纯文本按逐字（ASCII 词整块）切；已有行级时间保留老边界。
     """
     old_text = _line_text(old_line)
     if len(old_line.tokens) <= 1:
+        if all(
+            t.timing_source == _UNSET_TIMING
+            and not t.locked_timing
+            and not t.locked_segmentation
+            and t.dur_ms == 0
+            for t in old_line.tokens
+        ):
+            return split_text_units(new_text)
         # 整行装在一个 token 里（纯文本 / LRC 导入的行，权威粒度只到行级）：
         # 保持整行一个 token。替用户擅自切成逐字等于凭空宣称有了逐字权威。
         return [new_text]
@@ -1337,7 +1427,7 @@ def _retokenize(old_line: LineDTO, new_text: str) -> list[str]:
         if not chunk:
             continue
         if tag != "equal":
-            pieces.extend(_split_units(chunk))
+            pieces.extend(split_text_units(chunk))
             continue
         cut = 0
         for k in range(1, i2 - i1):
@@ -1365,6 +1455,7 @@ def _carry_edited_token(old: TokenDTO, new: TokenDTO) -> None:
     new.timing_source = old.timing_source
     new.timing_granularity = old.timing_granularity
     new.locked_timing = old.locked_timing
+    new.locked_segmentation = old.locked_segmentation
     new.voice_part = old.voice_part
     new.locked_voice = old.locked_voice
     new.tid = old.tid
@@ -1490,7 +1581,9 @@ def set_line_text(project: ProjectDTO, *, line_id: str, text: str) -> EditOutcom
         raise EditError(msg)
 
     old_text = _line_text(old_line)
-    if new_text == old_text:
+    if new_text == old_text and _retokenize(old_line, new_text) == [
+        t.text for t in old_line.tokens
+    ]:
         return out
 
     granularity = old_line.tokens[0].timing_granularity if old_line.tokens else _LINE_GRANULARITY

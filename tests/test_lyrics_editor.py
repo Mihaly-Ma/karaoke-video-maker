@@ -226,3 +226,160 @@ def test_misclassified_credit_can_be_restored_and_undone(client: TestClient) -> 
     assert line["locked"] is True
     assert line["is_metadata"] is False
     assert client.post(f"/api/projects/{p.id}/undo").json()["credits"] == [credit]
+
+
+def test_manual_input_and_added_line_support_per_unit_timing(client: TestClient) -> None:
+    store = app.state.store
+    p = store.create("手动歌词")
+    response = client.post(
+        "/api/lyrics/import",
+        json={
+            "project_id": p.id,
+            "kind": "text",
+            "content": "桜舞って",
+            "replace": True,
+        },
+    )
+    assert response.status_code == 200
+    line = response.json()["lines"][0]
+    assert [t["text"] for t in line["tokens"]] == list("桜舞って")
+    timed = client.post(
+        "/api/editor/timings",
+        json={
+            "project_id": p.id,
+            "items": [
+                {"line_id": line["id"], "token_index": i, "start_ms": 1000 + i * 300, "dur_ms": 300}
+                for i in range(4)
+            ],
+        },
+    )
+    assert timed.status_code == 200
+    assert [t.start_ms for t in ProjectStore(store._root).get(p.id).lines[0].tokens] == [
+        1000,
+        1300,
+        1600,
+        1900,
+    ]
+    assert all(
+        t["timing_source"] == "unset"
+        for t in client.post(f"/api/projects/{p.id}/undo").json()["lines"][0]["tokens"]
+    )
+    response = client.post(
+        "/api/editor/lyrics",
+        json={
+            "project_id": p.id,
+            "rows": [
+                {"line_id": line["id"], "text": "桜舞って"},
+                {"line_id": None, "text": "今日"},
+            ],
+        },
+    )
+    assert response.status_code == 200
+    assert [t["text"] for t in response.json()["lines"][1]["tokens"]] == ["今", "日"]
+
+
+def test_merge_units_preserves_text_ruby_and_undo(client: TestClient) -> None:
+    store = app.state.store
+    p = store.create("合并单元")
+    line = LineDTO(
+        id="merge",
+        tokens=[
+            TokenDTO(text="が", start_ms=1000, dur_ms=200),
+            TokenDTO(text="っ", start_ms=1200, dur_ms=100),
+            TokenDTO(text="こ", start_ms=1300, dur_ms=300),
+        ],
+        ruby=[RubySpanDTO(start=0, end=2, text="がっ")],
+    )
+    store.mutate(p.id, lambda draft: setattr(draft, "lines", [line]))
+    before = store.get(p.id).model_dump()
+    depth = store.history_depth(p.id)[0]
+    response = client.post(
+        "/api/editor/merge-tokens",
+        json={
+            "project_id": p.id,
+            "line_id": "merge",
+            "start": 0,
+            "end": 2,
+        },
+    )
+    assert response.status_code == 200
+    merged = response.json()["lines"][0]
+    assert [t["text"] for t in merged["tokens"]] == ["がっ", "こ"]
+    assert merged["tokens"][0]["start_ms"] == 1000
+    assert merged["tokens"][0]["dur_ms"] == 300
+    assert merged["tokens"][0]["locked_segmentation"]
+    assert merged["ruby"] == before["lines"][0]["ruby"]
+    assert merged["tokens"][1] == before["lines"][0]["tokens"][2]
+    assert ProjectStore(store._root).get(p.id).lines[0].model_dump() == merged
+    assert store.history_depth(p.id)[0] == depth + 1
+    assert client.post(f"/api/projects/{p.id}/undo").json() == before
+    assert client.post(f"/api/projects/{p.id}/redo").json()["lines"][0] == merged
+
+
+def test_unset_merge_survives_text_save_and_rejects_mixed_timing(client: TestClient) -> None:
+    store = app.state.store
+    p = store.create("未打轴合并")
+    client.post("/api/lyrics/import", json={"project_id": p.id, "kind": "text", "content": "がっ"})
+    line = store.get(p.id).lines[0]
+    req = {"project_id": p.id, "line_id": line.id, "start": 0, "end": 2}
+    response = client.post("/api/editor/merge-tokens", json=req)
+    assert response.status_code == 200
+    token = response.json()["lines"][0]["tokens"][0]
+    assert token["text"] == "がっ" and token["timing_source"] == "unset"
+    assert token["start_ms"] == token["dur_ms"] == 0
+    saved = client.post(
+        "/api/editor/lyrics",
+        json={"project_id": p.id, "rows": [{"line_id": line.id, "text": "がっ"}]},
+    )
+    assert len(saved.json()["lines"][0]["tokens"]) == 1
+    client.post(f"/api/projects/{p.id}/undo")
+    store.mutate(p.id, lambda draft: setattr(draft.lines[0].tokens[0], "timing_source", "manual"))
+    before = store.get(p.id).model_dump()
+    assert client.post("/api/editor/merge-tokens", json=req).status_code == 400
+    assert store.get(p.id).model_dump() == before
+
+
+def test_split_merged_units_retains_range_reading_and_undo(client: TestClient) -> None:
+    store = app.state.store
+    p = store.create("拆分单元")
+    line = LineDTO(
+        id="split",
+        tokens=[TokenDTO(text="がっ", start_ms=1000, dur_ms=300)],
+        ruby=[RubySpanDTO(start=0, end=2, text="がっ")],
+    )
+    store.mutate(p.id, lambda draft: setattr(draft, "lines", [line]))
+    before = store.get(p.id).model_dump()
+    depth = store.history_depth(p.id)[0]
+    req = {"project_id": p.id, "line_id": "split", "start": 0, "end": 1}
+    response = client.post("/api/editor/split-tokens", json=req)
+    assert response.status_code == 200
+    saved = response.json()["lines"][0]
+    assert [t["text"] for t in saved["tokens"]] == ["が", "っ"]
+    assert [(t["start_ms"], t["dur_ms"]) for t in saved["tokens"]] == [(1000, 150), (1150, 150)]
+    assert saved["ruby"] == before["lines"][0]["ruby"]
+    assert ProjectStore(store._root).get(p.id).lines[0].model_dump() == saved
+    assert store.history_depth(p.id)[0] == depth + 1
+    assert client.post(f"/api/projects/{p.id}/undo").json() == before
+    assert client.post(f"/api/projects/{p.id}/redo").json()["lines"][0] == saved
+
+
+def test_split_mora_combination_and_short_timing_failure_are_atomic(client: TestClient) -> None:
+    store = app.state.store
+    p = store.create("自定义拆分")
+    line = LineDTO(
+        id="split", tokens=[TokenDTO(text="きょ", start_ms=0, dur_ms=0, timing_source="unset")]
+    )
+    store.mutate(p.id, lambda draft: setattr(draft, "lines", [line]))
+    req = {"project_id": p.id, "line_id": "split", "start": 0, "end": 1}
+    response = client.post("/api/editor/split-tokens", json=req)
+    assert [t["text"] for t in response.json()["lines"][0]["tokens"]] == ["き", "ょ"]
+    assert all(
+        t["timing_source"] == "unset" and t["dur_ms"] == 0
+        for t in response.json()["lines"][0]["tokens"]
+    )
+    client.post(f"/api/projects/{p.id}/undo")
+    store.mutate(p.id, lambda draft: setattr(draft.lines[0].tokens[0], "dur_ms", 10))
+    store.mutate(p.id, lambda draft: setattr(draft.lines[0].tokens[0], "timing_source", "manual"))
+    before = store.get(p.id).model_dump()
+    assert client.post("/api/editor/split-tokens", json=req).status_code == 400
+    assert store.get(p.id).model_dump() == before

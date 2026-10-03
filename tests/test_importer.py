@@ -249,3 +249,36 @@ def test_custom_credit_content_is_not_normalized() -> None:
     project.style.credits_text = "词：甲\n编曲：乙"
     restored = ProjectDTO.model_validate_json(project.model_dump_json())
     assert restored.style.credits_text == "词：甲\n编曲：乙"
+
+
+def test_manual_text_is_split_into_untimed_units() -> None:
+    lines = parse_text("桜舞って\n你好sumika\n桜舞って")
+    assert [t.text for t in lines[0].tokens] == list("桜舞って")
+    assert [t.text for t in lines[1].tokens] == ["你", "好", "sumika"]
+    assert all(
+        t.start_ms == t.dur_ms == 0 and t.timing_source == "unset" and not t.locked_timing
+        for line in lines
+        for t in line.tokens
+    )
+    assert len(_tids(lines)) == len(set(_tids(lines)))
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("きょう", ["きょ", "う"]),
+        ("がっこう", ["が", "っ", "こ", "う"]),
+        ("ファッション", ["ファ", "ッ", "ショ", "ン"]),
+        ("コーヒー", ["コ", "ー", "ヒ", "ー"]),
+        ("ティッシュ", ["ティ", "ッ", "シュ"]),
+        ("あぁ", ["あ", "ぁ"]),
+        ("ウィ", ["ウィ"]),
+        ("っゃ", ["っ", "ゃ"]),
+        ("今日きょうsumika", ["今", "日", "きょ", "う", "sumika"]),
+    ],
+)
+def test_manual_kana_units_follow_mora(text: str, expected: list[str]) -> None:
+    line = parse_text(text)[0]
+    assert [t.text for t in line.tokens] == expected
+    assert line_text(line) == text
+    assert all(t.start_ms == t.dur_ms == 0 and t.timing_source == "unset" for t in line.tokens)

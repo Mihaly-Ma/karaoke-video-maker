@@ -13,9 +13,11 @@ export default function MoraTap({ onExit }: { onExit: () => void }) {
   const groups = useMemo(() => (project?.lines ?? []).filter((l) => !l.is_metadata).flatMap((line) =>
     buildUnits(line).filter((u) => u.kind !== 'other').map((u) => {
       const reading = toHiragana(u.span?.text ?? u.text)
-      const moras = toCodePoints(reading).every(isKana) ? splitMora(reading) : []
-      const record = line.mora_timings?.find((r) => r.start === u.start && r.end === u.end && r.surface === u.text && toHiragana(r.reading) === reading)
       const tokens = line.tokens.slice(u.tokenIndex, u.tokenEnd)
+      const customKana = u.kind === 'kana' && tokens.some((tk) => tk.locked_segmentation) && tokens.map((tk) => tk.text).join('') === u.text
+      const moras = toCodePoints(reading).every(isKana)
+        ? customKana ? tokens.flatMap((tk) => tk.locked_segmentation ? [toHiragana(tk.text)] : splitMora(toHiragana(tk.text))) : splitMora(reading) : []
+      const record = line.mora_timings?.find((r) => r.start === u.start && r.end === u.end && r.surface === u.text && toHiragana(r.reading) === reading)
       const shifts = record && tokens.length === record.token_ids.length && tokens.every((tk, i) => tk.tid === record.token_ids[i] && tk.dur_ms === record.token_durations[i])
         ? tokens.map((tk, i) => tk.start_ms - record.token_starts[i]) : []
       const offset = shifts.length && shifts.every((v) => v === shifts[0]) ? shifts[0] : null

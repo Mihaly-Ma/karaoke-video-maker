@@ -68,6 +68,7 @@ class TokenDTO(BaseModel):
     """
 
     locked_timing: bool = False
+    locked_segmentation: bool = False
 
     timing_granularity: str = "provider_char"
     """该 token 时间的**权威粒度**：`provider_char` / `mora` / `line`。
@@ -758,6 +759,13 @@ class SetMoraTimingsRequest(BaseModel):
 
 
 class ShiftRange(BaseModel):
+    line_id: str
+    start: int = Field(ge=0)
+    end: int = Field(gt=0)
+
+
+class TokenRangeRequest(BaseModel):
+    project_id: str
     line_id: str
     start: int = Field(ge=0)
     end: int = Field(gt=0)

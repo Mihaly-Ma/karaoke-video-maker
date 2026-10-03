@@ -120,6 +120,8 @@ interface ProjectState {
 
   /** 三级调轴统一入口。scope=global 时忽略 target。 */
   shift: (scope: 'global' | 'line' | 'token', deltaMs: number) => Promise<void>
+  splitTokens: (lineId: string, start: number, end: number) => Promise<void>
+  mergeTokens: (lineId: string, start: number, end: number) => Promise<void>
   setMoraTimings: (items: MoraTimingItem[]) => Promise<void>
   shiftSelection: (ranges: { line_id: string; start: number; end: number }[], deltaMs: number) => Promise<void>
   setTiming: (lineId: string, tokenIndex: number, startMs?: number, durMs?: number) => Promise<void>
@@ -260,6 +262,10 @@ export const useProject = create<ProjectState>((set, get) => {
         }),
       )
     },
+
+    splitTokens: (lineId, start, end) => withProject((id) => api.splitTokens(id, lineId, start, end)),
+
+    mergeTokens: (lineId, start, end) => withProject((id) => api.mergeTokens(id, lineId, start, end)),
 
     setMoraTimings: (items) => withProject((id) => api.setMoraTimings(id, items)),
 

@@ -50,6 +50,7 @@ from kvm.api.schemas import (
     ShiftRequest,
     ShiftSelectionRequest,
     SplitLineRequest,
+    TokenRangeRequest,
 )
 from kvm.api.store import ProjectStore
 from kvm.editing import ops
@@ -126,6 +127,28 @@ def mora_timings(req: SetMoraTimingsRequest, request: Request, response: Respons
         req.project_id,
         "注音打轴",
         lambda draft: set_mora_timings(draft, req.items),
+    )
+
+
+@router.post("/split-tokens", response_model=ProjectDTO)
+def split_tokens(req: TokenRangeRequest, request: Request, response: Response) -> ProjectDTO:
+    return _apply(
+        request,
+        response,
+        req.project_id,
+        "拆分单元",
+        lambda draft: ops.split_tokens(draft, line_id=req.line_id, start=req.start, end=req.end),
+    )
+
+
+@router.post("/merge-tokens", response_model=ProjectDTO)
+def merge_tokens(req: TokenRangeRequest, request: Request, response: Response) -> ProjectDTO:
+    return _apply(
+        request,
+        response,
+        req.project_id,
+        "合并单元",
+        lambda draft: ops.merge_tokens(draft, line_id=req.line_id, start=req.start, end=req.end),
     )
 
 
